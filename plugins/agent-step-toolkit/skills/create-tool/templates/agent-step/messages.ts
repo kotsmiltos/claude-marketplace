@@ -27,6 +27,10 @@ export interface SystemMessages {
   abort_done: string;
   /** `abort_pending_input` ran with nothing pending (idempotent no-op). */
   abort_nothing: string;
+  /** Spoken to the caller when the auto-handoff threshold is reached after
+   *  repeated backend failures. Delivered as the handoff `context` and
+   *  repeated in the synthetic `auto_handoff` result body. */
+  auto_handoff: string;
 }
 
 /** Neutral English defaults. Overridable per-host via `BuildAgentStepToolOptions.messages`. */
@@ -42,6 +46,8 @@ export const DEFAULT_SYSTEM_MESSAGES: SystemMessages = {
   wrong_flow: "Something went wrong with the operation. Let's start over.",
   abort_done: "Okay, the operation has been cancelled.",
   abort_nothing: "There is no operation in progress.",
+  auto_handoff:
+    "I'm sorry, due to a technical issue I was unable to complete the operation. Can I help you with something else?",
 };
 
 /** Shallow-merge host overrides over the defaults. Returns the defaults object

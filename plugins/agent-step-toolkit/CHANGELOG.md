@@ -12,9 +12,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.6.0] — 2026-06-26
+
+Additive: an **auto-handoff safety net** — the runner counts consecutive backend failures and
+auto-triggers a handoff at a threshold, so a customer is never trapped in an error loop. Plus a
+**silent off_topic hand-back** and **split delegate timeouts**. Reconciled from multiple downstream
+agents that had each grown the feature with hard-coded, project-specific failure codes; the library
+version is **host-configurable** (no domain codes baked in). No
+breaking change. Suite grows 83 → 89.
+Migration: [migrations/1.5.0-to-1.6.0.md](migrations/1.5.0-to-1.6.0.md).
+
+### Added
+- **Auto-handoff** (`agent-step-api.md` `<auto_handoff>`): new library-managed `errorCount` slot
+  plus three `BuildAgentStepToolOptions` — `backendFailureCodes?: string[]` (host verdicts that
+  count as a backend failure; the runner-raised `executor_error` always counts),
+  `errorHandoffThreshold?: number` (default 3), and `onErrorThreshold?(update, state)` (host hook
+  to inject a custom handoff signal). At the threshold the runner writes the library `handoff` slot
+  (`reason: "abandon"`) and/or calls the hook, resets the counter, and appends a synthetic
+  `auto_handoff` step result. **Inert** unless a handoff path (the `handoff` opt or
+  `onErrorThreshold`) is configured.
+- `SystemMessages.auto_handoff` — the spoken line at the threshold (neutral English default;
+  override via `messages`).
+- `HandoffDelegateTarget.connectTimeoutMs` — separate connect-phase timeout for delegate runs.
+
+### Changed
+- **off_topic hand-back is now silent**: `createHandoffNode` emits empty spoken content
+  (`success_message: ""`) for `off_topic` instead of `terminateMessage` — a topic change is an
+  agent-to-agent re-route the destination agent narrates. `terminateMessage` is now only the
+  delegate-FAILURE fallback. `completed` / `abandon` are unchanged.
+- Delegate timeouts split: connect phase defaults to 10s (`connectTimeoutMs`), streaming phase to
+  20s (`timeoutMs`, was a single 60s).
+
 ## [1.5.0] — 2026-06-26
 
-Additive surface + two flow-control hardenings, absorbed from the set-pin agent. Host-overridable
+Additive surface + two flow-control hardenings, absorbed from a downstream project. Host-overridable
 runner system messages (new `messages.ts`), an honesty hook for handback closings, and stricter
 double-entry / OTP ordering so a single batch can't bypass the second PIN entry. No breaking change;
 the new APIs are opt-in and the guards only refuse batch shapes that were never safe. Suite grows

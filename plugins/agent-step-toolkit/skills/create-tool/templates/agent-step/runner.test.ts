@@ -10,7 +10,7 @@ import {
   type BuildAgentStepToolOptions,
 } from "./runner.js";
 import type { ExecutorRegistry, VerifierRegistry } from "./types.js";
-import type { AwaitingInput, CurrentFlow } from "./state.js";
+import type { AwaitingInput, CurrentFlow, HandoffRequest } from "./state.js";
 import { DEFAULT_SYSTEM_MESSAGES } from "./messages.js";
 
 interface S {
@@ -1906,4 +1906,159 @@ test("composed tool description indexes actions by summary, not full description
     "full action description must NOT be duplicated in the composed tool description",
   );
   assert.match(desc, /- `verify_card`/, "an action without a summary is listed by name");
+});
+
+// ─── Auto-handoff on repeated backend failures ──────────────────────────── //
+
+interface AHState {
+  errorCount?: number | null;
+  handoff?: HandoffRequest | null;
+}
+
+const ahAnnotation = Annotation.Root({
+  errorCount: Annotation<number | null>({ reducer: (_, n) => n ?? null, default: () => null }),
+  handoff: Annotation<HandoffRequest | null>({ reducer: (_, n) => n ?? null, default: () => null }),
+});
+
+const ahSelectors = { call_backend: (s: AHState) => s };
+
+/** One action whose executor fails controllably:
+ *  - mode "throw"   → throws → the runner records `executor_error`
+ *  - mode "verdict" → returns ok:false with `error: code`
+ *  - mode "ok"      → succeeds */
+function makeAhOpts(
+  extra: Partial<
+    BuildAgentStepToolOptions<AHState, "call_backend", never, typeof ahSelectors>
+  > = {},
+): BuildAgentStepToolOptions<AHState, "call_backend", never, typeof ahSelectors> {
+  const config = defineConfig<"call_backend", never>({
+    tool: { name: "ah_tool", description: "auto-handoff test tool" },
+    actions: {
+      call_backend: {
+        description: "call a backend that may fail",
+        paramsSchema: z.object({ mode: z.string(), code: z.string().optional() }),
+        prereqs: [],
+      },
+    },
+  });
+  const executors: ExecutorRegistry<AHState, typeof ahSelectors> = {
+    call_backend: async (raw) => {
+      const p = raw as { mode: string; code?: string };
+      if (p.mode === "throw") throw new Error("backend exploded");
+      if (p.mode === "verdict") return { resultBody: { summary: "failed", error: p.code }, ok: false };
+      return { resultBody: { summary: "ok" }, ok: true };
+    },
+  };
+  return {
+    config,
+    stateAnnotation: ahAnnotation,
+    selectors: ahSelectors,
+    executors,
+    verifiers: {} as VerifierRegistry<AHState>,
+    ...extra,
+  };
+}
+
+test("auto-handoff: 3 consecutive executor_error batches hit the threshold and escalate", async () => {
+  let fired = 0;
+  const opts = makeAhOpts({
+    onErrorThreshold: (update) => {
+      fired++;
+      (update as Record<string, unknown>).customHandoff = true;
+    },
+  });
+  let state: AHState = {};
+  let res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], state);
+  state = { ...state, ...res.committed };
+  assert.equal(state.errorCount, 1, "first failure increments");
+  res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], state);
+  state = { ...state, ...res.committed };
+  assert.equal(state.errorCount, 2, "second failure increments");
+  res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], state);
+  state = { ...state, ...res.committed };
+  assert.equal(fired, 1, "callback fires exactly once, at the threshold");
+  assert.equal(state.errorCount, 0, "counter resets after escalation");
+  const synthetic = res.body.results[res.body.results.length - 1];
+  assert.equal(synthetic.action, "auto_handoff");
+  assert.equal(synthetic.isHandoff, true);
+  assert.equal(synthetic.successMessage, DEFAULT_SYSTEM_MESSAGES.auto_handoff);
+  assert.equal(res.body.failed_at, undefined, "failure cleared once escalated");
+});
+
+test("auto-handoff: a host-declared backendFailureCode counts toward the threshold", async () => {
+  let fired = 0;
+  const opts = makeAhOpts({
+    backendFailureCodes: ["service_error"],
+    errorHandoffThreshold: 2,
+    onErrorThreshold: () => {
+      fired++;
+    },
+  });
+  let state: AHState = {};
+  let res = await runSteps(
+    opts,
+    [{ action: "call_backend", params: { mode: "verdict", code: "service_error" } }],
+    state,
+  );
+  state = { ...state, ...res.committed };
+  assert.equal(state.errorCount, 1, "a listed verdict increments");
+  res = await runSteps(
+    opts,
+    [{ action: "call_backend", params: { mode: "verdict", code: "service_error" } }],
+    state,
+  );
+  state = { ...state, ...res.committed };
+  assert.equal(fired, 1, "custom threshold (2) reached → escalate");
+  assert.equal(state.errorCount, 0);
+});
+
+test("auto-handoff: an unlisted verdict (recoverable user error) never escalates", async () => {
+  let fired = 0;
+  const opts = makeAhOpts({ errorHandoffThreshold: 2, onErrorThreshold: () => { fired++; } });
+  let state: AHState = {};
+  for (let i = 0; i < 3; i++) {
+    const res = await runSteps(
+      opts,
+      [{ action: "call_backend", params: { mode: "verdict", code: "user_mistake" } }],
+      state,
+    );
+    state = { ...state, ...res.committed };
+  }
+  assert.equal(fired, 0, "recoverable failures never trigger auto-handoff");
+  assert.ok(!state.errorCount, "counter not incremented by recoverable failures");
+});
+
+test("auto-handoff: a successful batch resets the error counter", async () => {
+  const opts = makeAhOpts({ onErrorThreshold: () => {} });
+  let state: AHState = {};
+  let res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], state);
+  state = { ...state, ...res.committed };
+  assert.equal(state.errorCount, 1);
+  res = await runSteps(opts, [{ action: "call_backend", params: { mode: "ok" } }], state);
+  state = { ...state, ...res.committed };
+  assert.equal(state.errorCount, 0, "success resets the counter");
+});
+
+test("auto-handoff: inert when neither handoff nor onErrorThreshold is configured", async () => {
+  const opts = makeAhOpts({});
+  let state: AHState = {};
+  for (let i = 0; i < 4; i++) {
+    const res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], state);
+    state = { ...state, ...res.committed };
+    assert.equal(res.body.failed_at, 0, "failure stands; no synthetic handoff");
+  }
+  assert.equal(state.errorCount ?? null, null, "counter untouched without a mechanism");
+});
+
+test("auto-handoff: writes the library `handoff` slot at threshold when handoff is enabled", async () => {
+  const opts = makeAhOpts({
+    handoff: { offTopic: { mode: "terminate" }, terminateMessage: "bye" },
+    errorHandoffThreshold: 1,
+  });
+  const res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], {});
+  const committed = res.committed as AHState;
+  assert.equal(committed.handoff?.reason, "abandon");
+  assert.equal(committed.handoff?.context, DEFAULT_SYSTEM_MESSAGES.auto_handoff);
+  const synthetic = res.body.results[res.body.results.length - 1];
+  assert.equal(synthetic.isHandoff, true);
 });

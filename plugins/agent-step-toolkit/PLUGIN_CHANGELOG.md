@@ -11,10 +11,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.16.0] — 2026-06-26
+
+Ships **agent-step library 1.6.0** (`/pull-library` recommended for downstream projects — note the
+behavior change below). Adds an auto-handoff safety net, a silent off_topic hand-back, and split
+delegate timeouts.
+
+### Added
+- Library **1.6.0**: auto-handoff on repeated backend failures — new library-managed `errorCount`
+  slot plus opt-in `backendFailureCodes` / `errorHandoffThreshold` / `onErrorThreshold` on
+  `buildAgentStepTool` (host-configurable; the library bakes in no domain codes);
+  `SystemMessages.auto_handoff`; `HandoffDelegateTarget.connectTimeoutMs`. Docs:
+  `create-tool/references/agent-step-api.md` (new `<auto_handoff>` section, the `errorCount`
+  library-managed slot), `streaming-and-channel-contract.md`, and SKILL prose. See
+  [CHANGELOG.md](CHANGELOG.md) and [migrations/1.5.0-to-1.6.0.md](migrations/1.5.0-to-1.6.0.md).
+
+### Changed
+- Library behavior: the off_topic hand-back is now **silent** (empty spoken content;
+  `terminateMessage` becomes the delegate-failure fallback); delegate timeouts split into a connect
+  phase (10s) and a streaming phase (20s). **Downstream impact:** `/pull-library` replaces the
+  vendored library; projects opt into auto-handoff via config and should re-verify off_topic UX.
+
+### Fixed
+- `create-tool` workflow: corrected the stale library unit-test count (83 → 89).
+
 ## [0.15.0] — 2026-06-26
 
 Ships **agent-step library 1.5.0** (was 1.4.0). `/pull-library` recommended for downstream projects —
-note the behavior change below. Absorbed from the set-pin agent.
+note the behavior change below. Absorbed from a downstream project.
 
 ### Added
 - Library **1.5.0**: new `messages.ts` — the runner's own refusal/error `summary` strings are now

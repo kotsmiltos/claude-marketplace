@@ -151,7 +151,7 @@ service catalog and the prompt policy differ.
 
 ### Two mechanisms, one kwargs contract
 
-- **Scaffold tool action** (orchestrator outbound routing; Sofia-style): a per-tool handoff
+- **Scaffold tool action** (orchestrator outbound routing): a per-tool handoff
   executor writes the scaffold `pendingHandoff` slot; the bootstrap `agent.ts` post-model
   hook stamps the kwargs onto the final LLM reply — the agent SPEAKS the transition
   (token-streamed success message), then the middleware transfers.
@@ -160,9 +160,11 @@ service catalog and the prompt policy differ.
   action (sole-step, no prereqs, lockdown-bypassing) writing the library `handoff` slot; the
   host graph's `createHandoffNode(spec)` resolves it ATOMICALLY (node-built final message, no
   second LLM pass): every non-delegate resolution emits the handback kwargs with the reason's
-  signal — `off_topic` speaks the fixed envelope (`terminateMessage`); `completed` / `abandon`
-  (agent-step ≥ 1.4.0) speak the LLM-composed closing carried in the request's `context` —
-  while delegate mode (off_topic only) calls the delegate deployment directly and keeps the
+  signal — `off_topic` is a **SILENT** hand-back (agent-step ≥ 1.6.0): empty spoken content
+  (`success_message: ""`), because a topic change is an agent-to-agent re-route the destination
+  agent narrates, not this one (`terminateMessage` is now only the delegate-FAILURE fallback);
+  `completed` / `abandon` (agent-step ≥ 1.4.0) speak the LLM-composed closing carried in the
+  request's `context` — while delegate mode (off_topic only) calls the delegate deployment directly and keeps the
   conversation — its final message is NOT a handoff (no `is_handoff`; informational
   `delegated_to` only). Requires a hand-rolled graph (conditional edge — `createReactAgent`
   can't express it) and clients/middleware streaming `["messages-tuple", "custom"]` for the

@@ -133,6 +133,12 @@ function buildMergerFromAnnotation<T>(
  *  `currentFlow`. Disallowed in user-defined `config.actions`. */
 const ABORT_ACTION = "abort_pending_input";
 
+/** DEFAULT number of consecutive backend-failure batches before the runner
+ *  triggers an automatic handoff. Overridable per-call via
+ *  `BuildAgentStepToolOptions.errorHandoffThreshold`. Resets to zero on any
+ *  batch that does not end in a backend failure. */
+const ERROR_HANDOFF_THRESHOLD = 3;
+
 /** Applied when `requiresConfirmation: true` is set bare (no opts object) and
  *  as the fill-in for any field omitted from an explicit opts object. */
 const CONFIRMATION_DEFAULTS: Required<ConfirmationOpts> = {
@@ -305,6 +311,22 @@ export interface BuildAgentStepToolOptions<
    *  voice-safe wording (e.g. a TTS agent) injects it here; omit to use the
    *  defaults. The library never imports host strings — see messages.ts. */
   messages?: Partial<SystemMessages>;
+  /** Called when the consecutive backend-failure counter reaches the threshold
+   *  (`errorHandoffThreshold`, default 3). The host uses this to inject its
+   *  preferred handoff signal into `update` (e.g. write a custom slot). Runs in
+   *  addition to the library-managed `handoff` slot write when `handoff` is also
+   *  provided — projects that use only a custom mechanism omit `handoff` and
+   *  rely solely on this callback. */
+  onErrorThreshold?: (update: Record<string, unknown>, state: T) => void;
+  /** Executor-returned verdict `error` codes that count as a backend/network
+   *  failure for the auto-handoff counter, IN ADDITION to the runner-raised
+   *  `executor_error` (which always counts). List only true backend/network
+   *  failures — user mistakes and business-logic refusals must NOT be listed,
+   *  or the counter will escalate recoverable situations. */
+  backendFailureCodes?: string[];
+  /** Consecutive backend-failure batches before the runner auto-triggers a
+   *  handoff. Default `ERROR_HANDOFF_THRESHOLD` (3). */
+  errorHandoffThreshold?: number;
 }
 
 interface PlannedStep {
@@ -1460,6 +1482,67 @@ export async function runSteps<
     results,
   };
   if (failedAt !== undefined) body.failed_at = failedAt;
+
+  // ─── Error counter + auto-handoff ──────────────────────────────────────
+  // Counts consecutive batches whose failing step is a backend/network failure
+  // and auto-triggers a handoff once the count reaches the threshold, so a
+  // customer is never trapped in an unrecoverable error loop. The runner-raised
+  // `executor_error` (an executor threw, uncaught) ALWAYS counts; a host adds
+  // its own executor-returned verdict codes via `opts.backendFailureCodes`.
+  // List only true backend/network failures there — user mistakes (wrong OTP,
+  // value mismatch) and business-logic refusals are recoverable and must NOT be
+  // listed. The counter resets to 0 on any batch that does not end in a backend
+  // failure. The feature is inert unless a handoff mechanism is available (the
+  // `handoff` opt or an `onErrorThreshold` callback).
+  const autoHandoffEnabled = handoffEnabled || opts.onErrorThreshold != null;
+  if (autoHandoffEnabled) {
+    const prevErrorCount =
+      ((initialState as Record<string, unknown>).errorCount as number | null | undefined) ?? 0;
+    const backendFailureCodes = new Set<string>([
+      "executor_error",
+      ...(opts.backendFailureCodes ?? []),
+    ]);
+    const threshold = opts.errorHandoffThreshold ?? ERROR_HANDOFF_THRESHOLD;
+    const failedError =
+      body.failed_at !== undefined ? body.results[body.failed_at]?.error : undefined;
+    const isBackendFailure =
+      typeof failedError === "string" && backendFailureCodes.has(failedError);
+    const committedRec = committed as Record<string, unknown>;
+    if (isBackendFailure) {
+      const newErrorCount = prevErrorCount + 1;
+      if (newErrorCount >= threshold) {
+        // Threshold reached → escalate. Write the library `handoff` slot (when
+        // handoff is enabled) and/or let the host inject a custom signal.
+        if (handoffEnabled && !committedRec.handoff) {
+          committedRec.handoff = {
+            reason: "abandon",
+            context: msgs.auto_handoff,
+          } satisfies HandoffRequest;
+        }
+        opts.onErrorThreshold?.(committedRec, initialState);
+        committedRec.errorCount = 0;
+        const handoffInstruction =
+          `Handoff triggered after repeated backend failures. ` +
+          `Speak this exact message to the caller: "${msgs.auto_handoff}" ` +
+          `Then stop — do not offer further assistance; the channel will handle routing.`;
+        body.results.push({
+          action: "auto_handoff",
+          ok: true,
+          isHandoff: true,
+          signal: "abandon",
+          successMessage: msgs.auto_handoff,
+          summary: handoffInstruction,
+        });
+        body.summary = handoffInstruction;
+        delete body.failed_at;
+      } else {
+        committedRec.errorCount = newErrorCount;
+      }
+    } else if (prevErrorCount > 0) {
+      committedRec.errorCount = 0;
+    }
+  }
+
   return { body, committed };
 }
 

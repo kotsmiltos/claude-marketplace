@@ -224,7 +224,7 @@ function nodeConfig(events: unknown[], threadId = "t-1") {
   } as any;
 }
 
-test("handoff node (terminate) emits events, clears the slot, appends the envelope", async () => {
+test("handoff node (terminate) off_topic is SILENT — empty content, slot cleared, envelope emitted", async () => {
   const node = createHandoffNode<S>({
     offTopic: { mode: "terminate" },
     terminateMessage: "Transferring you now.",
@@ -236,19 +236,22 @@ test("handoff node (terminate) emits events, clears the slot, appends the envelo
   );
   assert.equal(update.handoff, null);
   const [message] = update.messages as AIMessage[];
-  assert.equal(message.content, "Transferring you now.");
+  // off_topic is a silent agent-to-agent hand-back — the caller hears nothing
+  // from this agent; the router/destination owns the reply. The terminateMessage
+  // is NOT spoken on a topic-change redirect.
+  assert.equal(message.content, "");
   assert.deepEqual(message.additional_kwargs, {
     is_handoff: true,
     handoff_type: "off_topic",
     handoff_reason: "wants a transfer",
     handoff_metadata: {
       service_type: "off_topic",
-      success_message: "Transferring you now.",
+      success_message: "",
     },
   });
   const types = (events as { type: string }[]).map((e) => e.type);
   assert.deepEqual(types, ["handoff", "handoff_complete"]);
-  assert.equal((events[1] as { content: string }).content, "Transferring you now.");
+  assert.equal((events[1] as { content: string }).content, "");
 });
 
 test("handoff node (completed) speaks the LLM-composed closing with the completed signal", async () => {

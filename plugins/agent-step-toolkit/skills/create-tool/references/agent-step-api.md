@@ -248,6 +248,10 @@ interface HandoffRequest {
 }
 ```
 
+## errorCount (library-managed)
+
+The consecutive backend-failure counter for the auto-handoff guard (`<auto_handoff>`). `number | null`; rides `agentStepStateSpec` / `agentStepZodShape` like the other slots. The runner increments it when a batch ends in a backend failure, resets it to 0 on a clean batch, and clears it to 0 when it auto-triggers a handoff at the threshold. Executors must never write it.
+
 </types>
 
 <conventions>
@@ -477,8 +481,8 @@ Pass `handoff: HandoffSpec<T>` to `buildAgentStepTool`. The runner then:
 ```ts
 interface HandoffSpec<T> {
   offTopic: { mode: "terminate" }
-          | { mode: "delegate"; url: string; assistantId: string;
-              replyNode?: string; timeoutMs?: number; headers?: Record<string, string> };
+          | { mode: "delegate"; url: string; assistantId: string; replyNode?: string;
+              connectTimeoutMs?: number; timeoutMs?: number; headers?: Record<string, string> };
   terminateMessage: string;          // spoken envelope; also the delegate-failure fallback
   resolveClosingMessage?: (state: T, request: HandoffRequest) => string | undefined;
                                      // OPTIONAL — override the completed/abandon closing line from
@@ -517,6 +521,7 @@ interface SystemMessages {
   wrong_flow: string;         // a flow-scoped step ran against the wrong flow
   abort_done: string;         // abort_pending_input cleared a pending gate / active flow
   abort_nothing: string;      // abort_pending_input ran with nothing pending (no-op)
+  auto_handoff: string;       // spoken when the auto-handoff threshold is hit (see <auto_handoff>)
 }
 ```
 
@@ -524,6 +529,27 @@ A host overrides any subset via `buildAgentStepTool({ messages })` (`Partial<Sys
 
 Exports (from `index.ts`): `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages(overrides?)`, type `SystemMessages`. Note these are the **runner's own** summaries only — an executor's `resultBody.summary` (the LLM-facing per-action text) is authored by the executor and is unaffected.
 </system_messages>
+
+<auto_handoff>
+## Auto-handoff on repeated backend failures
+
+A safety net so a customer is never trapped in an unrecoverable backend-error loop. The runner keeps a consecutive **backend-failure** counter in the library-managed `errorCount` slot; when it reaches a threshold the runner auto-triggers a handoff.
+
+**What counts as a backend failure.** The runner-raised **`executor_error`** (an executor threw, uncaught) ALWAYS counts. A host adds its own executor-returned verdict `error` codes via `BuildAgentStepToolOptions.backendFailureCodes` — list ONLY true backend/network failures there (e.g. `"service_error"`). User mistakes (wrong OTP, value mismatch) and business-logic refusals are recoverable and must NOT be listed, or the counter will escalate recoverable situations. The counter resets to 0 on any batch that does not end in a backend failure.
+
+```ts
+// BuildAgentStepToolOptions additions
+backendFailureCodes?: string[];   // host verdicts that count (executor_error always counts)
+errorHandoffThreshold?: number;   // default 3
+onErrorThreshold?: (update: Record<string, unknown>, state: T) => void;
+                                  // host hook fired at the threshold — inject a custom
+                                  // handoff signal (e.g. write a scaffold `pendingHandoff` slot)
+```
+
+**At the threshold the runner:** (1) writes the library `handoff` slot `{ reason: "abandon", context: messages.auto_handoff }` when the `handoff` opt is enabled; (2) calls `onErrorThreshold(committed, state)` if provided; (3) resets `errorCount` to 0; (4) appends a synthetic step result `{ action: "auto_handoff", ok: true, isHandoff: true, signal: "abandon", successMessage: <auto_handoff> }`, sets `body.summary` to a "speak this then stop" instruction, and clears `failed_at`.
+
+**Inert by default.** The whole mechanism is skipped unless a handoff path exists — i.e. the `handoff` opt is provided OR `onErrorThreshold` is set. A tool with neither never touches `errorCount`. Customize the spoken line via the `auto_handoff` system message (`<system_messages>`).
+</auto_handoff>
 
 <result_envelope>
 ## What the LLM sees per tool call
@@ -577,7 +603,7 @@ Runtime errors raised by the runner (not construction-time, but loud):
 | `declares startsMatchFor "X" but that consumer doesn't declare requiresMatch` | Capturer / consumer mismatch |
 | `otp_blocked_match_pending` (step error) | An `issuesOtp` step ran while a double-entry match gate was still pending — consume the match before issuing the OTP (see `<otp_lifecycle>`) |
 
-The runner does NOT validate at runtime that you declared `awaitingInput` / `currentFlow` / `pagedRead` / `handoff` in state when using the lifecycle / pagination / handoff opts. If you forget, the runner will write a patch to a non-existent slot and the library-managed gates will silently misbehave. Always add all four slots — spreading `agentStepStateSpec` / `agentStepZodShape` (as the bootstrap state template does) brings them in together.
+The runner does NOT validate at runtime that you declared `awaitingInput` / `currentFlow` / `pagedRead` / `handoff` / `errorCount` in state when using the lifecycle / pagination / handoff / auto-handoff opts. If you forget, the runner will write a patch to a non-existent slot and the library-managed gates will silently misbehave. Always add all five slots — spreading `agentStepStateSpec` / `agentStepZodShape` (as the bootstrap state template does) brings them in together.
 </construction_time_checks>
 
 <key_files_to_inspect>

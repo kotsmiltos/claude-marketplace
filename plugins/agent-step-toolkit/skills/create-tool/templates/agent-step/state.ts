@@ -119,6 +119,12 @@ export interface LibraryManagedSlots {
   currentFlow?: CurrentFlow | null;
   pagedRead?: PagedCache<unknown> | null;
   handoff?: HandoffRequest | null;
+  /** Consecutive failed tool-call counter. The runner increments it on each
+   *  batch that ends with an executor_error and resets it to 0 on a fully
+   *  successful batch. When it reaches the configured threshold (default 3)
+   *  the runner auto-triggers a handoff (if handoff is enabled) so the
+   *  customer is not left in an unrecoverable error loop. */
+  errorCount?: number | null;
 }
 
 const replaceNull = <T>() => ({
@@ -143,6 +149,7 @@ export const agentStepStateSpec = {
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
   pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
+  errorCount: Annotation<number | null>(replaceNull<number>()),
 };
 
 /** Zod shape fragment for the library-managed slots. Spread into the
@@ -161,4 +168,5 @@ export const agentStepZodShape = {
   currentFlow: CurrentFlowSchema.nullable().optional().default(null),
   pagedRead: PagedCacheSchema.nullable().optional().default(null),
   handoff: HandoffRequestSchema.nullable().optional().default(null),
+  errorCount: z.number().int().nonnegative().nullable().optional().default(null),
 };

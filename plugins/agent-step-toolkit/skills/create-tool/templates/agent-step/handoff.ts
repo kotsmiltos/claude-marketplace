@@ -92,8 +92,14 @@ export interface HandoffDelegateTarget {
    *  recalled). Discover the node name by streaming one run with
    *  `stream_mode: ["messages-tuple"]` and reading the metadata. */
   replyNode?: string;
-  /** Abort the delegate run after this many ms and fall back to the
-   *  terminate envelope. Default 60_000. */
+  /** Abort the initial connection attempt (POST /threads + run start headers)
+   *  after this many ms and fall back to the terminate envelope. Detects an
+   *  unavailable agent quickly without stalling the conversation.
+   *  Default: see CONNECT_DEFAULT_TIMEOUT_MS. */
+  connectTimeoutMs?: number;
+  /** Abort the streaming phase after this many ms once the run has started,
+   *  and fall back to the terminate envelope.
+   *  Default: see DELEGATE_DEFAULT_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Extra headers for the delegate API (e.g. `x-api-key`). */
   headers?: Record<string, string>;
@@ -130,7 +136,8 @@ export function handoffRequested(state: LibraryManagedSlots): boolean {
   return state.handoff != null;
 }
 
-const DELEGATE_DEFAULT_TIMEOUT_MS = 60_000;
+const CONNECT_DEFAULT_TIMEOUT_MS = 10_000;
+const DELEGATE_DEFAULT_TIMEOUT_MS = 20_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -228,7 +235,10 @@ async function runDelegate(
   input: Record<string, unknown>,
   writer: ((chunk: unknown) => void) | undefined,
 ): Promise<string> {
-  const signal = AbortSignal.timeout(target.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS);
+  const connectSignal = AbortSignal.timeout(
+    target.connectTimeoutMs ?? CONNECT_DEFAULT_TIMEOUT_MS,
+  );
+  const streamSignal = AbortSignal.timeout(target.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", ...(target.headers ?? {}) };
   const base = target.url.replace(/\/+$/, "");
 
@@ -236,7 +246,7 @@ async function runDelegate(
   const threadRes = await fetch(`${base}/threads`, {
     method: "POST",
     headers,
-    signal,
+    signal: connectSignal,
     body: JSON.stringify({ thread_id: threadId, if_exists: "do_nothing" }),
   });
   if (!threadRes.ok) {
@@ -246,7 +256,7 @@ async function runDelegate(
   const runRes = await fetch(`${base}/threads/${threadId}/runs/stream`, {
     method: "POST",
     headers,
-    signal,
+    signal: streamSignal,
     body: JSON.stringify({
       assistant_id: target.assistantId,
       input,
@@ -326,12 +336,20 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
       ...(delegate ? { delegated_to: delegate.assistantId } : {}),
     });
 
-    // off_topic terminates with the fixed envelope (or delegates); completed /
-    // abandon speak the closing line — overridden by resolveClosingMessage when
-    // provided (honesty invariant), otherwise the LLM-composed `context`.
+    // off_topic is a SILENT hand-back: a topic change is an agent-to-agent
+    // re-route, never announced to the caller ("don't tell the user about the
+    // redirect"). The spoken content is empty; the orchestrator/destination
+    // agent owns the caller-facing reply, so the caller still always hears a
+    // response — just from the agent that actually serves them, not a "your
+    // request concerns another service" line. The `off_topic` `handoff_type` +
+    // the caller's verbatim request in `handoff_reason`/`context` are still
+    // emitted so the router can route. (delegate mode overrides `content`
+    // below; a delegate FAILURE falls back to the spoken terminateMessage.)
+    // completed / abandon are genuine endings, NOT redirects — they keep their
+    // closing line (resolveClosingMessage override, else the LLM `context`).
     let content =
       request.reason === "off_topic"
-        ? spec.terminateMessage
+        ? ""
         : (spec.resolveClosingMessage?.(state, request) ?? request.context);
     let delegated = false;
     let delegateError: string | null = null;
