@@ -61,6 +61,7 @@ import {
   handoffParamsSchema,
   type HandoffSpec,
 } from "./handoff.js";
+import { resolveSystemMessages, type SystemMessages } from "./messages.js";
 
 /** Internal adapter shape for confirmation gating. The runner reads/writes the
  *  canonical `awaitingInput.kind === "confirmation"` slot; this struct is just
@@ -298,6 +299,12 @@ export interface BuildAgentStepToolOptions<
    *  graph's handoff node (`createHandoffNode(spec)` from handoff.ts) — the
    *  runner never performs the terminate/delegate I/O itself. */
   handoff?: HandoffSpec<T>;
+  /** Optional overrides for the runner's own system `summary` strings (executor
+   *  error, invalid params, abort, flow gates). Shallow-merged over
+   *  `DEFAULT_SYSTEM_MESSAGES` (neutral English). A host with localized /
+   *  voice-safe wording (e.g. a TTS agent) injects it here; omit to use the
+   *  defaults. The library never imports host strings — see messages.ts. */
+  messages?: Partial<SystemMessages>;
 }
 
 interface PlannedStep {
@@ -518,6 +525,9 @@ export async function runSteps<
   const executors: Record<string, AnyExecutor> = opts.executors;
   const handoffEnabled = opts.handoff != null;
   const mergeState = buildMergerFromAnnotation<T>(stateAnnotation);
+  // Runner-emitted `summary` strings: host overrides shallow-merged over the
+  // neutral English defaults (see messages.ts). No host import in the library.
+  const msgs = resolveSystemMessages(opts.messages);
 
   // `view` is the in-batch threaded snapshot: each step's `stateUpdate` folds
   // into it so the next step sees a fresh state. `committed` accumulates the
@@ -538,7 +548,7 @@ export async function runSteps<
     if (name === ABORT_ACTION) continue;
     if (name === HANDOFF_ACTION && handoffEnabled) continue;
     if (config.actions[name]) continue;
-    const summary = `Unknown action "${name}".`;
+    const summary = msgs.unknown_action;
     const body: RunnerResultBody = {
       summary,
       results: [
@@ -639,7 +649,7 @@ export async function runSteps<
   if (currentFlow && userSteps[0]) {
     const m0 = config.actions[userSteps[0].action]?.controller;
     if (m0?.startsFlow && m0.startsFlow.name !== currentFlow.name) {
-      const summary = `Cannot start flow "${m0.startsFlow.name}" while flow "${currentFlow.name}" is active; abort the current flow first.`;
+      const summary = msgs.flow_already_active;
       const body: RunnerResultBody = {
         summary,
         results: [
@@ -809,6 +819,16 @@ export async function runSteps<
   let failedAt: number | undefined;
   let lastSummary = "";
 
+  // Snapshot the awaiting-input gate as it stood at BATCH START (before any step
+  // in this batch runs). Used to freeze the `requiresMatch` consumer check: a
+  // match gate is a human re-affirmation (double-entry), so — like the
+  // confirmation gate's same-batch-bypass protection — the repeat must arrive in
+  // a SEPARATE turn. A match gate opened by the capturer earlier in this same
+  // batch must NOT be consumable by the consumer in the same batch. (The OTP gate
+  // is deliberately left in-batch-threadable; see the requiresOtp check, which
+  // reads the live view.)
+  const batchStartAwaiting = getAwaitingInput(view);
+
   for (let i = 0; i < planned.length; i++) {
     const step = planned[i];
 
@@ -827,7 +847,7 @@ export async function runSteps<
       const entry: StepResult = {
         action: ABORT_ACTION,
         ok: true,
-        summary: hadSomething ? "Pending input and/or flow aborted." : "Nothing to abort.",
+        summary: hadSomething ? msgs.abort_done : msgs.abort_nothing,
       };
       if (priorAwaiting) {
         entry.aborted_awaiting = {
@@ -861,8 +881,9 @@ export async function runSteps<
         const entry: StepResult = {
           action: HANDOFF_ACTION,
           ok: false,
-          summary: `Invalid params for "${HANDOFF_ACTION}": ${message}`,
+          summary: msgs.invalid_params,
           error: "invalid_params",
+          _debug: `Invalid params for "${HANDOFF_ACTION}": ${message}`,
         };
         results.push(entry);
         lastSummary = entry.summary as string;
@@ -897,7 +918,7 @@ export async function runSteps<
     if (stepMutationEarly?.requiresFlow) {
       const flow = getCurrentFlow(view);
       if (!flow) {
-        const summary = `Action "${step.action}" requires flow "${stepMutationEarly.requiresFlow}" but no flow is active.`;
+        const summary = msgs.no_flow;
         const entry: StepResult = {
           action: step.action,
           ok: false,
@@ -910,7 +931,7 @@ export async function runSteps<
         break;
       }
       if (flow.name !== stepMutationEarly.requiresFlow) {
-        const summary = `Action "${step.action}" requires flow "${stepMutationEarly.requiresFlow}" but current flow is "${flow.name}".`;
+        const summary = msgs.wrong_flow;
         const entry: StepResult = {
           action: step.action,
           ok: false,
@@ -1050,20 +1071,53 @@ export async function runSteps<
       }
     }
 
-    // requiresMatch — refuse if no match-awaiting is set for this action.
+    // requiresMatch — refuse unless a match gate for this action was pending at
+    // BATCH START. Frozen to batch-start (not the live view) so a match gate the
+    // capturer opens earlier in THIS batch cannot be consumed in the same batch —
+    // the double-entry repeat must arrive in a separate turn (mirrors the
+    // confirmation same-batch-bypass protection). The legitimate [consumer,
+    // issuer] batch is unaffected: the consumer's match gate was opened in a
+    // PRIOR turn, so it IS present at batch start.
     if (stepMutation?.requiresMatch) {
-      const awaiting = getAwaitingInput(view);
+      const awaiting = batchStartAwaiting;
       const gated =
         !!awaiting &&
         awaiting.kind === "match" &&
         awaiting.for_action === step.action;
       if (!gated) {
-        const summary = `Action "${step.action}" requires a pending double-entry match; none found. The capturer "${stepMutation.requiresMatch.capturer}" must run first.`;
+        const summary = `Action "${step.action}" requires a pending double-entry match (opened in a prior turn); none found at batch start. The capturer "${stepMutation.requiresMatch.capturer}" must run first, in a separate turn.`;
         const entry: StepResult = {
           action: step.action,
           ok: false,
           summary,
           error: "match_not_pending",
+        };
+        results.push(entry);
+        lastSummary = summary;
+        failedAt = results.length - 1;
+        break;
+      }
+    }
+
+    // issuesOtp — refuse to OPEN an OTP gate while a double-entry match is still
+    // pending in the LIVE view. Enforces the ordering invariant "at most one input
+    // gate at a time, match THEN otp": the match consumer must clear the match
+    // before any OTP is issued. Without this, a single batch like [capturer,
+    // issuer] would open+send the OTP and OVERWRITE the still-pending match gate,
+    // skipping the consumer (the second entry) entirely. Uses the LIVE view (not
+    // batch-start) so the legitimate [consumer, issuer] batch still works — the
+    // consumer clears the match earlier in the same batch, so by the time the
+    // issuer runs no match is pending. Checked PRE-execution so the executor's
+    // side effect (e.g. sending a code) never fires on refusal.
+    if (stepMutation?.issuesOtp) {
+      const awaiting = getAwaitingInput(view);
+      if (awaiting && awaiting.kind === "match") {
+        const summary = `Action "${step.action}" cannot issue an OTP while a double-entry match for "${awaiting.for_action}" is still pending; the match must be consumed first.`;
+        const entry: StepResult = {
+          action: step.action,
+          ok: false,
+          summary,
+          error: "otp_blocked_match_pending",
         };
         results.push(entry);
         lastSummary = summary;
@@ -1089,8 +1143,9 @@ export async function runSteps<
       const entry: StepResult = {
         action: step.action,
         ok: false,
-        summary: `Invalid params for "${step.action}": ${message}`,
+        summary: msgs.invalid_params,
         error: "invalid_params",
+        _debug: `Invalid params for "${step.action}": ${message}`,
       };
       results.push(entry);
       lastSummary = entry.summary as string;
@@ -1146,9 +1201,10 @@ export async function runSteps<
       const entry: StepResult = {
         action: step.action,
         ok: false,
-        summary: `Action "${step.action}" failed: ${message}`,
+        summary: msgs.executor_error,
         error: "executor_error",
-      };
+        _debug: `Action "${step.action}" failed: ${message}`,
+      } as StepResult;
       results.push(entry);
       lastSummary = entry.summary as string;
       failedAt = results.length - 1;

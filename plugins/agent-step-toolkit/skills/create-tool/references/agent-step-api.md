@@ -15,6 +15,7 @@ export const myTool = buildAgentStepTool({
   executors,                       // ExecutorRegistry<T, typeof selectors>
   verifiers,                       // VerifierRegistry<T>
   handoff: handoffSpec,            // OPTIONAL — opt into the built-in request_handoff (see <handoff>)
+  messages: { ... },               // OPTIONAL — override the runner's own system summary strings (see <system_messages>)
 });
 ```
 
@@ -399,6 +400,8 @@ Two actions cooperate: the **issuer** mints an SCA challenge; the **consumer** v
 
 Issuer typically also declares `startsFlow: { name: "X" }` so the OTP gate is tied to a flow.
 
+**Match-then-OTP ordering guard.** An `issuesOtp` step is refused (pre-execution, so the SCA backend is never called) when a double-entry **match** gate is still pending in the live view — error `otp_blocked_match_pending`. This enforces "at most one input gate at a time, match before OTP": without it, a `[capturer, issuer]` batch would mint+send the OTP and overwrite the still-pending match gate, skipping the second entry entirely. The check reads the **live** view (not batch-start), so the legitimate `[consumer, issuer]` batch still works — the consumer clears the match earlier in the same batch, so no match is pending by the time the issuer runs.
+
 ### Consumer (`controller.requiresOtp = true`)
 - Refused unless `awaitingInput.kind === "otp" && for_action === <this action>`. Error: `otp_not_pending` if the gate isn't pending; `otp_pending_locked` if something else is awaiting.
 - Executor reads `challengeId` (etc.) from `state.currentFlow.data`, calls SCA validate.
@@ -424,6 +427,7 @@ The customer provides a value once, then again; the system verifies they match. 
 
 ### Consumer (`controller.requiresMatch = { capturer, maxAttempts }`)
 - Refused unless `awaitingInput.kind === "match" && for_action === <this action>`. Error: `match_not_pending` if absent.
+- **Same-batch double-entry is refused (batch-start freeze).** The gate check reads the awaiting-input snapshot as it stood at **batch start**, not the live in-batch view — so a match gate the capturer opens *earlier in the same batch* is NOT consumable by the consumer in that same batch. The double-entry repeat must arrive in a SEPARATE turn (mirrors the confirmation same-batch-bypass protection). A `[capturer, consumer]` batch fails at the consumer with `match_not_pending`; the legitimate `[consumer, issuer]` batch is unaffected (the consumer's gate was opened in a prior turn, so it IS present at batch start).
 - Executor receives the second entry, owns the comparison (e.g. compares ciphertexts), performs the side-effect on match.
 - Library reads the executor's outcome:
   - `ok: true` → match succeeded; library auto-clears `awaitingInput`. Pair with `endsFlow: true` to wrap the flow.
@@ -476,9 +480,20 @@ interface HandoffSpec<T> {
           | { mode: "delegate"; url: string; assistantId: string;
               replyNode?: string; timeoutMs?: number; headers?: Record<string, string> };
   terminateMessage: string;          // spoken envelope; also the delegate-failure fallback
+  resolveClosingMessage?: (state: T, request: HandoffRequest) => string | undefined;
+                                     // OPTIONAL — override the completed/abandon closing line from
+                                     // actual operation outcomes (honesty invariant). Returns a string
+                                     // to replace the LLM-composed `request.context`, or `undefined` to
+                                     // fall through to it. NEVER called for off_topic (always terminateMessage).
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
 }
 ```
+
+**`resolveClosingMessage`** lets the host gate the spoken closing on what actually happened: e.g. only
+speak a success line for `completed` when the mutating action truly persisted, otherwise return a
+neutral/failed phrasing. It runs in `createHandoffNode` for `completed` / `abandon` only; a returned
+string becomes the final message `content` (and `handoff_metadata.success_message`), `undefined` falls
+through to `request.context`.
 
 Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `createHandoffNode(spec)`.
 
@@ -486,6 +501,29 @@ Wire a conditional edge after the tool node — `createReactAgent` cannot expres
 
 **Final-message kwargs** (the channel contract): every non-delegate resolution is a handback — `is_handoff: true`, `handoff_type` = the reason's signal (`off_topic` / `completed` / `abandon`), `handoff_reason` = `context`, `handoff_metadata: { service_type, success_message }`. Spoken content: the `off_topic` envelope (`terminateMessage`, also the delegate-failure fallback) or the LLM-composed closing in `context` for `completed` / `abandon` (the middleware delivers it and flips routing for the NEXT request). Delegate success → NOT a handoff (conversation kept) — informational `{ delegated_to }` only. Streaming clients must request `stream_mode: ["messages-tuple", "custom"]` — the node-built final message never appears in the token stream; `handoff_complete` carries its text. Full wire details + the middleware checklist: `streaming-and-channel-contract.md`.
 </handoff>
+
+<system_messages>
+## Runner-emitted system messages (`BuildAgentStepToolOptions.messages`)
+
+The runner emits its own `summary` strings for structured refusals/errors it raises directly (not from an executor): executor crash, invalid params, unknown action, the abort outcomes, and the flow gates. These ship as **neutral English defaults** in `src/agent-step/messages.ts` so the library has ZERO dependency on any host project.
+
+```ts
+interface SystemMessages {
+  executor_error: string;     // an executor threw / hard failure (raw cause in `_debug`)
+  invalid_params: string;     // step params failed schema validation (raw detail in `_debug`)
+  unknown_action: string;     // a hallucinated/typo'd action name reached the runner
+  flow_already_active: string;// tried to open a flow while a different flow is active
+  no_flow: string;            // a flow-scoped step ran with no flow active
+  wrong_flow: string;         // a flow-scoped step ran against the wrong flow
+  abort_done: string;         // abort_pending_input cleared a pending gate / active flow
+  abort_nothing: string;      // abort_pending_input ran with nothing pending (no-op)
+}
+```
+
+A host overrides any subset via `buildAgentStepTool({ messages })` (`Partial<SystemMessages>`, **shallow-merged** over `DEFAULT_SYSTEM_MESSAGES`). Use this for localized / voice-safe wording on a TTS or non-English agent. The library never imports host strings; the host injects them.
+
+Exports (from `index.ts`): `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages(overrides?)`, type `SystemMessages`. Note these are the **runner's own** summaries only — an executor's `resultBody.summary` (the LLM-facing per-action text) is authored by the executor and is unaffected.
+</system_messages>
 
 <result_envelope>
 ## What the LLM sees per tool call
@@ -504,8 +542,12 @@ interface StepResult {
 }
 ```
 
+The `summary` of a runner-emitted refusal/error (executor crash, invalid params, abort, flow gates) is a **host-overridable system message** — see `<system_messages>`. For the `executor_error` and `invalid_params` kinds the runner also attaches a **`_debug`** field carrying the raw technical cause (the thrown message / the Zod issue list), so the overridable `summary` can stay user-safe while the diagnostic detail is preserved for logs.
+
 Library-injected fields on specific step kinds:
 - `abort_pending_input` results carry `aborted_awaiting: { kind, for_action }` and/or `aborted_flow: "<name>"` when something was actually cleared.
+- `executor_error` / `invalid_params` results carry `_debug` with the raw cause (the `summary` itself is the overridable system message).
+- `issuesOtp` refused while a match gate is pending carries `error: "otp_blocked_match_pending"`.
 - propose / re-propose results carry `needs_confirmation: true`, `proposed_params`, `attempts_left`.
 - exhausted results carry `error: "confirmation_attempts_exhausted"`.
 - lockdown refusals carry `error: "pending_confirmation_locked" | "otp_pending_locked" | "match_pending_locked"` and `awaiting: { kind, for_action }`.
@@ -533,6 +575,7 @@ Runtime errors raised by the runner (not construction-time, but loud):
 | `reported lifecycle.issuesOtp but no flow is active` | Issuer didn't pair with `startsFlow` |
 | `reported lifecycle.issuesOtp but config lacks issuesOtp opt` | Executor returned the lifecycle signal but mutation config didn't declare `issuesOtp` |
 | `declares startsMatchFor "X" but that consumer doesn't declare requiresMatch` | Capturer / consumer mismatch |
+| `otp_blocked_match_pending` (step error) | An `issuesOtp` step ran while a double-entry match gate was still pending — consume the match before issuing the OTP (see `<otp_lifecycle>`) |
 
 The runner does NOT validate at runtime that you declared `awaitingInput` / `currentFlow` / `pagedRead` / `handoff` in state when using the lifecycle / pagination / handoff opts. If you forget, the runner will write a patch to a non-existent slot and the library-managed gates will silently misbehave. Always add all four slots — spreading `agentStepStateSpec` / `agentStepZodShape` (as the bootstrap state template does) brings them in together.
 </construction_time_checks>
@@ -543,7 +586,8 @@ For ground truth, read these files in the project (don't paraphrase — they ARE
 - `src/agent-step/types.ts` — every type listed above
 - `src/agent-step/runner.ts` — the runtime; especially `validateConfig`, `runSteps`, the selector→executor dispatch (`selectors[action](view)` → `executors[action]`), `buildMergerFromAnnotation`, lockdown handling, lifecycle ordering
 - `src/agent-step/paginate.ts` — the read-pagination primitives + the `pageable` orchestration the runner uses (self / delegate, the cache, the envelope)
-- `src/agent-step/handoff.ts` — the handoff spec/types, `createHandoffNode` (terminate / delegate resolution, custom events, the kwargs contract), `handoffRequested`, `HANDBACK_SIGNALS`
+- `src/agent-step/handoff.ts` — the handoff spec/types, `createHandoffNode` (terminate / delegate resolution, custom events, the kwargs contract, `resolveClosingMessage`), `handoffRequested`, `HANDBACK_SIGNALS`
+- `src/agent-step/messages.ts` — the runner's overridable system `summary` strings: `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages`
 - `src/agent-step/index.ts` — what's exported (only what's here is part of the API)
 - `src/agent-step/runner.test.ts` + `src/agent-step/paginate.test.ts` + `src/agent-step/handoff.test.ts` — worked examples covering every runner branch, the pagination primitives, and the handoff machinery; all pass on `npm test`
 </key_files_to_inspect>

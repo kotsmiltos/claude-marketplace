@@ -11,6 +11,7 @@ import {
 } from "./runner.js";
 import type { ExecutorRegistry, VerifierRegistry } from "./types.js";
 import type { AwaitingInput, CurrentFlow } from "./state.js";
+import { DEFAULT_SYSTEM_MESSAGES } from "./messages.js";
 
 interface S {
   customer?: { code: string } | null;
@@ -211,7 +212,10 @@ test("executor that throws → ok:false step, short-circuit, earlier commits pre
   assert.equal(body.results[0].ok, true);
   assert.equal(body.results[1].ok, false);
   assert.equal(body.results[1].error, "executor_error");
-  assert.match(body.results[1].summary as string, /boom: backend exploded/);
+  // User-facing summary is the neutral default message (no backend internals
+  // leak to the spoken response); the raw cause is preserved in `_debug`.
+  assert.equal(body.results[1].summary, DEFAULT_SYSTEM_MESSAGES.executor_error);
+  assert.match(body.results[1]._debug as string, /boom: backend exploded/);
   assert.equal(body.failed_at, 1);
   // verify_customer's commit is NOT discarded by the later throw.
   assert.deepEqual(committed.customer, { code: "C1" });
@@ -560,7 +564,7 @@ test("abort_pending_input is idempotent — returns nothing-to-abort when no inp
     SEEDED,
   );
   assert.equal(body.results[0].ok, true);
-  assert.match(body.results[0].summary as string, /nothing to abort/i);
+  assert.equal(body.results[0].summary, DEFAULT_SYSTEM_MESSAGES.abort_nothing);
   // Idempotent: no slot mutations.
   assert.equal(
     (committed as { pendingConfirmation?: unknown }).pendingConfirmation,
@@ -570,6 +574,31 @@ test("abort_pending_input is idempotent — returns nothing-to-abort when no inp
     (committed as { awaitingInput?: unknown }).awaitingInput,
     undefined,
   );
+});
+
+test("system messages: host `messages` overrides are used in place of the defaults", async () => {
+  // The library ships neutral English defaults but lets a host inject its own
+  // wording via `opts.messages` (shallow-merged). Verify both an error path and
+  // an abort path pick up the override; un-overridden keys keep their defaults.
+  const thrown = makeOpts({ cardThrows: true });
+  const errRun = await runSteps(
+    { ...thrown.opts, messages: { executor_error: "CUSTOM-ERR" } },
+    [
+      { action: "verify_customer", params: { code: "C1" } },
+      { action: "verify_card", params: { pan: "P1" } },
+    ],
+    EMPTY,
+  );
+  assert.equal(errRun.body.results[1].summary, "CUSTOM-ERR", "executor_error override used");
+  assert.match(errRun.body.results[1]._debug as string, /boom: backend exploded/, "raw cause still in _debug");
+
+  const aborts = makeConfirmOpts();
+  const abortRun = await runSteps(
+    { ...aborts.opts, messages: { abort_nothing: "CUSTOM-NOTHING" } },
+    [{ action: "abort_pending_input", params: {} }],
+    SEEDED,
+  );
+  assert.equal(abortRun.body.results[0].summary, "CUSTOM-NOTHING", "abort_nothing override used");
 });
 
 test("library refuses user action named abort_pending_input", () => {
@@ -1243,6 +1272,7 @@ interface MatchCalls {
   open: number;
   capture: number;
   commit: number;
+  issue: number;
 }
 
 interface MatchMockOpts {
@@ -1255,14 +1285,15 @@ const matchSelectors = {
   open_flow: (s: MatchS) => s,
   capture_value: (s: MatchS) => s,
   commit_value: (s: MatchS) => s,
+  issue_otp: (s: MatchS) => s,
 };
 
 function makeMatchOpts(mock: MatchMockOpts = {}): {
   opts: BuildAgentStepToolOptions<MatchS, string, string, typeof matchSelectors>;
   calls: MatchCalls;
 } {
-  const calls: MatchCalls = { open: 0, capture: 0, commit: 0 };
-  const config = defineConfig<"open_flow" | "capture_value" | "commit_value", never>({
+  const calls: MatchCalls = { open: 0, capture: 0, commit: 0, issue: 0 };
+  const config = defineConfig<"open_flow" | "capture_value" | "commit_value" | "issue_otp", never>({
     tool: { name: "match_tool", description: "match-pattern test tool" },
     actions: {
       open_flow: {
@@ -1288,6 +1319,15 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
           requiresFlow: "myflow",
           requiresMatch: { capturer: "capture_value", maxAttempts: 3 },
           endsFlow: true,
+        },
+      },
+      issue_otp: {
+        description: "issue an OTP for the flow",
+        paramsSchema: z.object({}),
+        prereqs: [],
+        controller: {
+          requiresFlow: "myflow",
+          issuesOtp: { consumer_action: "commit_value" },
         },
       },
     },
@@ -1331,6 +1371,15 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
       }
       return {
         resultBody: { summary: "committed", success: true },
+        ok: true,
+      };
+    },
+    issue_otp: async () => {
+      calls.issue++;
+      return {
+        resultBody: { summary: "otp issued", otp_sent: true },
+        flowData: { challengeId: "ch-1" },
+        lifecycle: { issuesOtp: { challengeId: "ch-1", mobile_masked: "***1234" } },
         ok: true,
       };
     },
@@ -1524,6 +1573,69 @@ test("requiresMatch: abort_pending_input clears match-awaiting + flow", async ()
   assert.equal(body.results[0].ok, true);
   assert.equal(committed.awaitingInput ?? null, null);
   assert.equal(committed.currentFlow ?? null, null);
+});
+
+// ─── Same-batch double-entry & OTP-ordering guards ──────────────────────── //
+
+test("requiresMatch: capturer + consumer in ONE batch is refused (double-entry must span turns)", async () => {
+  const { opts, calls } = makeMatchOpts();
+  // Flow opened in a prior turn; then a single batch tries to BOTH capture the
+  // first entry AND consume the match. The match gate is opened in-batch, so it
+  // is absent at BATCH START — the consumer must be refused (frozen check).
+  const r1 = await runSteps(opts, [{ action: "open_flow", params: {} }], {} as MatchS);
+  const { body } = await runSteps(
+    opts,
+    [
+      { action: "capture_value", params: { v: "secret" } },
+      { action: "commit_value", params: { v: "secret" } },
+    ],
+    r1.committed as MatchS,
+  );
+  assert.equal(body.results[0].ok, true, "capture ran");
+  assert.equal(body.results[1].ok, false, "consumer refused in same batch");
+  assert.equal(body.results[1].error, "match_not_pending");
+  assert.equal(body.failed_at, 1);
+  assert.equal(calls.commit, 0, "commit executor never ran");
+});
+
+test("issuesOtp: refused while a match gate is still pending (otp_blocked_match_pending)", async () => {
+  const { opts, calls } = makeMatchOpts();
+  // Flow opened in a prior turn; then [capture_value, issue_otp] in one batch.
+  // capture_value opens the match gate (live); issue_otp must NOT open an OTP
+  // gate while the match is unconsumed — the issuer's side effect must not fire.
+  const r1 = await runSteps(opts, [{ action: "open_flow", params: {} }], {} as MatchS);
+  const { body, committed } = await runSteps(
+    opts,
+    [
+      { action: "capture_value", params: { v: "secret" } },
+      { action: "issue_otp", params: {} },
+    ],
+    r1.committed as MatchS,
+  );
+  assert.equal(body.results[0].ok, true, "capture ran, match gate opened");
+  assert.equal(body.results[1].ok, false, "OTP issuance refused");
+  assert.equal(body.results[1].error, "otp_blocked_match_pending");
+  assert.equal(body.failed_at, 1);
+  assert.equal(calls.issue, 0, "issuer executor never ran");
+  // The match gate the capturer opened survives — the consumer can still run next turn.
+  assert.equal(committed.awaitingInput?.kind, "match", "match gate intact");
+  assert.equal(committed.awaitingInput?.for_action, "commit_value");
+});
+
+test("issuesOtp: allowed when no match is pending (guard is not over-broad)", async () => {
+  // Positive control: flow open, no match pending → the issuer runs and the OTP
+  // gate opens. Proves guard #1 fires ONLY on a pending match.
+  const { opts, calls } = makeMatchOpts();
+  const r1 = await runSteps(opts, [{ action: "open_flow", params: {} }], {} as MatchS);
+  const { body, committed } = await runSteps(
+    opts,
+    [{ action: "issue_otp", params: {} }],
+    r1.committed as MatchS,
+  );
+  assert.equal(body.results[0].ok, true, "OTP issued");
+  assert.equal(calls.issue, 1, "issuer executor ran");
+  assert.equal(committed.awaitingInput?.kind, "otp", "OTP gate opened");
+  assert.equal(committed.awaitingInput?.for_action, "commit_value");
 });
 
 // ─── invalidatesOnChange ────────────────────────────────────────────────── //

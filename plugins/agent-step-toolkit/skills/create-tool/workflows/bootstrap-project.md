@@ -61,6 +61,7 @@ Target: /absolute/path/to/<project_name>/
 - src/agent-step/paginate.test.ts
 - src/agent-step/handoff.ts
 - src/agent-step/handoff.test.ts
+- src/agent-step/messages.ts
 - src/agent-step/define-config.ts
 - src/agent-step/index.ts
 - src/agent-step/VERSION  (library version marker; lets `/pull-library` know what the project currently vendors)
@@ -152,6 +153,7 @@ cp templates/agent-step/paginate.ts      "$PROJECT/src/agent-step/paginate.ts"
 cp templates/agent-step/paginate.test.ts "$PROJECT/src/agent-step/paginate.test.ts"
 cp templates/agent-step/handoff.ts       "$PROJECT/src/agent-step/handoff.ts"
 cp templates/agent-step/handoff.test.ts  "$PROJECT/src/agent-step/handoff.test.ts"
+cp templates/agent-step/messages.ts      "$PROJECT/src/agent-step/messages.ts"
 cp templates/agent-step/define-config.ts "$PROJECT/src/agent-step/define-config.ts"
 cp templates/agent-step/index.ts        "$PROJECT/src/agent-step/index.ts"
 cp templates/agent-step/VERSION         "$PROJECT/src/agent-step/VERSION"

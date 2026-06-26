@@ -17,6 +17,12 @@ export { defineConfig } from "./define-config.js";
 export { buildAgentStepTool, runSteps } from "./runner.js";
 export type { BuildAgentStepToolOptions, RunResult } from "./runner.js";
 
+// Runner-emitted system `summary` strings. Neutral English defaults live in the
+// library; a host overrides them via `BuildAgentStepToolOptions.messages` (e.g.
+// localized / voice-safe wording). The library never imports host strings.
+export { DEFAULT_SYSTEM_MESSAGES, resolveSystemMessages } from "./messages.js";
+export type { SystemMessages } from "./messages.js";
+
 // Library-managed state slots. Consumers spread `agentStepStateSpec` into their
 // `Annotation.Root` and `agentStepZodShape` into their Zod state schema rather
 // than hand-rolling storage for the slots the runner mutates.

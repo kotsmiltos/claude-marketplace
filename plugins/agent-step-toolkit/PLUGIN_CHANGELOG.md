@@ -11,6 +11,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.15.0] — 2026-06-26
+
+Ships **agent-step library 1.5.0** (was 1.4.0). `/pull-library` recommended for downstream projects —
+note the behavior change below. Absorbed from the set-pin agent.
+
+### Added
+- Library **1.5.0**: new `messages.ts` — the runner's own refusal/error `summary` strings are now
+  host-overridable via `buildAgentStepTool({ messages })` (neutral English defaults, shallow-merged);
+  `HandoffSpec.resolveClosingMessage` for honest `completed`/`abandon` closings; a `_debug` field on
+  error step results. Docs updated across `create-tool/references/agent-step-api.md` (new
+  `<system_messages>` section), the bootstrap copy list, `create-tool` step 6c, and SKILL prose. See
+  [CHANGELOG.md](CHANGELOG.md) and [migrations/1.4.0-to-1.5.0.md](migrations/1.4.0-to-1.5.0.md).
+
+### Changed
+- Library behavior: double-entry `requiresMatch` is frozen to batch start, and a new `issuesOtp` guard
+  refuses with `otp_blocked_match_pending` — a single batch can no longer bypass the second PIN entry.
+  **Downstream impact:** tools that batched a capturer with its consumer or with an OTP issuer in one
+  turn must split them across turns (`/pull-library` surfaces this in its manual follow-ups).
+
+### Fixed
+- `create-tool` workflow: corrected the stale library unit-test count (79 → 83).
+
 ## [0.14.0] — 2026-06-14
 
 New skill — `audit-middleware-contract-compliance`. Library unchanged at **1.4.0** (no

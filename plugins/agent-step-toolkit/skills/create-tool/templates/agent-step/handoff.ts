@@ -110,6 +110,12 @@ export interface HandoffSpec<T> {
    *  sees/hears. (completed / abandon don't use it: they speak the
    *  LLM-composed closing carried in the request's `context`.) */
   terminateMessage: string;
+  /** Override the closing line for completed / abandon signals based on
+   *  actual operation outcomes. When provided and returns a non-undefined
+   *  string, that string replaces the LLM-composed `request.context` for
+   *  those signals. Return `undefined` to fall through to `request.context`.
+   *  Never called for `off_topic` (that always uses `terminateMessage`). */
+  resolveClosingMessage?: (state: T, request: HandoffRequest) => string | undefined;
   /** Build the delegate run's input from host state + the handoff request.
    *  Default: `{ messages: [{ role: "user", content: request.context }] }`.
    *  Use this to forward identity/context the delegate needs (the shared
@@ -321,8 +327,12 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     });
 
     // off_topic terminates with the fixed envelope (or delegates); completed /
-    // abandon speak the LLM-composed closing line carried in `context`.
-    let content = request.reason === "off_topic" ? spec.terminateMessage : request.context;
+    // abandon speak the closing line — overridden by resolveClosingMessage when
+    // provided (honesty invariant), otherwise the LLM-composed `context`.
+    let content =
+      request.reason === "off_topic"
+        ? spec.terminateMessage
+        : (spec.resolveClosingMessage?.(state, request) ?? request.context);
     let delegated = false;
     let delegateError: string | null = null;
 

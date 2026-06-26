@@ -20,7 +20,7 @@ This skill builds a new domain tool that plugs into the **existing** `src/agent-
 
 **5. Plan before writing.** Always produce a written plan first: action list, params schemas, prereqs per action, mutation opts (confirmation / OTP / match / flow), new state slots needed, new prompt fragments needed. Get user confirmation. THEN write files. Never start with file writes — the plan is the cheap review surface.
 
-**6. Voice-safe by default.** This project's agent is a voice agent (TTS-spoken output). Executor result bodies are LLM-facing JSON (fine to be verbose, numeric, terse). The prompt edits MUST keep the voice rules — no markdown, no URLs, no digit numerals in spoken text, no echoing of full secrets (PIN plaintext, OTP digits the customer just read back). When a list result masks an identifier, still carry a voiceable **selection key** (a tail, a code) so the user's reference maps to an item. References cover this explicitly.
+**6. Voice-safe by default.** This project's agent is a voice agent (TTS-spoken output). Executor result bodies are LLM-facing JSON (fine to be verbose, numeric, terse). The prompt edits MUST keep the voice rules — no markdown, no URLs, no digit numerals in spoken text, no echoing of full secrets (PIN plaintext, OTP digits the customer just read back). When a list result masks an identifier, still carry a voiceable **selection key** (a tail, a code) so the user's reference maps to an item. References cover this explicitly. The runner's OWN refusal/error summaries (executor crash, invalid params, abort, flow gates) ship as neutral English defaults — override them with localized / voice-safe wording by passing `messages` to `buildAgentStepTool` (see `agent-step-api.md` `<system_messages>`), especially for a non-English agent.
 
 **7. Identity has two models — don't force the wrong one.** Either collect-and-verify (for mutations / proof-of-identity) OR session-context (identity passed in at invoke, for pre-authenticated / read-only tools — no verify action, a `sessionReady` presence check). Match the tool. See `identity-patterns.md`.
 
@@ -152,7 +152,7 @@ All in `templates/`:
 - `project/test-harness-sandbox.ts.template`, `project/test-harness-prompt-input.ts.template`, `project/test-harness-index.ts.template`
 
 **Agent-step library** (verbatim copy by bootstrap; no substitution):
-- `agent-step/types.ts`, `agent-step/state.ts`, `agent-step/runner.ts`, `agent-step/runner.test.ts`, `agent-step/paginate.ts`, `agent-step/paginate.test.ts`, `agent-step/define-config.ts`, `agent-step/index.ts`
+- `agent-step/types.ts`, `agent-step/state.ts`, `agent-step/runner.ts`, `agent-step/runner.test.ts`, `agent-step/paginate.ts`, `agent-step/paginate.test.ts`, `agent-step/handoff.ts`, `agent-step/handoff.test.ts`, `agent-step/messages.ts`, `agent-step/define-config.ts`, `agent-step/index.ts`
 - `agent-step/VERSION` — the library version marker. Bumped by `/bump-version` when the embedded copy is refreshed; read by `/pull-library` to upgrade a downstream project's vendored copy. Travels into every bootstrapped project at `src/agent-step/VERSION`.
 
 **Tool scaffold** (used by create-tool.md):

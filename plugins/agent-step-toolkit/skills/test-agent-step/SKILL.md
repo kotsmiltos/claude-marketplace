@@ -54,7 +54,7 @@ File: `src/tools/<tool>/tests/tool/<name>.test.ts`. It imports everything from t
 - `body.results[i].ok` — the executor's boolean.
 - `body.results[i].verdict` — the structured outcome code (`ok`, and the specific failure codes the executor declares).
 - `committed.<slot>` — state mutations the runner accepted (verified entities, the active flow, pending-input slots).
-- For multi-batch flows, fold one batch's committed mutations into the next batch's starting state with the directory's threading helper — that mirrors what the graph does between turns.
+- For multi-batch flows, fold one batch's committed mutations into the next batch's starting state with the directory's threading helper — that mirrors what the graph does between turns. Note the runner's same-turn guards: a **double-entry match** consumer is gated on the batch-start snapshot, so a capturer and its consumer must be in **separate** batches (a `[capturer, consumer]` batch refuses with `match_not_pending`); and an `issuesOtp` step refuses (`otp_blocked_match_pending`) while a match gate is still pending. Thread these across batches, don't pack them into one.
 
 **What NOT to assert**
 

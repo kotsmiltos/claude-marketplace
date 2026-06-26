@@ -12,6 +12,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.5.0] — 2026-06-26
+
+Additive surface + two flow-control hardenings, absorbed from the set-pin agent. Host-overridable
+runner system messages (new `messages.ts`), an honesty hook for handback closings, and stricter
+double-entry / OTP ordering so a single batch can't bypass the second PIN entry. No breaking change;
+the new APIs are opt-in and the guards only refuse batch shapes that were never safe. Suite grows
+79 → 83. Migration: [migrations/1.4.0-to-1.5.0.md](migrations/1.4.0-to-1.5.0.md).
+
+### Added
+- **`messages.ts`** (new library file): `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES` (neutral English),
+  `resolveSystemMessages()` — all exported from `index.ts`. The runner's own refusal/error `summary`
+  strings (executor crash, invalid params, unknown action, abort, flow gates) are now overridable via
+  `buildAgentStepTool({ messages })` (`Partial<SystemMessages>`, shallow-merged). The library imports
+  no host strings; a localized / voice-safe agent injects its wording.
+- **`_debug`** field on `executor_error` / `invalid_params` step results — carries the raw technical
+  cause so the (overridable, user-safe) `summary` no longer has to leak it.
+- **`HandoffSpec.resolveClosingMessage?(state, request)`** — override the `completed` / `abandon`
+  closing line from actual operation outcomes (honesty invariant: speak success only when state proves
+  it persisted). Returns a string to replace `request.context`, or `undefined` to fall through.
+  Never called for `off_topic`.
+
+### Changed
+- **Double-entry match is frozen to batch start.** A `requiresMatch` consumer is gated on the
+  awaiting-input snapshot at batch start, so a capturer + its consumer in ONE batch is refused
+  (`match_not_pending`) — the repeat must arrive in a separate turn (mirrors the confirmation
+  same-batch-bypass guard). The `[consumer, issuer]` batch is unaffected.
+- **Match-then-OTP ordering guard.** An `issuesOtp` step is refused with `otp_blocked_match_pending`
+  (pre-execution, before the SCA backend is called) while a double-entry match gate is still pending,
+  so `[capturer, issuer]` can no longer mint+send an OTP that overwrites the unconsumed match gate.
+
 ## [1.4.0] — 2026-06-12
 
 Additive: the built-in `request_handoff` now covers the **full handback signal set** —
