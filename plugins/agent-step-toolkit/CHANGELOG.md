@@ -12,6 +12,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.7.0] — 2026-06-30
+
+Additive: a **Zod state schema is now a first-class alternative to a LangGraph `Annotation.Root`**.
+The runner derives its intra-batch merger from either form, so a project can define graph state
+**once** in Zod — one source of truth for reducers AND validation — and gain invoke-boundary
+validation/coercion via a derived input schema. Absorbed from a downstream agent that used it to fix
+a Studio crash (a numeric `telephone_number` reaching `.startsWith` as a non-string) and to stop
+internal slots being injected at invoke. No breaking change — `stateAnnotation` still works as a
+deprecated alias. Suite grows 89 → 91. The toolkit's templates + references now teach **only** the
+single Zod-schema pattern. Migration: [migrations/1.6.0-to-1.7.0.md](migrations/1.6.0-to-1.7.0.md).
+
+### Added
+- **`stateSchema` option** on `buildAgentStepTool` (`BuildAgentStepToolOptions.stateSchema:
+  StateSchemaLike`) — accepts a LangGraph `Annotation.Root` OR a Zod object whose fields carry
+  reducer/default metadata via `withLangGraph` (`@langchain/langgraph/zod`). Both resolve to the same
+  channel classes, so the merger reads `.operator` off either uniformly (a Zod schema's channels are
+  resolved through the langgraph zod registry).
+- **`StateSchemaLike`** type and **`agentStepInternalSlotMask`** const exported from `index.ts`. The
+  mask is a Zod `.omit()` mask of the five library-managed slot keys (`awaitingInput`, `currentFlow`,
+  `pagedRead`, `handoff`, `errorCount`) for deriving a graph INPUT schema that callers can't use to
+  inject internal slots.
+- **`zod-state.test.ts`** — isolation test proving the merger derives reducers off a Zod schema
+  (first-wins vs `LastValue`) exactly as off an `Annotation.Root`.
+
+### Changed
+- **`agentStepZodShape` slots are now `withLangGraph`-wrapped** — spreading the fragment into a Zod
+  state schema now carries each library slot's real last-writer-wins reducer + default as channel
+  metadata (previously the Zod fragment was `.nullable().optional().default(null)`, i.e. `LastValue`
+  with no registered reducer). The channel default rides the meta `default`, and fields stay plain
+  `.nullable()` (a `withLangGraph` requirement).
+
+### Deprecated
+- **`stateAnnotation`** is now a deprecated alias of `stateSchema` (still accepted; the runner reads
+  whichever is set). The runner throws at construction if neither is provided. New code uses
+  `stateSchema`.
+
 ## [1.6.0] — 2026-06-26
 
 Additive: an **auto-handoff safety net** — the runner counts consecutive backend failures and

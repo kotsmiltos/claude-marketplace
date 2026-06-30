@@ -10,7 +10,7 @@ import { buildAgentStepTool } from "../../agent-step/index.js";
 
 export const myTool = buildAgentStepTool({
   config: myConfig,                // AgentStepConfig<ActionName, PrereqName>
-  stateAnnotation: AgentState,     // LangGraph Annotation.Root for the graph
+  stateSchema: AgentStateSchema,   // StateSchemaLike — the host's graph state schema
   selectors,                       // SelectorRegistry<T, ActionName> — one per action
   executors,                       // ExecutorRegistry<T, typeof selectors>
   verifiers,                       // VerifierRegistry<T>
@@ -18,6 +18,8 @@ export const myTool = buildAgentStepTool({
   messages: { ... },               // OPTIONAL — override the runner's own system summary strings (see <system_messages>)
 });
 ```
+
+`stateSchema` is `StateSchemaLike = LangGraphAnnotationLike | z.ZodObject` — it accepts **either** a LangGraph `Annotation.Root` **or** a Zod object schema whose fields carry reducer/default metadata via `withLangGraph` (`@langchain/langgraph/zod`). Both resolve to the same channel classes (`BinaryOperatorAggregate` / `LastValue`), so the runner derives the intra-batch merger uniformly. The bootstrap scaffold defines graph state **once** as a Zod schema (`AgentStateSchema` in `state.ts`) and passes it here — a single source of truth for reducers AND invoke validation, no Annotation/Zod drift. (The older `stateAnnotation` option is still accepted as a **deprecated alias** for backward compatibility; new code uses `stateSchema`. The runner throws at construction if neither is set.)
 
 `selectors` and `executors` are both **keyed 1:1 by the exact action name** (snake_case). Build `selectors` with `satisfies SelectorRegistry<State, ActionName>` (not a type annotation) so each selector's precise return type is preserved into `typeof selectors`; `executors` is then `ExecutorRegistry<State, typeof selectors>`, which types each executor's `state` param from its selector's return — a mismatch is a compile error here, at the construction boundary. See `<conventions>` §1.
 
@@ -233,11 +235,13 @@ interface PagedCache<Row> {
 }
 ```
 
-The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow`) by spreading `agentStepStateSpec` into its annotation and `agentStepZodShape` into its Zod schema — the bootstrap state template does this. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too.
+The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `handoff` / `errorCount`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.)
+
+`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the five library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial()`. Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary (see `state-and-prompt-integration.md`).
 
 ## HandoffRequest (library-managed)
 
-The pending channel-handoff request, written by the built-in `request_handoff` action (only available when the tool opted in via `BuildAgentStepToolOptions.handoff`) and resolved — then cleared — by the host graph's `createHandoffNode(spec)` node. `null` otherwise; rides `agentStepStateSpec` / `agentStepZodShape` like the other slots. See `<handoff>`.
+The pending channel-handoff request, written by the built-in `request_handoff` action (only available when the tool opted in via `BuildAgentStepToolOptions.handoff`) and resolved — then cleared — by the host graph's `createHandoffNode(spec)` node. `null` otherwise; rides `agentStepZodShape` like the other slots. See `<handoff>`.
 
 ```ts
 interface HandoffRequest {
@@ -250,7 +254,7 @@ interface HandoffRequest {
 
 ## errorCount (library-managed)
 
-The consecutive backend-failure counter for the auto-handoff guard (`<auto_handoff>`). `number | null`; rides `agentStepStateSpec` / `agentStepZodShape` like the other slots. The runner increments it when a batch ends in a backend failure, resets it to 0 on a clean batch, and clears it to 0 when it auto-triggers a handoff at the threshold. Executors must never write it.
+The consecutive backend-failure counter for the auto-handoff guard (`<auto_handoff>`). `number | null`; rides `agentStepZodShape` like the other slots. The runner increments it when a batch ends in a backend failure, resets it to 0 on a clean batch, and clears it to 0 when it auto-triggers a handoff at the threshold. Executors must never write it.
 
 </types>
 
@@ -315,7 +319,7 @@ Lifecycle opts are declared inline as `ActionDef.controller`, so there is no sep
 When the LLM calls the tool with `[step1, step2, step3]`:
 
 1. Runner reads the FULL state via `getCurrentTaskInput<T>()` — this is the snapshot at batch start (NOT a live view, important for same-batch-bypass safety).
-2. Merger is built from the LangGraph annotation passed as `stateAnnotation`. Each field's reducer is extracted from `BinaryOperatorAggregate.operator`. The `messages` field is explicitly skipped (the runner emits its own `ToolMessage` at the end).
+2. Merger is built from the state schema passed as `stateSchema` (a Zod object whose fields carry reducer metadata via `withLangGraph`, OR a LangGraph `Annotation.Root`). Each field's reducer is extracted from its channel's `BinaryOperatorAggregate.operator`; a Zod schema's channels are resolved through the langgraph zod registry to the same channel classes. The `messages` field is explicitly skipped (the runner emits its own `ToolMessage` at the end).
 3. Pre-flight checks fire in this order, each able to short-circuit the batch:
    a. **Input lockdown** — `awaitingInput` set → first step must satisfy it (see lockdown table above).
    b. **Flow mutex** — first step `startsFlow=X` while `currentFlow.name=Y` (≠X) → refuse `flow_already_active`.
@@ -603,7 +607,7 @@ Runtime errors raised by the runner (not construction-time, but loud):
 | `declares startsMatchFor "X" but that consumer doesn't declare requiresMatch` | Capturer / consumer mismatch |
 | `otp_blocked_match_pending` (step error) | An `issuesOtp` step ran while a double-entry match gate was still pending — consume the match before issuing the OTP (see `<otp_lifecycle>`) |
 
-The runner does NOT validate at runtime that you declared `awaitingInput` / `currentFlow` / `pagedRead` / `handoff` / `errorCount` in state when using the lifecycle / pagination / handoff / auto-handoff opts. If you forget, the runner will write a patch to a non-existent slot and the library-managed gates will silently misbehave. Always add all five slots — spreading `agentStepStateSpec` / `agentStepZodShape` (as the bootstrap state template does) brings them in together.
+The runner does NOT validate at runtime that you declared `awaitingInput` / `currentFlow` / `pagedRead` / `handoff` / `errorCount` in state when using the lifecycle / pagination / handoff / auto-handoff opts. If you forget, the runner will write a patch to a non-existent slot and the library-managed gates will silently misbehave. Always add all five slots — spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings them in together with their reducers.
 </construction_time_checks>
 
 <key_files_to_inspect>

@@ -152,7 +152,7 @@ All in `templates/`:
 - `project/test-harness-sandbox.ts.template`, `project/test-harness-prompt-input.ts.template`, `project/test-harness-index.ts.template`
 
 **Agent-step library** (verbatim copy by bootstrap; no substitution):
-- `agent-step/types.ts`, `agent-step/state.ts`, `agent-step/runner.ts`, `agent-step/runner.test.ts`, `agent-step/paginate.ts`, `agent-step/paginate.test.ts`, `agent-step/handoff.ts`, `agent-step/handoff.test.ts`, `agent-step/messages.ts`, `agent-step/define-config.ts`, `agent-step/index.ts`
+- `agent-step/types.ts`, `agent-step/state.ts`, `agent-step/runner.ts`, `agent-step/runner.test.ts`, `agent-step/zod-state.test.ts`, `agent-step/paginate.ts`, `agent-step/paginate.test.ts`, `agent-step/handoff.ts`, `agent-step/handoff.test.ts`, `agent-step/messages.ts`, `agent-step/define-config.ts`, `agent-step/index.ts`
 - `agent-step/VERSION` — the library version marker. Bumped by `/bump-version` when the embedded copy is refreshed; read by `/pull-library` to upgrade a downstream project's vendored copy. Travels into every bootstrapped project at `src/agent-step/VERSION`.
 
 **Tool scaffold** (used by create-tool.md):

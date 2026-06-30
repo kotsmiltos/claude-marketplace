@@ -5,10 +5,8 @@
 // fails. The registry key in the tool's index.ts MUST match the prereq name
 // declared in config.actions[X].prereqs.
 
-import type { AgentState } from "../../../state.js";
+import type { State } from "../../../state.js";
 import type { Verifier } from "../../../agent-step/index.js";
-
-type State = typeof AgentState.State;
 
 export const {{PREREQ_NAME}}: Verifier<State> = {
   check: (s) => {{PREDICATE_EXPRESSION}},

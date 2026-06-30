@@ -57,6 +57,7 @@ Target: /absolute/path/to/<project_name>/
 - src/agent-step/state.ts
 - src/agent-step/runner.ts
 - src/agent-step/runner.test.ts
+- src/agent-step/zod-state.test.ts
 - src/agent-step/paginate.ts
 - src/agent-step/paginate.test.ts
 - src/agent-step/handoff.ts
@@ -149,6 +150,7 @@ cp templates/agent-step/types.ts        "$PROJECT/src/agent-step/types.ts"
 cp templates/agent-step/state.ts        "$PROJECT/src/agent-step/state.ts"
 cp templates/agent-step/runner.ts       "$PROJECT/src/agent-step/runner.ts"
 cp templates/agent-step/runner.test.ts  "$PROJECT/src/agent-step/runner.test.ts"
+cp templates/agent-step/zod-state.test.ts "$PROJECT/src/agent-step/zod-state.test.ts"
 cp templates/agent-step/paginate.ts      "$PROJECT/src/agent-step/paginate.ts"
 cp templates/agent-step/paginate.test.ts "$PROJECT/src/agent-step/paginate.test.ts"
 cp templates/agent-step/handoff.ts       "$PROJECT/src/agent-step/handoff.ts"

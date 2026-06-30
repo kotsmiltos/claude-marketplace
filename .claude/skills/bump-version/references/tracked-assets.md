@@ -23,6 +23,7 @@ The embedded runner. Replaced byte-for-byte from the new source; never hand-merg
 - `skills/create-tool/templates/agent-step/state.ts`
 - `skills/create-tool/templates/agent-step/runner.ts`
 - `skills/create-tool/templates/agent-step/runner.test.ts`
+- `skills/create-tool/templates/agent-step/zod-state.test.ts` — isolation test: the runner derives its merger from a Zod state schema (reducers read off `withLangGraph` channels)
 - `skills/create-tool/templates/agent-step/paginate.ts`
 - `skills/create-tool/templates/agent-step/paginate.test.ts`
 - `skills/create-tool/templates/agent-step/handoff.ts`

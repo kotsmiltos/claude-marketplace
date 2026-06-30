@@ -10,7 +10,7 @@ import type {
   SelectorRegistry,
   VerifierRegistry,
 } from "../../agent-step/index.js";
-import { AgentState, type State } from "../../state.js";
+import { AgentStateSchema, type State } from "../../state.js";
 import { {{TOOL_NAME}}Config, type ActionName } from "./config.js";
 
 // ─── State selectors — one file per action under actions/<name>/stateSelector.ts.
@@ -57,7 +57,7 @@ const verifiers: VerifierRegistry<State> = {
 
 export const {{TOOL_NAME}}Tool = buildAgentStepTool({
   config: {{TOOL_NAME}}Config,
-  stateAnnotation: AgentState,
+  stateSchema: AgentStateSchema,
   selectors,
   executors,
   verifiers,

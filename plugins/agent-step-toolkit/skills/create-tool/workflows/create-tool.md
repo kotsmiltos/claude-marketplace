@@ -138,7 +138,7 @@ Use the `templates/` files as starting points. Fill in concrete values from the 
 
 Then graph-level wiring:
 
-9. `src/state.ts` — add the per-tool state slots with explicit reducers (`awaitingInput` and `currentFlow` are already declared by the bootstrap; reuse them). Ensure `export type State = typeof AgentState.State;` is present — selectors and executors import it.
+9. `src/state.ts` — add the per-tool state slots to the single Zod `AgentStateSchema`, each carrying its reducer/default via `withLangGraph` (the library-managed slots are already spread in via `agentStepZodShape`; reuse them). `export type State = ExtractStateType<typeof AgentStateSchema>;` is already present — selectors and executors import it. If a new slot is **executor-written (not caller input)**, add its key to `AgentInputSchema`'s `.omit({...})` so it can't be injected at the invoke boundary.
 10. `src/tools/index.ts` — register the new tool in the `tools` array
 11. `src/prompt.ts` — add ACTIONS block(s) and (if mutations exist) extend MUTATION SAFETY
 
@@ -157,7 +157,7 @@ The shared test harness (`src/test-harness/`) already exists from bootstrap. Sca
 
 Create under `src/tools/<name>/tests/`:
 
-1. `tests/tool/_setup.ts` ← `templates/tool-test-setup.ts.template` — wire `toolOpts` (config + stateAnnotation + selectors + executors + verifiers, mirroring `index.ts`; selectors and executors keyed by action name), `seedState`, and `resetToSeed` (adapt the reset to the backend's sandbox protocol).
+1. `tests/tool/_setup.ts` ← `templates/tool-test-setup.ts.template` — wire `toolOpts` (config + stateSchema + selectors + executors + verifiers, mirroring `index.ts`; selectors and executors keyed by action name), `seedState`, and `resetToSeed` (adapt the reset to the backend's sandbox protocol).
 2. `tests/tool/seed.json` ← `templates/tool-seed.json.template` — the canonical seed `resetToSeed` resets to.
 3. `tests/tool/<action>.test.ts` ← `templates/tool-sandbox-test.ts.template` — one sandbox test file per action (or per cohesive action group). Fill the coverage bar: happy verdict, each terminal verdict, one short-circuit, plus any flow-controller mode the action declares.
 4. `tests/tool/FINDINGS.md` ← `templates/findings.md.template` (substitute `{{LAYER}}` = `sandbox`).
@@ -178,7 +178,7 @@ Expected: zero errors in the new tool's files. (Unrelated WIP errors in other di
 ```bash
 npx tsc && node --test dist/agent-step/*.test.js
 ```
-Expected: all library unit tests still pass (currently 89: runner + paginate + handoff). The count may grow as the library evolves — what matters is zero failures. The new tool shouldn't affect them.
+Expected: all library unit tests still pass (currently 91: runner + paginate + handoff + zod-state). The count may grow as the library evolves — what matters is zero failures. The new tool shouldn't affect them.
 
 ```bash
 npm run test:sandbox

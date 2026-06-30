@@ -15,7 +15,7 @@ export type {
 } from "./types.js";
 export { defineConfig } from "./define-config.js";
 export { buildAgentStepTool, runSteps } from "./runner.js";
-export type { BuildAgentStepToolOptions, RunResult } from "./runner.js";
+export type { BuildAgentStepToolOptions, RunResult, StateSchemaLike } from "./runner.js";
 
 // Runner-emitted system `summary` strings. Neutral English defaults live in the
 // library; a host overrides them via `BuildAgentStepToolOptions.messages` (e.g.
@@ -33,6 +33,7 @@ export {
   HandoffRequestSchema,
   agentStepStateSpec,
   agentStepZodShape,
+  agentStepInternalSlotMask,
 } from "./state.js";
 export type { AwaitingInput, CurrentFlow, HandoffRequest, LibraryManagedSlots } from "./state.js";
 

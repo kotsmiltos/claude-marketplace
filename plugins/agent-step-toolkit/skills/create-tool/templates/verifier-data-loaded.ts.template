@@ -5,10 +5,8 @@
 // arrays and "helpfully" return 0 — so gate on presence and let the model fetch
 // first. List the SAME slots that DatasetSource (state.ts) exposes to analysis.
 
-import type { AgentState } from "../../../state.js";
+import type { State } from "../../../state.js";
 import type { Verifier } from "../../../agent-step/index.js";
-
-type State = typeof AgentState.State;
 
 export const dataLoaded: Verifier<State> = {
   check: (s) =>

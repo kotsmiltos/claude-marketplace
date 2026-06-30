@@ -11,6 +11,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.17.0] — 2026-06-30
+
+Ships **agent-step library 1.7.0** (`/pull-library` recommended for downstream projects). Makes a
+**Zod state schema a first-class alternative to a LangGraph `Annotation.Root`** — a project defines
+graph state once (single source of truth for reducers AND validation) and derives an invoke-boundary
+input schema. No breaking change (`stateAnnotation` still works). The toolkit's templates, references,
+and workflows now teach **only** the single Zod-schema pattern.
+
+### Added
+- Library **1.7.0**: new `stateSchema` option on `buildAgentStepTool` (accepts a LangGraph
+  `Annotation.Root` OR a Zod object whose fields carry reducer/default metadata via `withLangGraph`);
+  new exports `StateSchemaLike` and `agentStepInternalSlotMask` (omit-mask for deriving a graph input
+  schema); `agentStepZodShape` slots now carry channel reducers/defaults via `withLangGraph`; new
+  `zod-state.test.ts`. See [CHANGELOG.md](CHANGELOG.md) and
+  [migrations/1.6.0-to-1.7.0.md](migrations/1.6.0-to-1.7.0.md).
+
+### Changed
+- Bootstrap + tool templates adopt the single Zod state schema: `state.ts.template` defines one
+  `AgentStateSchema` (`withLangGraph` reducers), exports `State = ExtractStateType<…>` and a derived
+  `AgentInputSchema`; tool/test wiring uses `stateSchema:` (was `stateAnnotation:`); `prompt.ts` /
+  verifier templates import the exported `State`.
+- References (`agent-step-api.md`, `state-and-prompt-integration.md`, `project-bootstrap-structure.md`,
+  `tool-directory-layout.md`, `executor-patterns.md`, `data-analysis-pattern.md`), the create-tool +
+  bootstrap workflows, and SKILL prose updated to the Zod pattern. `stateAnnotation` is documented as
+  a deprecated (still-accepted) alias.
+- **Downstream impact:** `/pull-library` replaces the vendored library and applies the
+  1.6.0→1.7.0 transforms (consolidate `state.ts` to one Zod schema, switch wiring to `stateSchema`).
+  Invoke-boundary validation runtime effect requires a hand-built `StateGraph` (createReactAgent takes
+  no separate input schema).
+
+### Fixed
+- `create-tool` workflow: corrected the stale library unit-test count (89 → 91; added `zod-state`).
+- `bump-version` `tracked-assets.md`: added `zod-state.test.ts` to the Tier-1 library inventory.
+
 ## [0.16.0] — 2026-06-26
 
 Ships **agent-step library 1.6.0** (`/pull-library` recommended for downstream projects — note the

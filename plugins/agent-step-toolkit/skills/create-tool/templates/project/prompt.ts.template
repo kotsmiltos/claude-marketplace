@@ -5,7 +5,7 @@
 // SCOPE, ACTIONS, and (if mutations) MUTATION SAFETY sections.
 
 import type { BaseMessageLike } from "@langchain/core/messages";
-import type { AgentState } from "./state.js";
+import type { State } from "./state.js";
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -103,7 +103,7 @@ If a step returns \`error: 'X_not_verified'\` for some prereq, the runner refuse
 }}
 `;
 
-export function buildPrompt(_state: typeof AgentState.State): BaseMessageLike[] {
+export function buildPrompt(_state: State): BaseMessageLike[] {
   return [
     { role: "system", content: SYSTEM_PROMPT_TEMPLATE.replaceAll("{today}", todayIso()) },
     ...((_state.messages ?? []) as BaseMessageLike[]),

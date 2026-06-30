@@ -44,7 +44,7 @@ src/tools/<name>/
 - The ONLY file where `agent-step/index.js` is consumed.
 - Imports every state selector from `actions/<name>/stateSelector.js` (e.g. `import { getSlice as verifyCustomerSlice } from "./actions/verify_customer/stateSelector.js"`) and every executor from `actions/<name>/executor.js`.
 - Imports every verifier from `verifiers/<name>.js`.
-- Builds `selectors` (with `satisfies SelectorRegistry<State, ActionName>`) and `executors` (`ExecutorRegistry<State, typeof selectors>`), both **keyed by the exact action name**, plus `verifiers`, then calls `buildAgentStepTool({ config, stateAnnotation, selectors, executors, verifiers })`.
+- Builds `selectors` (with `satisfies SelectorRegistry<State, ActionName>`) and `executors` (`ExecutorRegistry<State, typeof selectors>`), both **keyed by the exact action name**, plus `verifiers`, then calls `buildAgentStepTool({ config, stateSchema, selectors, executors, verifiers })` — passing the project's single Zod `AgentStateSchema` as `stateSchema`.
 - Exports the tool as `export const <name>Tool = ...`.
 
 ## actions/<action_name>/stateSelector.ts
@@ -137,7 +137,7 @@ Inside the tool directory, always use relative `./` and `../` paths with `.js` e
 import { postBackend } from "../../backend/client.js";
 import { accountsEnv } from "../../backend/env.js";
 import { resolveAccount } from "../../shared/resolve-account.js";
-import type { AgentState } from "../../../../state.js";
+import type { State } from "../../../../state.js";
 import type { ExecutorResult } from "../../../../agent-step/index.js";
 ```
 

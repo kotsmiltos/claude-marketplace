@@ -59,10 +59,8 @@ Example: `check_pin` (PIN attempt counter for an active card).
 import { postBackend } from "../../backend/client.js";
 import { cardsEnv } from "../../backend/env.js";
 import { tryResolveCard } from "../../shared/resolve-card.js";
-import type { AgentState } from "../../../../state.js";
+import type { State } from "../../../../state.js";
 import type { ExecutorResult } from "../../../../agent-step/index.js";
-
-type State = typeof AgentState.State;
 
 interface Params { lastFour?: string; }
 

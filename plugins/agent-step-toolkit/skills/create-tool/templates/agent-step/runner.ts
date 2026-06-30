@@ -33,6 +33,7 @@
  */
 import { tool } from "@langchain/core/tools";
 import { Command, getCurrentTaskInput } from "@langchain/langgraph";
+import { schemaMetaRegistry } from "@langchain/langgraph/zod";
 import { ToolMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import type {
@@ -102,16 +103,36 @@ interface LangGraphAnnotationLike {
   spec: Record<string, unknown>;
 }
 
-/** Derive a `(a, b) => merged` patch merger from a LangGraph annotation by
- *  invoking each channel's reducer (`BinaryOperatorAggregate.operator`).
- *  Channels without an operator (e.g. `LastValue`) get replace-on-write.
- *  The `messages` field is explicitly skipped — the runner emits its own
- *  `ToolMessage` at commit time; merging intermediate messages would
- *  double-count. */
-function buildMergerFromAnnotation<T>(
-  annotation: LangGraphAnnotationLike,
+/** The host's state schema, accepted in either supported form:
+ *  - a LangGraph `Annotation.Root` (channels live on `.spec`), or
+ *  - a Zod object schema whose fields carry reducer/default metadata via
+ *    `withLangGraph` (channels are derived through the langgraph zod registry).
+ *  Both resolve to the same channel classes, so the merger treats them
+ *  uniformly. */
+export type StateSchemaLike = LangGraphAnnotationLike | z.ZodObject<z.ZodRawShape>;
+
+/** Get the `{ field: channel }` map for either schema form. An `Annotation.Root`
+ *  exposes it directly on `.spec`; a Zod object is converted through the public
+ *  langgraph zod registry, which yields the SAME channel classes
+ *  (`BinaryOperatorAggregate` / `LastValue`). */
+function channelsOf(stateSchema: StateSchemaLike): Record<string, unknown> {
+  if ("spec" in stateSchema && (stateSchema as LangGraphAnnotationLike).spec) {
+    return (stateSchema as LangGraphAnnotationLike).spec;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return schemaMetaRegistry.getChannelsForSchema(stateSchema as any) as Record<string, unknown>;
+}
+
+/** Derive a `(a, b) => merged` patch merger from a host state schema by invoking
+ *  each channel's reducer (`BinaryOperatorAggregate.operator`). Channels without
+ *  an operator (e.g. `LastValue`) get replace-on-write. The `messages` field is
+ *  explicitly skipped — the runner emits its own `ToolMessage` at commit time;
+ *  merging intermediate messages would double-count. The channel map is resolved
+ *  ONCE here (not per merge) and closed over. */
+function buildMergerFromStateSchema<T>(
+  stateSchema: StateSchemaLike,
 ): (a: Partial<T>, b: Partial<T>) => Partial<T> {
-  const channels = annotation.spec ?? {};
+  const channels = channelsOf(stateSchema);
   return (a, b) => {
     const out: Record<string, unknown> = { ...(a as Record<string, unknown>) };
     for (const [field, channel] of Object.entries(channels)) {
@@ -288,9 +309,14 @@ export interface BuildAgentStepToolOptions<
   Selectors extends Record<ActionName, Selector<T>>,
 > {
   config: AgentStepConfig<ActionName, PrereqName>;
-  /** LangGraph `Annotation.Root` for the host's state. Library derives the
-   *  intra-batch merger from each channel's reducer. `messages` is skipped. */
-  stateAnnotation: LangGraphAnnotationLike;
+  /** The host's state schema — a LangGraph `Annotation.Root` OR a Zod object
+   *  whose fields carry reducer/default metadata via `withLangGraph`. The library
+   *  derives the intra-batch merger from each channel's reducer; `messages` is
+   *  skipped. Exactly one of `stateSchema` / `stateAnnotation` must be set. */
+  stateSchema?: StateSchemaLike;
+  /** @deprecated since 1.7.0 — use `stateSchema` (which also accepts a Zod
+   *  object). Retained as an accepted alias; the runner reads whichever is set. */
+  stateAnnotation?: StateSchemaLike;
   /** State selectors keyed 1:1 by action name. The runner runs the selector for
    *  the step's action and hands its return to the executor as `state`. */
   selectors: Selectors;
@@ -537,7 +563,13 @@ export async function runSteps<
   userSteps: { action: string; params: unknown }[],
   initialState: T,
 ): Promise<RunResult<T>> {
-  const { verifiers, stateAnnotation } = opts;
+  const { verifiers } = opts;
+  const stateSchema = opts.stateSchema ?? opts.stateAnnotation;
+  if (!stateSchema) {
+    throw new Error(
+      "agent-step: buildAgentStepTool requires `stateSchema` (the deprecated `stateAnnotation` is also accepted).",
+    );
+  }
   // Widen to the erased supertypes for the execution loop, which indexes
   // actions, selectors and executors by a runtime string. Plain assignments (no
   // cast) — the precise typing already did its job at the construction boundary;
@@ -546,7 +578,7 @@ export async function runSteps<
   const selectors: Record<string, AnySelector> = opts.selectors;
   const executors: Record<string, AnyExecutor> = opts.executors;
   const handoffEnabled = opts.handoff != null;
-  const mergeState = buildMergerFromAnnotation<T>(stateAnnotation);
+  const mergeState = buildMergerFromStateSchema<T>(stateSchema);
   // Runner-emitted `summary` strings: host overrides shallow-merged over the
   // neutral English defaults (see messages.ts). No host import in the library.
   const msgs = resolveSystemMessages(opts.messages);

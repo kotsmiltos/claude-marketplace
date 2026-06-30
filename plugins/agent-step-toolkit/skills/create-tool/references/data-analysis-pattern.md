@@ -52,6 +52,7 @@ Because the column `name`s in `DATASETS` are the *same strings* the VM injects a
 This is the one wiring step that differs from an ordinary read tool. The bootstrap `src/prompt.ts` builds a static template with only `{today}` injected and ignores `state`. The analysis pattern needs the prompt to carry the data contract, so upgrade `buildPrompt` to thread state in and inject two sections:
 
 ```ts
+import type { State } from "./state.js";
 import { DATASETS, buildDataSummary, type DatasetName } from "./tools/<tool>/shared/datasets.js";
 
 // Static — generated once from DATASETS so it can never drift from the VM input.
@@ -71,7 +72,7 @@ function staticSchemaText(): string {
 }
 const SCHEMA_TEXT = staticSchemaText();
 
-export function buildSystemPrompt(state: typeof AgentState.State): string {
+export function buildSystemPrompt(state: State): string {
   const summary = buildDataSummary(state);
   const availableBlock = summary
     ? `# AVAILABLE DATA (live — write the analyze snippet against these)\n\n${summary}\n\n`
@@ -82,7 +83,7 @@ export function buildSystemPrompt(state: typeof AgentState.State): string {
     .replace("{availableData}", availableBlock);
 }
 
-export function buildPrompt(state: typeof AgentState.State): BaseMessageLike[] {
+export function buildPrompt(state: State): BaseMessageLike[] {
   return [{ role: "system", content: buildSystemPrompt(state) }, ...(state.messages ?? [])];
 }
 ```

@@ -1,4 +1,5 @@
 import { Annotation } from "@langchain/langgraph";
+import { withLangGraph } from "@langchain/langgraph/zod";
 import { z } from "zod";
 import type { PagedCache } from "./paginate.js";
 
@@ -163,10 +164,39 @@ export const agentStepStateSpec = {
  *  });
  *  ```
  */
+// NOTE: each slot is wrapped with `withLangGraph` carrying ONLY a `default` (no
+// reducer → last-write-wins, identical to `agentStepStateSpec`'s replaceNull).
+// The channel default is supplied via the meta `default`, NOT a zod `.default()`:
+// `withLangGraph` requires the field's zod input type to equal its value type, so
+// `.optional()`/`.default()` (which widen the input type with `undefined`) cannot
+// be used here. `.nullable()` alone yields `T | null` in/out — matching the meta.
 export const agentStepZodShape = {
-  awaitingInput: AwaitingInputSchema.nullable().optional().default(null),
-  currentFlow: CurrentFlowSchema.nullable().optional().default(null),
-  pagedRead: PagedCacheSchema.nullable().optional().default(null),
-  handoff: HandoffRequestSchema.nullable().optional().default(null),
-  errorCount: z.number().int().nonnegative().nullable().optional().default(null),
+  awaitingInput: withLangGraph(AwaitingInputSchema.nullable(), {
+    default: (): AwaitingInput | null => null,
+  }),
+  currentFlow: withLangGraph(CurrentFlowSchema.nullable(), {
+    default: (): CurrentFlow | null => null,
+  }),
+  pagedRead: withLangGraph(PagedCacheSchema.nullable(), {
+    default: (): PagedCache<unknown> | null => null,
+  }),
+  handoff: withLangGraph(HandoffRequestSchema.nullable(), {
+    default: (): HandoffRequest | null => null,
+  }),
+  errorCount: withLangGraph(z.number().int().nonnegative().nullable(), {
+    default: (): number | null => null,
+  }),
 };
+
+/** The library-managed slot keys as a Zod `.omit()` mask. A host that derives a
+ *  graph INPUT schema from its full state schema omits these so the internal
+ *  slots can never be injected at the invoke boundary (the runner is their only
+ *  writer). Single source of truth for "which slots are library-internal" —
+ *  mirrors {@link agentStepZodShape} / {@link agentStepStateSpec}. */
+export const agentStepInternalSlotMask = {
+  awaitingInput: true,
+  currentFlow: true,
+  pagedRead: true,
+  handoff: true,
+  errorCount: true,
+} as const;

@@ -1,79 +1,33 @@
 // FILE: src/state.ts
 //
-// Graph-level state. Per-tool slots get added as tools are introduced.
-// `awaitingInput` + `currentFlow` + `pagedRead` are library-managed slots used
-// by the runner to coordinate confirmation gates, OTP gates, double-entry-match
-// gates, multi-turn flows, and the `pageable` read reslice-cache. They are NOT
-// declared here — the library exports them as spreadable fragments
-// (`agentStepStateSpec` for the annotation, `agentStepZodShape` for the Zod
-// schema), built from the same source-of-truth schemas the runner mutates, so
-// the host's storage can never drift from the library's contract. See the
-// doc-comments in `src/agent-step/state.ts` for each slot's semantics.
+// Graph-level state — defined ONCE as a Zod schema. Per-tool slots get added as
+// tools are introduced. `awaitingInput` + `currentFlow` + `pagedRead` + `handoff`
+// + `errorCount` are library-managed slots used by the runner to coordinate
+// confirmation gates, OTP gates, double-entry-match gates, multi-turn flows, the
+// `pageable` read reslice-cache, and the auto-handoff counter. They are NOT
+// declared here — the library exports them as a single spreadable Zod fragment
+// (`agentStepZodShape`), built from the same source-of-truth schemas the runner
+// mutates, so the host's storage can never drift from the library's contract.
+// See the doc-comments in `src/agent-step/state.ts` for each slot's semantics.
+//
+// Each channel carries its reducer + default via `withLangGraph` (the langgraph
+// zod-state mechanism): a field with a reducer becomes a `BinaryOperatorAggregate`
+// channel, a field without becomes `LastValue` (replace-on-write). The SAME schema
+// is wired as the graph's `stateSchema` (createReactAgent in agent.ts) AND drives
+// the runner's intra-batch merger (`stateSchema` in each tool's index.ts) — one
+// source of truth for both reducers and validation, no Annotation/Zod drift.
+//
+// NOTE on `withLangGraph` field shape: the channel default is supplied via the
+// meta `default` (NOT a zod `.default()`), and inbound string fields use plain
+// `.nullable()` — `withLangGraph` requires a field's zod input type to equal its
+// value type, which `.optional()`/`.default()` would widen with `undefined`. The
+// graph INPUT schema (`AgentInputSchema`, below) re-introduces optionality so
+// callers may omit fields.
 
-import { Annotation, MessagesAnnotation, MessagesZodState } from "@langchain/langgraph";
+import { MessagesZodState, type ExtractStateType } from "@langchain/langgraph";
+import { withLangGraph } from "@langchain/langgraph/zod";
 import { z } from "zod";
-import { agentStepStateSpec, agentStepZodShape } from "./agent-step/index.js";
-
-export const AgentState = Annotation.Root({
-  ...MessagesAnnotation.spec,
-
-  // Library-managed slots: awaitingInput + currentFlow + pagedRead + handoff,
-  // with the last-writer-wins reducers the runner expects.
-  ...agentStepStateSpec,
-
-  // ─── Channel wire contract (fronting channel middleware) ────────────── //
-  // The middleware invokes every agent with `{ messages, user_id,
-  // customer_code, role, ... }` (snake_case — do NOT rename) and reads the
-  // handoff signal back from the final message + the `pendingHandoff` slot.
-  // See `references/streaming-and-channel-contract.md`. Identity uses
-  // preserve-initial reducers: first non-null value wins across turns.
-  // CAUTION: when the caller omits a field it arrives as `undefined`, not
-  // `null` — executors must `?? null` before writing it anywhere validated.
-
-  /** Channel user id, set by the caller at invoke (absent for anonymous). */
-  user_id: Annotation<string | null>({
-    reducer: (prev, next) => prev ?? next,
-    default: () => null,
-  }),
-
-  /** Bank customer code, set by the caller at invoke (absent for anonymous). */
-  customer_code: Annotation<string | null>({
-    reducer: (prev, next) => prev ?? next,
-    default: () => null,
-  }),
-
-  /** Caller roles (e.g. ["retail"], ["corporate"]); immutable once set. */
-  role: Annotation<string[]>({
-    reducer: (prev, next) => (prev && prev.length > 0 ? prev : (next ?? [])),
-    default: () => [],
-  }),
-
-  /** Client channel identifier, set by the caller at invoke (which surface the
-   *  conversation comes from); immutable once set. Read it for channel-gated
-   *  behavior and forward it in handoff/delegate payloads. */
-  channel: Annotation<string | null>({
-    reducer: (prev, next) => prev ?? next,
-    default: () => null,
-  }),
-
-  /** Channel-handoff signal: written by a tool's handoff executor when the
-   *  caller must be transferred to another service/agent; the post-model hook
-   *  in agent.ts copies it onto the final reply as the `additional_kwargs`
-   *  handoff contract the middleware reads. `null` until a handoff is
-   *  accepted; harmless if the project never adds a handoff action. */
-  pendingHandoff: Annotation<PendingHandoff | null>({
-    reducer: (_, n) => n ?? null,
-    default: () => null,
-  }),
-
-  // ─── Per-tool slots — added by /create-tool as tools are introduced ─── //
-  // Example (uncomment + adapt when adding the first tool):
-  //
-  // verifiedCustomer: Annotation<VerifiedCustomer | null>({
-  //   reducer: (_, n) => n,
-  //   default: () => null,
-  // }),
-});
+import { agentStepZodShape, agentStepInternalSlotMask } from "./agent-step/index.js";
 
 /** The channel-handoff signal payload. Maps onto the wire-contract kwargs:
  *  `serviceType` → `handoff_type` / `handoff_metadata.service_type`,
@@ -90,11 +44,6 @@ export interface PendingHandoff {
   requestedAt: string;
 }
 
-/** The graph's full state type. Tools import this to type their state selectors
- *  (each `stateSelector.ts` projects `State` down to one action's slice) and the
- *  `ExecutorResult<State>` their executors return. */
-export type State = typeof AgentState.State;
-
 const PendingHandoffSchema = z.object({
   service: z.string(),
   serviceType: z.string(),
@@ -105,14 +54,96 @@ const PendingHandoffSchema = z.object({
   requestedAt: z.string(),
 });
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const AgentStateSchema: z.ZodObject<any> = MessagesZodState.extend({
-  // Library-managed slots, mirroring agentStepStateSpec above.
+export const AgentStateSchema = MessagesZodState.extend({
+  // Library-managed slots (awaitingInput + currentFlow + pagedRead + handoff +
+  // errorCount), carrying the last-writer-wins channel semantics the runner
+  // expects. Never re-declare these by hand — spread the library fragment.
   ...agentStepZodShape,
-  user_id: z.string().nullable().optional().default(null),
-  customer_code: z.string().nullable().optional().default(null),
-  role: z.array(z.string()).optional().default([]),
-  channel: z.string().nullable().optional().default(null),
-  pendingHandoff: PendingHandoffSchema.nullable().optional().default(null),
-  // Mirror per-tool slots here as they get added.
+
+  // ─── Channel wire contract (fronting channel middleware) ────────────── //
+  // The middleware invokes every agent with `{ messages, user_id, customer_code,
+  // role, channel, ... }` (snake_case — do NOT rename) and reads the handoff
+  // signal back from the final message + the `pendingHandoff` slot. See
+  // `references/streaming-and-channel-contract.md`. Identity uses preserve-initial
+  // reducers: the first non-null value wins across turns.
+  // CAUTION: when the caller omits a field it arrives as `undefined`, not `null` —
+  // executors must `?? null` before writing it anywhere validated.
+
+  /** Channel user id, set by the caller at invoke (absent for anonymous). */
+  user_id: withLangGraph(z.string().nullable(), {
+    reducer: { fn: (prev: string | null, next: string | null) => prev ?? next },
+    default: (): string | null => null,
+  }),
+
+  /** Bank customer code, set by the caller at invoke (absent for anonymous). */
+  customer_code: withLangGraph(z.string().nullable(), {
+    reducer: { fn: (prev: string | null, next: string | null) => prev ?? next },
+    default: (): string | null => null,
+  }),
+
+  /** Caller roles (e.g. ["retail"], ["corporate"]); immutable once set. */
+  role: withLangGraph(z.array(z.string()), {
+    reducer: {
+      fn: (prev: string[], next: string[]) =>
+        prev && prev.length > 0 ? prev : (next ?? []),
+    },
+    default: (): string[] => [],
+  }),
+
+  /** Client channel identifier, set by the caller at invoke (which surface the
+   *  conversation comes from); immutable once set. Read it for channel-gated
+   *  behavior and forward it in handoff/delegate payloads. */
+  channel: withLangGraph(z.string().nullable(), {
+    reducer: { fn: (prev: string | null, next: string | null) => prev ?? next },
+    default: (): string | null => null,
+  }),
+
+  /** Channel-handoff signal: written by a tool's handoff executor when the caller
+   *  must be transferred to another service/agent; the post-model hook in agent.ts
+   *  copies it onto the final reply as the `additional_kwargs` handoff contract the
+   *  middleware reads. `null` until a handoff is accepted; harmless if the project
+   *  never adds a handoff action. Last-write-wins. */
+  pendingHandoff: withLangGraph(PendingHandoffSchema.nullable(), {
+    reducer: {
+      fn: (_prev: PendingHandoff | null, next: PendingHandoff | null) =>
+        next ?? null,
+    },
+    default: (): PendingHandoff | null => null,
+  }),
+
+  // ─── Per-tool slots — added by /create-tool as tools are introduced ─── //
+  // Example (uncomment + adapt when adding the first tool — define a Zod schema
+  // for the payload, then carry its reducer/default via `withLangGraph`):
+  //
+  // verifiedCustomer: withLangGraph(VerifiedCustomerSchema.nullable(), {
+  //   reducer: {
+  //     fn: (_prev: VerifiedCustomer | null, next: VerifiedCustomer | null) =>
+  //       next ?? null,
+  //   },
+  //   default: (): VerifiedCustomer | null => null,
+  // }),
 });
+
+/** The graph's full state type — the value types nodes receive. Tools import this
+ *  to type their state selectors (each `stateSelector.ts` projects `State` down to
+ *  one action's slice) and the `ExecutorResult<State>` their executors return. */
+export type State = ExtractStateType<typeof AgentStateSchema>;
+
+/** The graph INPUT schema — what the channel middleware / Studio may send at
+ *  invoke. Derived from the state schema by omitting the library-managed slots
+ *  (`agentStepInternalSlotMask` — runner-written only, never caller input) and the
+ *  agent-written `pendingHandoff`, then `.partial()` so every inbound field is
+ *  optional (the CLI sends only `messages`; the channel adds the rest).
+ *
+ *  `createReactAgent` (used in agent.ts) takes no separate `input` schema, so this
+ *  is exported for the day the project graduates to a hand-built graph:
+ *  `new StateGraph({ state: AgentStateSchema, input: AgentInputSchema })` then
+ *  coerces / rejects a wrong-typed or internal-slot-injecting invoke AT THE
+ *  BOUNDARY (a `StateGraphInputError`) instead of letting it crash a downstream
+ *  consumer, and Studio renders a typed input form. Add `z.coerce.*` on a field in
+ *  the state schema above to coerce it at that boundary (e.g. an unquoted JSON
+ *  number → string). */
+export const AgentInputSchema = AgentStateSchema.omit({
+  ...agentStepInternalSlotMask,
+  pendingHandoff: true,
+}).partial();

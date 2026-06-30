@@ -7,11 +7,14 @@ A new tool requires three graph-level patches: declaring state slots, registerin
 <state_ts>
 ## src/state.ts
 
-Add per-tool state slots using LangGraph's `Annotation<T>({ reducer, default })`. The runner extracts each reducer at runtime via `BinaryOperatorAggregate.operator`, so:
+Graph state is defined **once** as a single Zod schema, `AgentStateSchema` (`MessagesZodState.extend({...})`). Each channel carries its reducer + default via `withLangGraph` (from `@langchain/langgraph/zod`) — a field WITH a reducer becomes a `BinaryOperatorAggregate` channel, one WITHOUT becomes `LastValue` (replace-on-write). The same schema is wired as the graph's `stateSchema` (agent.ts) AND passed to `buildAgentStepTool({ stateSchema })` in each tool's `index.ts`, so the runner derives its intra-batch merger from the same reducers. **No separate Annotation, no dual definition.**
 
-- **Always provide an explicit reducer** — even for replace-on-write. Without one, the field gets the default LangGraph behavior (replace-on-write through the `LastValue` channel), which is fine but inconsistent with the explicit pattern the project uses.
+Add per-tool state slots as fields on `AgentStateSchema`:
+
+- **Always carry an explicit reducer** via `withLangGraph` — even for replace-on-write. A plain field (no `withLangGraph`) is `LastValue`, which is fine but inconsistent with the explicit pattern the project uses.
 - **Use record-by-key merge** when multiple identities can be cached. Example: `verifiedCards: Record<string, VerifiedCard>` merges so successive verifications accumulate.
 - **Use replace-on-write** for scalar selections. Example: `activeCardNumber: string | null`.
+- **`withLangGraph` field shape:** supply the channel default via the meta `default` (NOT a zod `.default()`), and use plain `.nullable()` on the field — `withLangGraph` requires the field's zod input type to equal its value type, which `.optional()`/`.default()` would widen with `undefined`.
 
 Pattern:
 
@@ -23,16 +26,21 @@ export interface VerifiedAccount {
   balance: string;
   // ...
 }
+const VerifiedAccountSchema = z.object({
+  accountNumber: z.string(),
+  iban: z.string(),
+  // ...
+});
 
-// In AgentState:
-verifiedAccounts: Annotation<Record<string, VerifiedAccount>>({
-  reducer: (a, b) => ({ ...(a ?? {}), ...(b ?? {}) }),
+// In AgentStateSchema:
+verifiedAccounts: withLangGraph(z.record(z.string(), VerifiedAccountSchema), {
+  reducer: { fn: (a, b) => ({ ...(a ?? {}), ...(b ?? {}) }) },
   default: () => ({}),
 }),
 
-activeAccountNumber: Annotation<string | null>({
-  reducer: (_, n) => n ?? null,
-  default: () => null,
+activeAccountNumber: withLangGraph(z.string().nullable(), {
+  reducer: { fn: (_prev: string | null, next: string | null) => next ?? null },
+  default: (): string | null => null,
 }),
 ```
 
@@ -41,47 +49,46 @@ activeAccountNumber: Annotation<string | null>({
 If the tool receives identity as run context rather than collecting it (see `identity-patterns.md`), declare those fields with a **preserve-initial** reducer so the value set on the first turn survives later turns and isn't clobbered by an empty update:
 
 ```ts
-sessionUserKey: Annotation<string | null>({
-  reducer: (prev, next) => prev ?? next,   // first non-null wins
-  default: () => null,
+sessionUserKey: withLangGraph(z.string().nullable(), {
+  reducer: { fn: (prev: string | null, next: string | null) => prev ?? next }, // first non-null wins
+  default: (): string | null => null,
 }),
 ```
 
-And remember: a default — even one reading an env var — does **not** fill state. The **caller must pass these fields in the invoke input on every run**; the launcher (CLI, server handler, scheduler) owns reading the environment/request and threading them in. A `sessionReady` verifier then just checks presence.
+And remember: a default — even one reading an env var — does **not** fill state. The **caller must pass these fields in the invoke input on every run**; the launcher (CLI, server handler, scheduler) owns reading the environment/request and threading them in. A `sessionReady` verifier then just checks presence. If the field is caller-supplied and you want it coerced/validated at the invoke boundary (e.g. an unquoted JSON number → string), use `z.coerce.string().nullable()` and wire `AgentInputSchema` (below) into a hand-built `StateGraph`.
 
-## Library-managed slots (awaitingInput + currentFlow + pagedRead)
+## Library-managed slots (awaitingInput + currentFlow + pagedRead + handoff + errorCount)
 
-`awaitingInput` / `currentFlow` are required whenever the new tool declares any lifecycle opt on a mutation (`requiresConfirmation`, `requiresOtp`, `issuesOtp`, `requiresMatch`, `startsMatchFor`, `startsFlow`, `endsFlow`, `requiresFlow`); `pagedRead` is required whenever an action declares `pageable`. All three arrive by **spreading the library's exported fragments** — never hand-declare them (the library's `state.ts` doc-comment forbids it; hand-rolled copies drift):
-
-```ts
-import { agentStepStateSpec } from "./agent-step/index.js";
-
-export const AgentState = Annotation.Root({
-  ...MessagesAnnotation.spec,
-  ...agentStepStateSpec,   // awaitingInput + currentFlow + pagedRead, correct reducers
-  // … per-tool slots …
-});
-```
-
-The bootstrap template already does this. Shared across all tools — only one of each in the whole graph; subsequent tools reuse them.
-
-## Zod schema (if state.ts declares one)
-
-This project declares `AgentStateSchema` (Zod) alongside the Annotation for input validation. If your new tool adds state fields, mirror them in the Zod schema:
+`awaitingInput` / `currentFlow` are required whenever the new tool declares any lifecycle opt on a mutation (`requiresConfirmation`, `requiresOtp`, `issuesOtp`, `requiresMatch`, `startsMatchFor`, `startsFlow`, `endsFlow`, `requiresFlow`); `pagedRead` whenever an action declares `pageable`; `handoff` / `errorCount` for the library handoff + auto-handoff guard. All arrive by **spreading the library's exported `agentStepZodShape` fragment** — never hand-declare them (the library's `state.ts` doc-comment forbids it; hand-rolled copies drift). Each slot in the fragment is already wrapped with `withLangGraph` carrying the runner's expected reducer/default:
 
 ```ts
-const VerifiedAccountSchema = z.object({
-  accountNumber: z.string(),
-  iban: z.string(),
-  // ...
+import { MessagesZodState, type ExtractStateType } from "@langchain/langgraph";
+import { withLangGraph } from "@langchain/langgraph/zod";
+import { agentStepZodShape, agentStepInternalSlotMask } from "./agent-step/index.js";
+
+export const AgentStateSchema = MessagesZodState.extend({
+  ...agentStepZodShape,    // awaitingInput + currentFlow + pagedRead + handoff + errorCount, correct reducers
+  // … per-tool slots (withLangGraph) …
 });
 
-// In AgentStateSchema:
-verifiedAccounts: z.record(z.string(), VerifiedAccountSchema).optional().default({}),
-activeAccountNumber: z.string().nullable().optional().default(null),
+/** Value types nodes receive — tools import this to type selectors + ExecutorResult. */
+export type State = ExtractStateType<typeof AgentStateSchema>;
 ```
 
-The `awaitingInput` / `currentFlow` / `pagedRead` Zod fields come from spreading the library's `agentStepZodShape` into `AgentStateSchema` (the bootstrap template already does this) — never re-declare them by hand. The individual schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `PagedCacheSchema`) are also exported from `index.ts` if a host needs one directly.
+The bootstrap template already does this. Shared across all tools — only one of each in the whole graph; subsequent tools reuse them. The individual schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are also exported from `index.ts` if a host needs one directly.
+
+## Graph INPUT schema (invoke-boundary validation)
+
+`state.ts` also exports `AgentInputSchema` — the state schema minus the library-managed slots (via `agentStepInternalSlotMask`, which are runner-written only) and any executor-derived slots, then `.partial()`:
+
+```ts
+export const AgentInputSchema = AgentStateSchema.omit({
+  ...agentStepInternalSlotMask,
+  pendingHandoff: true,   // + any other executor-written / derived slot
+}).partial();
+```
+
+When you add a per-tool slot that is **executor-written (not caller input)**, add its key to this `.omit({...})` so it can't be injected at the invoke boundary. `AgentInputSchema` is consumed by a hand-built `new StateGraph({ state: AgentStateSchema, input: AgentInputSchema })`; the `createReactAgent` scaffold takes no separate `input` schema, so it ships exported-but-unwired until the project graduates to a hand-built graph.
 </state_ts>
 
 <tools_index_ts>
