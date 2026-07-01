@@ -79,14 +79,18 @@ The bootstrap template already does this. Shared across all tools — only one o
 
 ## Graph INPUT schema (invoke-boundary validation)
 
-`state.ts` also exports `AgentInputSchema` — the state schema minus the library-managed slots (via `agentStepInternalSlotMask`, which are runner-written only) and any executor-derived slots, then `.partial()`:
+`state.ts` also exports `AgentInputSchema` — the state schema minus the library-managed slots (via `agentStepInternalSlotMask`, which are runner-written only) and any executor-derived slots, then `.partial()`, with `messages` re-attached from its native shape:
 
 ```ts
 export const AgentInputSchema = AgentStateSchema.omit({
   ...agentStepInternalSlotMask,
   pendingHandoff: true,   // + any other executor-written / derived slot
-}).partial();
+})
+  .partial()
+  .extend({ messages: MessagesZodState.shape.messages });
 ```
+
+Re-attach `messages` after `.partial()` — do **not** leave it partial. `.partial()` wraps every field in an optional and strips the messages-channel metadata LangGraph Studio keys off to render the chat input box; without the re-attach Studio falls back to the raw-state editor ("pass new messages as state"). The caller-supplied fields stay optional, while `messages` keeps its native typed-and-required messages shape (`MessagesZodState` is already imported for `AgentStateSchema`).
 
 When you add a per-tool slot that is **executor-written (not caller input)**, add its key to this `.omit({...})` so it can't be injected at the invoke boundary. `AgentInputSchema` is consumed by a hand-built `new StateGraph({ state: AgentStateSchema, input: AgentInputSchema })`; the `createReactAgent` scaffold takes no separate `input` schema, so it ships exported-but-unwired until the project graduates to a hand-built graph.
 </state_ts>

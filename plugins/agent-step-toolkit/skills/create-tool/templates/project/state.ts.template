@@ -142,8 +142,17 @@ export type State = ExtractStateType<typeof AgentStateSchema>;
  *  BOUNDARY (a `StateGraphInputError`) instead of letting it crash a downstream
  *  consumer, and Studio renders a typed input form. Add `z.coerce.*` on a field in
  *  the state schema above to coerce it at that boundary (e.g. an unquoted JSON
- *  number → string). */
+ *  number → string).
+ *
+ *  `messages` is re-attached from `MessagesZodState` (NOT left under `.partial()`):
+ *  `.partial()` wraps every field in an optional and strips the messages-channel
+ *  metadata that LangGraph Studio keys off to render the chat input box — without it
+ *  Studio falls back to the raw-state editor ("pass new messages as state"). So the
+ *  caller-supplied fields stay optional, while `messages` keeps its native
+ *  typed-and-required messages shape. */
 export const AgentInputSchema = AgentStateSchema.omit({
   ...agentStepInternalSlotMask,
   pendingHandoff: true,
-}).partial();
+})
+  .partial()
+  .extend({ messages: MessagesZodState.shape.messages });

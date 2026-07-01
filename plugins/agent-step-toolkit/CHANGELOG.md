@@ -12,6 +12,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.7.1] — 2026-06-30
+
+Patch: corrects the recommended `AgentInputSchema` derivation so LangGraph Studio renders its chat
+input box. The 1.7.0 recipe ran `.partial()` over the whole input schema, which strips the
+`messages` channel metadata Studio keys off — Studio then fell back to the raw-state editor ("pass
+new messages as state") instead of the message input box. No library code change (the vendored
+runner is byte-identical to 1.7.0); the fix is in the toolkit's project-state template + references.
+Absorbed from a downstream agent that hit the missing-chat-box symptom after migrating its graph
+input to `AgentInputSchema`. Migration: [migrations/1.7.0-to-1.7.1.md](migrations/1.7.0-to-1.7.1.md).
+
+### Changed
+- **`AgentInputSchema` re-attaches `messages` after `.partial()`** —
+  `AgentStateSchema.omit({...}).partial().extend({ messages: MessagesZodState.shape.messages })`.
+  The caller-supplied identity fields stay optional, while `messages` keeps its native
+  typed-and-required messages shape (with the channel metadata) so Studio renders the chat input box.
+  `MessagesZodState` is already imported for `AgentStateSchema`, so no new import is needed.
+
 ## [1.7.0] — 2026-06-30
 
 Additive: a **Zod state schema is now a first-class alternative to a LangGraph `Annotation.Root`**.
