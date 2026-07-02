@@ -53,7 +53,14 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:2024/info
 ```
 
 - `200` → continue. (The body looks like `{"flags":{"assistants":true,"crons":false}}`.)
-- `404` / connection refused → the server isn't up. Start it with the **project's** dev command — commonly `npm run dev`, `npx @langchain/langgraph-cli dev`, or a `docker compose up -d` service if the graph runs in a container. Then poll `/info` until `200` (typical ready time 5–15s; fail after ~60s with a clear message). Don't guess a start command if the repo documents one — read `package.json` scripts / `README` / `langgraph.json` first.
+- `404` / connection refused → before starting anything, **sweep for an already-running instance on another port** (the server may be up somewhere other than the configured port):
+```bash
+for p in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE ':[0-9]+ \(LISTEN\)' | grep -oE '[0-9]+' | sort -un); do
+  body=$(curl -s -m 1 "http://localhost:$p/info" 2>/dev/null)
+  case "$body" in *'"flags"'*) echo "LangGraph instance on port $p";; esac
+done
+```
+  If instances exist, confirm which one serves THIS project before using it (host process: `ps -p <pid> -o command=` + `lsof -p <pid> | grep cwd`; container: `docker ps` + `docker inspect`; or match `/assistants/search` graph ids against this project's `langgraph.json`) — running the conversation against another project's server produces a thread the analysis can't explain. Only if no instance serves this project: start it with the **project's** dev command — commonly `npm run dev`, `npx @langchain/langgraph-cli dev`, or a `docker compose up -d` service if the graph runs in a container. Then poll `/info` until `200` (typical ready time 5–15s; fail after ~60s with a clear message). Don't guess a start command if the repo documents one — read `package.json` scripts / `README` / `langgraph.json` first.
 
 Discover the graph id (don't assume it's `"agent"`):
 ```bash
@@ -101,10 +108,33 @@ Rules:
 - `/runs/wait` blocks until the turn completes. Chain turns sequentially using the same `thread_id` so the agent sees prior context.
 - From each response, extract the last AI message (`messages[-1].content`) and show it to the user with the turn index.
 - If the graph exposes top-level decision signals on the response (routing/classification/branch fields, a detected tool/handoff, a confidence score, etc.), surface those too so the user can see which path the turn took. Which fields exist is graph-specific — read them from the response `values`, don't assume a fixed set.
+- **Handoff turns (channel contract).** Check the final AI message's `additional_kwargs`: `is_handoff: true` means the agent signalled a transfer — print `handoff_type` + `handoff_reason` (+ `handoff_metadata.success_message`) with the turn. A `delegated_to` field WITHOUT `is_handoff` means the agent delegated the turn and kept the conversation. Also surface handoff state slots if the graph writes them (e.g. `pendingHandoff`, `handoff`).
+- **No middleware locally.** In production a fronting middleware routes on handoff signals (re-sends `off_topic` turns to another agent; flips routing after `completed`/`abandon`). The dev server does none of that — turns after a handback keep hitting the same agent, which simulates "the middleware never transferred". Treat a handback as the realistic end of the test conversation unless the user explicitly wants to probe post-handback behavior.
+- **Identity sticks from turn 1.** Channel-fronted graphs commonly declare session-context fields (`user_id`, `customer_code`, `role`, `channel`) with preserve-initial reducers: the first non-null value wins and later turns CANNOT change it. Pass identity on the first turn; to test a different identity, start a new thread — don't try to switch mid-thread (it silently does nothing).
 
 After all turns finish, print:
 - `thread_id: {uuid}`
 - 1 line per turn: `[N] user: "..." → agent: "..."` (truncated, with any non-default decision signals).
+</phase>
+
+<phase name="3b_streaming_capture">
+**Phase 3b (opt-in): Streaming wire capture**
+
+ONLY when the user asks to verify streaming/wire behavior (token order, handoff events, custom control-plane events) — the default for turn-running stays `/runs/wait`. Replace the turn's call with a raw SSE capture:
+
+```bash
+curl -sN -X POST "http://localhost:2024/threads/{THREAD_ID}/runs/stream" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assistant_id": "{GRAPH_ID}",
+    "input": { "messages": [{"role": "user", "content": "{USER_TEXT}"}] },
+    "stream_mode": ["messages-tuple", "updates", "custom"]
+  }' | tee /tmp/capture-turn-{N}.sse | grep "^event:" | uniq -c
+```
+
+- `messages` events carry LLM tokens; `updates` carry per-node state deltas (where a post-model hook's or a resolver node's `is_handoff` final message surfaces — it may NEVER appear in the token stream); `custom` carries control-plane events some graphs emit (e.g. `handoff`, `delegated_token`, `handoff_complete`).
+- Summarize the event ORDER for the user (which event types, from which nodes, in what sequence) and keep the raw `.sse` file — it doubles as a golden fixture for stream-consumer tests.
+- The captured run still lands on the thread, so Phase 4's analysis covers it too.
 </phase>
 
 <phase name="4_handoff">
@@ -130,6 +160,7 @@ Accept flexible phrasings. Parse and, when ambiguous, echo your interpretation b
 - `POST /assistants/search` — list registered graphs (body: `{"limit": N}`); read `graph_id`.
 - `POST /threads` — create a thread (body: `{}`).
 - `POST /threads/{thread_id}/runs/wait` — synchronous run (body: `{"assistant_id": "<graph_id>", "input": {...}}`).
+- `POST /threads/{thread_id}/runs/stream` — SSE run for the opt-in Phase 3b wire capture (body adds `"stream_mode": ["messages-tuple", "updates", "custom"]`).
 
 **Input shape** mirrors the graph's input-state annotation:
 - `messages[]` — required (LangChain-style `{role, content}` entries).
@@ -150,7 +181,7 @@ Don't assume `2024`. Resolve the port from the project (Phase 0: dev script `--p
 </pitfall>
 
 <pitfall name="using_non_blocking_runs">
-Use `/runs/wait`, not `/runs/stream` or `/runs`. The latter two return immediately and require polling, which complicates turn chaining.
+Use `/runs/wait` for ordinary turn-running, not `/runs/stream` or `/runs` — non-blocking runs complicate turn chaining. The ONE exception is the deliberate Phase 3b streaming capture (verifying token/event order on the wire), which consumes the SSE stream to completion before the next turn.
 </pitfall>
 
 <pitfall name="new_thread_per_turn">

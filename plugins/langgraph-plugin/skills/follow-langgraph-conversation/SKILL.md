@@ -16,34 +16,51 @@ Graph-agnostic. This skill knows the LangGraph dev-server and LangSmith **API sh
 <quick_start>
 Given a thread_id, run through these phases in order:
 
-0. **Discover config** — the dev-server port and the LangSmith credentials, read from the project's files.
+0. **Discover the environment** — find the running instance that OWNS the thread (not just the configured port), map it to its project, and inventory the available monitoring sources (dev-server API, LangSmith key/endpoint/tracing, logs, other tracing backends).
 1. **LangGraph dev server** — thread state, runs list, full checkpoint history.
-2. **LangSmith cloud** — trace tree, LLM prompts and responses (only if LangSmith is enabled — see Phase 2 prerequisites).
+2. **LangSmith** — trace tree, LLM prompts and responses (only if Phase 0 found it available — key + endpoint + traces in the thread's time window).
 3. **Analysis** — state-progression table, root-cause identification.
 
-All queries use `curl` piped to `python3` for JSON parsing. This doc writes `2024` as a placeholder — use the port resolved in Phase 0.
+All queries use `curl` piped to `python3` for JSON parsing. This doc writes `2024` as a placeholder — use the owning instance's port from Phase 0.
 </quick_start>
 
 <process>
 
-<phase name="0_discover_config">
-**Phase 0: Discover the configuration**
+<phase name="0_discover_environment">
+**Phase 0: Discover the environment (instance, monitoring sources, credentials)**
 
-Read the project before assuming anything. Two things live in the project, not in defaults — the dev-server **port** and the **LangSmith credentials**.
+Three detections, in order. Print the resulting **monitoring inventory** before investigating, so the user sees which sources the analysis can and cannot use.
 
-**Port.** Scan, in order: `langgraph.json` (the `graphs` map gives candidate graph ids; the `env` key names the env file the server loads), `package.json` dev script (a `--port` flag, else the CLI default `2024`), `docker-compose.y*ml` (the published `host:container` port mapping for the langgraph service), and the README. Resolve to one port; if it's unclear and `/info` isn't reachable, **ask the user**.
+**0a. Locate the instance that OWNS the thread.** A `thread_id` lives in ONE server's storage (the dev server persists per project — a local `.langgraph_api/` directory unless external `DATABASE_URI` persistence is configured). A 404 on some port does NOT mean the thread doesn't exist — it usually means you asked the wrong instance.
 
-**LangSmith credentials.** The API key and project name almost always live in the agent's **`.env`** — specifically the file `langgraph.json`'s `env` key points at (commonly `.env`, sometimes a nested path like `config/<agent>/.env`). Read them straight from there:
-
+1. Collect candidate ports: the project-configured one (`langgraph.json` env file, `package.json` dev-script `--port`, `docker-compose.y*ml` port mapping, README — strongest signal first; CLI default `2024`) PLUS every live listener that answers like a LangGraph server:
 ```bash
-grep -E '^(LANGSMITH_API_KEY|LANGCHAIN_API_KEY|LANGSMITH_PROJECT|LANGSMITH_TRACING|LANGCHAIN_TRACING_V2)=' .env
+for p in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE ':[0-9]+ \(LISTEN\)' | grep -oE '[0-9]+' | sort -un); do
+  body=$(curl -s -m 1 "http://localhost:$p/info" 2>/dev/null)
+  case "$body" in *'"flags"'*) echo "LangGraph instance on port $p";; esac
+done
 ```
+2. Ask each live instance for the thread — the owner returns `200`:
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://localhost:{PORT}/threads/{thread_id}
+```
+3. Map the owning instance to its project (so Phase 0b reads the RIGHT `.env` and state definitions): for a host process, `ps -p <pid> -o command=` + `lsof -p <pid> | grep cwd` give the CLI command and working directory; for a container, `docker ps --format '{{.Names}} {{.Ports}}'` + `docker inspect <name>` (mounts/env) identify the project. Cross-check via `POST /assistants/search` — the instance's `graph_id`s must match the project's `langgraph.json` `graphs` map.
+4. If NO live instance owns the thread: the server that recorded it isn't running. Identify the likely project (a `.langgraph_api/` directory marks where a dev server has run), report that the thread's storage is offline, and ask before starting anything.
 
-- `LANGSMITH_API_KEY` (or legacy `LANGCHAIN_API_KEY`) — the key for Phase 2.
-- `LANGSMITH_PROJECT` — the session/project name to query in Phase 2.
-- `LANGSMITH_TRACING=true` (or legacy `LANGCHAIN_TRACING_V2=true`) — tracing is only being **recorded** when this is on. If it's absent/false, expect no cloud traces and lean on Phase 1.
+**0b. Inventory the monitoring methods.** Build the menu of available sources for THIS investigation:
 
-If the server runs in a container and the values are injected there rather than committed to a local `.env`, read them from the running process instead: `docker exec <container> printenv LANGSMITH_API_KEY`. Only ask the user for a key if neither source has it.
+- **Dev-server API** — available iff 0a found the owning instance (state / runs / checkpoint history → Phase 1).
+- **LangSmith** — detect from the owning project's env, three facts, each from the project's env file (the one `langgraph.json`'s `env` key names), then the running instance's environment (`docker exec <container> printenv …`, or `ps eww <pid>` for a host process), then the shell env:
+```bash
+grep -E '^(LANGSMITH_API_KEY|LANGCHAIN_API_KEY|LANGSMITH_PROJECT|LANGSMITH_TRACING|LANGCHAIN_TRACING_V2|LANGSMITH_ENDPOINT|LANGCHAIN_ENDPOINT)=' .env
+```
+  - **Key**: `LANGSMITH_API_KEY` (legacy `LANGCHAIN_API_KEY`). No key anywhere → LangSmith unavailable.
+  - **Endpoint**: `LANGSMITH_ENDPOINT` (legacy `LANGCHAIN_ENDPOINT`) — default `https://api.smith.langchain.com`, but EU (`https://eu.api.smith.langchain.com`) and self-hosted deployments differ. Carry the resolved base URL through every Phase 2 query.
+  - **Recording**: `LANGSMITH_TRACING=true` (legacy `LANGCHAIN_TRACING_V2=true`) — and note it must have been on **when the thread ran**: confirm in Phase 2 by checking traces actually exist in the thread's time window (`updated_at` from 1a) rather than trusting the current flag.
+- **Process/container logs** — `docker logs <container>` for containerized servers; the dev terminal's stdout for host processes (note availability, don't dump).
+- **Other tracing backends** — sweep the same env sources for `LANGFUSE_*` / `OTEL_EXPORTER_*` vars; if present, note them as additional sources the user may want consulted (this skill queries LangSmith only).
+
+Report the inventory as one short list (source → available/unavailable + why), then proceed with the available ones.
 </phase>
 
 <phase name="1_langgraph_dev_server">
@@ -58,6 +75,10 @@ curl -s http://localhost:2024/threads/{thread_id} | python3 -m json.tool
 ```
 
 Extract: `status`, `updated_at`, and the `values` keys. From `values`, note the message list plus whatever **domain signals** your graph writes — routing/classification decisions, detected tools, confidence scores, extracted arguments, input-context fields, accumulated lists, etc. (Read the `values` to learn which fields exist; they are graph-specific.)
+
+Two cross-graph signals worth checking explicitly:
+- **Handoff kwargs on AI messages** — `additional_kwargs.is_handoff` (+ `handoff_type`, `handoff_reason`, `handoff_metadata`) marks a channel-handoff turn; `delegated_to` WITHOUT `is_handoff` marks a delegated-and-kept turn. Handoff state slots (e.g. `pendingHandoff`, `handoff`) corroborate.
+- **Step-batch tool envelopes** — when tool messages carry `{ summary, results: [...] }` with per-step entries (`{ action, ok, verdict/error, ... }`), tabulate them: action name, ok, verdict per step is the densest decision trail in the thread (which steps the model batched, which were refused — prereq denials, sole-step refusals, pending-input locks — and which executors failed).
 
 **1b. All runs for the thread**
 
@@ -114,6 +135,12 @@ for i, cp in enumerate(data):
 
 To inspect a large field (retrieved docs, full conversation, a big formatted blob), pull it from `vals` on the specific checkpoint of interest — don't widen `SKIP`'s exclusions globally or the dump becomes unreadable.
 
+**Node-built final messages & stream-only events**
+
+Some graphs end a turn with a message a NODE constructed (e.g. a handoff resolver, a post-model hook rewriting the reply) rather than an LLM generation. Two consequences for the investigation:
+- In LangSmith there is **no LLM run** for that message — don't hunt for a "missing" LLM call; read the node's run (`run_type=chain`) instead. The checkpoint history shows which node appended it.
+- **Custom control-plane events** (e.g. `handoff`, `delegated_token`, `handoff_complete`) are stream-only — they exist neither in checkpoints nor in `/threads/{id}` values. To observe them, re-run the turn with the `run-langgraph-conversation` skill's streaming-capture mode (`stream_mode: ["messages-tuple","updates","custom"]`).
+
 **`/history` deserialization caveat**
 
 `/history` can return HTTP 500 (e.g. `Invalid identifer: $`) when a thread's messages include a **custom message subclass** the checkpoint deserializer doesn't recognise. When you hit this:
@@ -126,16 +153,17 @@ To inspect a large field (retrieved docs, full conversation, a big formatted blo
 
 LangSmith provides the detailed LLM-level traces (prompts, responses, token counts) that the dev server doesn't expose.
 
-**Prerequisites**: LangSmith is opt-in and often **off by default**. You already located the key, project name, and tracing flag in Phase 0 (from the agent's `.env`, or the running container). Export the key for the queries below:
+**Prerequisites**: LangSmith is opt-in and often **off by default**. You already located the key, endpoint, project name, and tracing flag in Phase 0b (from the owning project's `.env`, the running instance's environment, or the shell). Export both for the queries below:
 ```bash
 export LANGSMITH_API_KEY=$(grep -E '^LANGSMITH_API_KEY=' .env | cut -d= -f2-)
+export LANGSMITH_BASE=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
 ```
-If the tracing flag wasn't on (`LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`), or no key exists anywhere, **skip Phase 2 entirely** and rely on Phase 1 + the final assistant message — there will be no cloud traces to retrieve.
+If the tracing flag wasn't on (`LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`), or no key exists anywhere, **skip Phase 2 entirely** and rely on Phase 1 + the final assistant message. Even with the flag on NOW, verify traces exist for the thread's time window (compare `updated_at` from 1a against 2b's results) — tracing may have been off when the thread actually ran.
 
 **2a. Find the project/session ID**
 
 ```bash
-curl -s "https://api.smith.langchain.com/api/v1/sessions" \
+curl -s "$LANGSMITH_BASE/api/v1/sessions" \
   -H "x-api-key: $LANGSMITH_API_KEY" | python3 -c "
 import json, sys
 for p in json.load(sys.stdin):
@@ -146,7 +174,7 @@ for p in json.load(sys.stdin):
 **2b. List trace runs (note: `session` is an array)**
 
 ```bash
-curl -s -X POST "https://api.smith.langchain.com/api/v1/runs/query" \
+curl -s -X POST "$LANGSMITH_BASE/api/v1/runs/query" \
   -H "x-api-key: $LANGSMITH_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -171,7 +199,7 @@ Match traces to thread runs by comparing timestamps and run IDs. LangGraph run I
 For each LLM run (look for `run_type=llm`, typically named after the chat model, e.g. `AzureChatOpenAI` / `ChatOpenAI`):
 
 ```bash
-curl -s "https://api.smith.langchain.com/api/v1/runs/{RUN_ID}" \
+curl -s "$LANGSMITH_BASE/api/v1/runs/{RUN_ID}" \
   -H "x-api-key: $LANGSMITH_API_KEY" | python3 -c "
 import json, sys
 r = json.load(sys.stdin)
@@ -209,7 +237,7 @@ For long prompts, slice further: `print(content[5000:12000])`. Read the system p
 **2d. Get graph-node inputs/outputs**
 
 ```bash
-curl -s "https://api.smith.langchain.com/api/v1/runs/{NODE_RUN_ID}" \
+curl -s "$LANGSMITH_BASE/api/v1/runs/{NODE_RUN_ID}" \
   -H "x-api-key: $LANGSMITH_API_KEY" | python3 -c "
 import json, sys
 r = json.load(sys.stdin)
@@ -265,6 +293,7 @@ Identify the root cause(s), distinguishing between:
 - **Tool / retrieval gaps** — an external call returned nothing relevant (inspect that node's output payload and the query it actually sent).
 - **Code logic errors** — a node mishandled the LLM output (rare; usually visible in the node's outputs payload).
 - **State-management issues** — a reducer didn't apply as expected (e.g. a preserve-initial reducer keeping a stale value across turns, or an append reducer duplicating).
+- **Handoff/routing decision errors** — the agent handed off when it should have answered (or vice versa), picked the wrong target/signal, or a handoff was refused by a guardrail (`service_disabled`, business-hours gates, sole-step batch refusals) and the prompt's recovery didn't fire. Check the handoff kwargs/slots from 1a and the step-batch envelope verdicts. Remember the dev server has no fronting middleware: locally, post-handback turns hitting the same agent is expected, not a bug.
 </phase>
 
 </process>
@@ -307,6 +336,18 @@ An HTTP 500 from `/history` is usually an app-side checkpoint-deserialization is
 
 <pitfall name="only_checking_last_run">
 If there are retry runs (the user re-sent a similar message), compare ALL failing runs. The graph may have decided differently each time, revealing whether the issue is deterministic or probabilistic.
+</pitfall>
+
+<pitfall name="trusting_the_configured_port">
+A 404 for the thread on the project-configured port does NOT mean the thread is gone — another instance (different port, different project, a container) may own it. Phase 0a's live-instance sweep + per-instance thread probe exists precisely for this; run it before concluding anything from a 404.
+</pitfall>
+
+<pitfall name="hardcoding_the_langsmith_endpoint">
+`api.smith.langchain.com` is only the default. EU tenants and self-hosted LangSmith use a different base URL (`LANGSMITH_ENDPOINT` / legacy `LANGCHAIN_ENDPOINT`). Querying the wrong endpoint reads as "no traces" when the traces exist elsewhere — resolve the endpoint in Phase 0b and use it everywhere.
+</pitfall>
+
+<pitfall name="trusting_the_current_tracing_flag">
+`LANGSMITH_TRACING=true` today doesn't mean it was on when the thread ran. Verify traces exist in the thread's time window before concluding anything from their presence or absence.
 </pitfall>
 
 <pitfall name="assuming_a_fixed_state_schema">

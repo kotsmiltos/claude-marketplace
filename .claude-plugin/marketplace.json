@@ -25,8 +25,8 @@
     {
       "name": "langgraph-plugin",
       "source": "./plugins/langgraph-plugin",
-      "description": "Run and debug LangGraph.js conversations: /run-langgraph-conversation executes a single- or multi-turn test conversation against the local dev server and captures the thread; /follow-langgraph-conversation investigates any thread end-to-end (dev-server checkpoint history + optional LangSmith traces) and produces root-cause analysis. Discovers the server port and LangSmith credentials from the project's own config (langgraph.json, dev script, docker-compose, .env).",
-      "version": "0.2.0",
+      "description": "Run and debug LangGraph.js conversations: /run-langgraph-conversation executes a single- or multi-turn test conversation against the local dev server — finding the running instance that serves the project on any port before starting one — and captures the thread, with an opt-in raw SSE streaming capture (token/handoff/custom event order); /follow-langgraph-conversation investigates any thread end-to-end: locates the instance that OWNS the thread, inventories the available monitoring sources (dev-server checkpoint history, LangSmith traces incl. EU/self-hosted endpoints, process/container logs), reads handoff signals and step-batch tool envelopes, and produces root-cause analysis. Discovers ports, owning instances, graph ids, and LangSmith credentials/endpoint from the project's own config and the live environment (langgraph.json, dev script, docker-compose, .env, running processes/containers).",
+      "version": "0.3.0",
       "author": {
         "name": "Charalampos Kyfonidis"
       },

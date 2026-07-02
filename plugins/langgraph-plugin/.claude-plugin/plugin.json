@@ -1,7 +1,7 @@
 {
   "name": "langgraph-plugin",
-  "version": "0.2.0",
-  "description": "Run and debug LangGraph.js conversations. /run-langgraph-conversation executes a single- or multi-turn test conversation against the local dev server and captures the thread; /follow-langgraph-conversation investigates any thread end-to-end (dev-server checkpoint history + optional LangSmith traces) and produces root-cause analysis.",
+  "version": "0.3.0",
+  "description": "Run and debug LangGraph.js conversations. /run-langgraph-conversation executes a single- or multi-turn test conversation against the local dev server — finding the running instance that serves the project on any port before starting one — and captures the thread, with an opt-in raw SSE streaming capture (token/handoff/custom event order); /follow-langgraph-conversation investigates any thread end-to-end: locates the instance that OWNS the thread, inventories the available monitoring sources (dev-server checkpoint history, LangSmith traces incl. EU/self-hosted endpoints, logs), reads handoff signals and step-batch tool envelopes, and produces root-cause analysis.",
   "author": {
     "name": "Charalampos Kyfonidis"
   },

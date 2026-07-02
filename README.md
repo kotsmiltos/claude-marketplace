@@ -78,13 +78,15 @@ Install:
 Ships two skills:
 
 - **`run-langgraph-conversation`** — execute a single- or multi-turn test conversation against
-  the local dev server (probe `/info`, discover the `graph_id`, create a thread, run each turn
-  with `/runs/wait`, reuse the `thread_id`), surface the replies + any decision signals, then hand
-  off the captured `thread_id` to the analysis skill.
-- **`follow-langgraph-conversation`** — investigate a thread end-to-end: dev-server thread state,
+  the local dev server (find the running instance that serves the project on any port, discover
+  the `graph_id`, create a thread, run each turn with `/runs/wait`, reuse the `thread_id`),
+  surface the replies + any decision/handoff signals, optionally capture a turn's raw SSE stream
+  (token/handoff/custom event order), then hand off the captured `thread_id` to the analysis skill.
+- **`follow-langgraph-conversation`** — investigate a thread end-to-end: locate the instance that
+  OWNS the thread, inventory the available monitoring sources, then dev-server thread state,
   runs, and full checkpoint history (state progression), plus LangSmith traces (LLM prompts /
-  responses / token usage) when tracing is enabled — ending in a state-progression table and
-  root-cause analysis.
+  responses / token usage; EU/self-hosted endpoints supported) when tracing was on for the thread
+  — ending in a state-progression table and root-cause analysis.
 
 ## Layout
 
