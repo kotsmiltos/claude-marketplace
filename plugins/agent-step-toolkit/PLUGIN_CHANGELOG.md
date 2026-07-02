@@ -11,6 +11,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.17.1] — 2026-07-02
+
+Ships **agent-step library 1.7.2** (`/pull-library` recommended for downstream projects — the
+library replacement is the whole upgrade; no project-side transforms). Rolls up library 1.7.1 and
+1.7.2: the LangGraph Studio chat-box `AgentInputSchema` fix and two runtime fixes aligning the
+runner with its documented contract. No new surface.
+
+### Fixed
+- Library **1.7.1** (contributed by Konstantinos Sekaras, PR #3): the recommended
+  `AgentInputSchema` derivation re-attaches `messages` after `.partial()` —
+  `.extend({ messages: MessagesZodState.shape.messages })` — so LangGraph Studio renders its chat
+  input box instead of the raw-state editor (the 1.7.0 recipe stripped the messages-channel
+  metadata). Project-state template + references; vendored runner byte-identical to 1.7.0. See
+  [migrations/1.7.0-to-1.7.1.md](migrations/1.7.0-to-1.7.1.md).
+- Library **1.7.2**: the delegate stream timer (`HandoffDelegateTarget.timeoutMs`) now starts
+  after the connect phase instead of at delegate entry, so a slow thread-creation call no longer
+  eats the streaming budget; `buildAgentStepTool` without a state schema now throws at
+  construction (was: on the first tool call), matching the 1.7.0 docs. Suite grows 91 → 94. See
+  [CHANGELOG.md](CHANGELOG.md) and [migrations/1.7.1-to-1.7.2.md](migrations/1.7.1-to-1.7.2.md).
+- Docs staleness: `agent-step-api.md`'s `AgentInputSchema` recipe (missed by the 1.7.1 sweep) now
+  shows the `messages` re-attach; the `errorCount` doc-comment matches the runner (host-listed
+  `backendFailureCodes` verdicts also increment; reset on any non-backend-failure batch); the
+  1.6.0→1.7.0 migration gains a peer-dependency note (`schemaMetaRegistry` requires
+  `@langchain/langgraph` ~1.3); `create-tool` workflow test count 91 → 94; `plugin.json` /
+  `marketplace.json` descriptions now reference the shipped library version (were pinned at
+  1.6.0 / 1.7.0).
+
 ## [0.17.0] — 2026-06-30
 
 Ships **agent-step library 1.7.0** (`/pull-library` recommended for downstream projects). Makes a
