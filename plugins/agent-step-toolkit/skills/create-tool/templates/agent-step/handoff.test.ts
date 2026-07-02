@@ -341,3 +341,84 @@ test("handoff node (delegate) falls back to terminate when the delegate is unrea
   // The control-plane event still reported the *intended* mode.
   assert.equal((events[0] as { mode: string }).mode, "delegate");
 });
+
+test("handoff node (delegate) connect timeout aborts a hung thread-create and falls back", async () => {
+  const realFetch = globalThis.fetch;
+  // The thread-creation POST hangs until its abort signal fires — only the
+  // connect timer can end this test; the stream timer is deliberately huge.
+  globalThis.fetch = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(init.signal?.reason ?? new Error("aborted")),
+      );
+    })) as typeof fetch;
+  try {
+    const node = createHandoffNode<S>({
+      offTopic: {
+        mode: "delegate",
+        url: "http://delegate.test",
+        assistantId: "general",
+        connectTimeoutMs: 50,
+        timeoutMs: 60_000,
+      },
+      terminateMessage: "Transferring you now.",
+    });
+    const events: unknown[] = [];
+    const started = Date.now();
+    const update = await node(
+      { handoff: { reason: "off_topic", context: "wants a transfer" } },
+      nodeConfig(events),
+    );
+    assert.ok(Date.now() - started < 10_000, "fell back on the connect timer, not the stream timer");
+    const [message] = update.messages as AIMessage[];
+    assert.equal(message.content, "Transferring you now.");
+    assert.equal(typeof message.additional_kwargs.delegate_error, "string");
+    const types = (events as { type: string }[]).map((e) => e.type);
+    assert.deepEqual(types, ["handoff", "handoff_delegate_failed", "handoff_complete"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("handoff node (delegate) stream timer starts after connect, not at delegate entry", async () => {
+  const realFetch = globalThis.fetch;
+  const sse =
+    'event: messages\ndata: [{"type":"AIMessageChunk","content":"delegate reply"},{"langgraph_node":"reply"}]\n\n';
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (String(url).endsWith("/threads")) {
+      // Connect deliberately takes LONGER than timeoutMs: were the stream
+      // timer started at delegate entry, it would already have fired by the
+      // time the run-stream request below is made.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return new Response("{}", { status: 200 });
+    }
+    assert.equal(init?.signal?.aborted, false, "stream timer must not tick during connect");
+    return new Response(sse, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  }) as typeof fetch;
+  try {
+    const node = createHandoffNode<S>({
+      offTopic: {
+        mode: "delegate",
+        url: "http://delegate.test",
+        assistantId: "general",
+        connectTimeoutMs: 60_000,
+        timeoutMs: 150,
+      },
+      terminateMessage: "Transferring you now.",
+    });
+    const events: unknown[] = [];
+    const update = await node(
+      { handoff: { reason: "off_topic", context: "wants a transfer" } },
+      nodeConfig(events),
+    );
+    // Delegate success: the delegate's reply is spoken, no handback kwargs.
+    const [message] = update.messages as AIMessage[];
+    assert.equal(message.content, "delegate reply");
+    assert.deepEqual(message.additional_kwargs, { delegated_to: "general" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

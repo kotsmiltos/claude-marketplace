@@ -92,13 +92,14 @@ export interface HandoffDelegateTarget {
    *  recalled). Discover the node name by streaming one run with
    *  `stream_mode: ["messages-tuple"]` and reading the metadata. */
   replyNode?: string;
-  /** Abort the initial connection attempt (POST /threads + run start headers)
-   *  after this many ms and fall back to the terminate envelope. Detects an
-   *  unavailable agent quickly without stalling the conversation.
+  /** Abort the connect phase (the thread-creation POST) after this many ms
+   *  and fall back to the terminate envelope. Detects an unavailable agent
+   *  quickly without stalling the conversation.
    *  Default: see CONNECT_DEFAULT_TIMEOUT_MS. */
   connectTimeoutMs?: number;
-  /** Abort the streaming phase after this many ms once the run has started,
-   *  and fall back to the terminate envelope.
+  /** Abort the run + streaming phase after this many ms and fall back to the
+   *  terminate envelope. The timer starts only after the connect phase
+   *  returns, so a slow thread-creation call never eats the streaming budget.
    *  Default: see DELEGATE_DEFAULT_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Extra headers for the delegate API (e.g. `x-api-key`). */
@@ -238,7 +239,6 @@ async function runDelegate(
   const connectSignal = AbortSignal.timeout(
     target.connectTimeoutMs ?? CONNECT_DEFAULT_TIMEOUT_MS,
   );
-  const streamSignal = AbortSignal.timeout(target.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", ...(target.headers ?? {}) };
   const base = target.url.replace(/\/+$/, "");
 
@@ -252,6 +252,11 @@ async function runDelegate(
   if (!threadRes.ok) {
     throw new Error(`delegate thread create failed: HTTP ${threadRes.status}`);
   }
+
+  // Created only NOW — after the connect phase — so the streaming budget is
+  // measured from run start, not from delegate entry (an `AbortSignal.timeout`
+  // starts ticking at creation).
+  const streamSignal = AbortSignal.timeout(target.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS);
 
   const runRes = await fetch(`${base}/threads/${threadId}/runs/stream`, {
     method: "POST",

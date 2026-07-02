@@ -120,10 +120,13 @@ export interface LibraryManagedSlots {
   currentFlow?: CurrentFlow | null;
   pagedRead?: PagedCache<unknown> | null;
   handoff?: HandoffRequest | null;
-  /** Consecutive failed tool-call counter. The runner increments it on each
-   *  batch that ends with an executor_error and resets it to 0 on a fully
-   *  successful batch. When it reaches the configured threshold (default 3)
-   *  the runner auto-triggers a handoff (if handoff is enabled) so the
+  /** Consecutive backend-failure counter. The runner increments it on each
+   *  batch whose failing step is a backend failure (the runner-raised
+   *  `executor_error`, or an executor verdict listed in the host's
+   *  `backendFailureCodes`) and resets it to 0 on any batch that does NOT end
+   *  in one — including a batch that fails with a recoverable user error.
+   *  When it reaches the configured threshold (default 3) the runner
+   *  auto-triggers a handoff (if a handoff path is configured) so the
    *  customer is not left in an unrecoverable error loop. */
   errorCount?: number | null;
 }

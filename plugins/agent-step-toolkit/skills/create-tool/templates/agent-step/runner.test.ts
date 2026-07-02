@@ -193,6 +193,13 @@ test("construction throws when prereq verifier is missing", () => {
   assert.throws(() => buildAgentStepTool(bad), /prereq "cardVerified"/);
 });
 
+test("construction throws when neither stateSchema nor stateAnnotation is provided", () => {
+  const { opts } = makeOpts();
+  const bad = { ...opts };
+  delete (bad as Record<string, unknown>).stateAnnotation;
+  assert.throws(() => buildAgentStepTool(bad), /requires `stateSchema`/);
+});
+
 test("executor that throws → ok:false step, short-circuit, earlier commits preserved", async () => {
   // The runner must convert an executor throw into an ok:false StepResult (not
   // let it escape), so the LLM still gets the envelope AND the prior step's

@@ -12,6 +12,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.7.2] — 2026-07-02
+
+Patch: two runtime fixes aligning the runner with its documented contract, plus doc-comment
+precision. No API surface change; no project-side transforms. Suite grows 91 → 94.
+Migration: [migrations/1.7.1-to-1.7.2.md](migrations/1.7.1-to-1.7.2.md).
+
+### Fixed
+- **Delegate stream timer now starts after connect.** `runDelegate` created both timeout signals
+  at entry, so a slow thread-creation call ate into the streaming budget (`timeoutMs` was
+  documented as starting "once the run has started", but the timer ticked from delegate entry).
+  The stream signal is now created only after the connect phase returns; `connectTimeoutMs` /
+  `timeoutMs` doc-comments state the phase each timer actually covers. Two new handoff tests
+  cover the connect-timeout fallback and the stream-timer start point.
+- **Missing state schema now throws at construction.** `buildAgentStepTool` called with neither
+  `stateSchema` nor the deprecated `stateAnnotation` threw only on the first tool call (inside
+  `runSteps`), although 1.7.0 documented the failure as construction-time — and since 1.7.0 made
+  both options optional in the type, nothing failed at startup. `validateConfig` now enforces it
+  at construction; the `runSteps` guard remains for direct callers (test harnesses).
+- **`errorCount` doc-comment matched to the runner** (`state.ts`): host-listed
+  `backendFailureCodes` verdicts also increment the counter (not only `executor_error`), and it
+  resets on any batch that does not end in a backend failure — not only on a "fully successful"
+  one.
+
 ## [1.7.1] — 2026-06-30
 
 Patch: corrects the recommended `AgentInputSchema` derivation so LangGraph Studio renders its chat

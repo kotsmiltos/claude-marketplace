@@ -367,12 +367,22 @@ export interface RunResult<T> {
 
 function validateConfig(opts: {
   config: AnyConfig;
+  stateSchema?: unknown;
+  stateAnnotation?: unknown;
   selectors: Record<string, unknown>;
   executors: Record<string, unknown>;
   verifiers: Record<string, unknown>;
   handoff?: unknown;
 }): void {
   const { config, selectors, executors, verifiers } = opts;
+  // Fail at CONSTRUCTION, not on the first tool call — since 1.7.0 made both
+  // options optional in the type, this is the only guard, and a miswired tool
+  // must surface at startup. (runSteps re-checks for direct callers.)
+  if (!opts.stateSchema && !opts.stateAnnotation) {
+    throw new Error(
+      "agent-step: buildAgentStepTool requires `stateSchema` (the deprecated `stateAnnotation` is also accepted).",
+    );
+  }
   const actionNames = Object.keys(config.actions);
   // `abort_pending_input` is always reserved. `request_handoff` is reserved
   // ONLY when the library handoff is opted into — a tool that does NOT pass
