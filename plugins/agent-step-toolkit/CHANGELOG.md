@@ -12,6 +12,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.8.1] — 2026-07-23
+
+Patch: the auto-handoff error counter now treats **no-executor batches as NEUTRAL** — they neither
+increment nor reset the consecutive-failure streak. Absorbed from a downstream agent that traced a
+live simulated outage. No API surface change; no project-side transforms. Suite grows 103 → 105.
+Migration: [migrations/1.8.0-to-1.8.1.md](migrations/1.8.0-to-1.8.1.md).
+
+### Fixed
+- **The failure streak survives confirm-gate proposals.** A confirm-gated action retried during a
+  backend outage necessarily interleaves a proposal between every two failing executes (the failed
+  execute consumes the pending confirmation, so the retry re-proposes). The proposal — a successful
+  batch in which NO executor ran — reset the counter under the 1.8.0 rule: fail → 1, re-propose →
+  0, fail → 1, … so the auto-handoff threshold was unreachable for EVERY confirm-gated action. The
+  reset now requires that an executor **actually ran** in the batch (`anExecutorRan`, set before
+  the call so a throw still counts): executed work is the only proof the backend recovered.
+  Proposals/re-proposals, prereq denials, param-validation failures, `abort_pending_input`, and
+  handoff signals are neutral — aligning the main loop with the early-return refusals (lockdown,
+  batch shape), which already bypassed the counter. The increment side is unchanged.
+  Behavior delta: hosts using confirm gates + `backendFailureCodes` now actually escalate at the
+  threshold (previously never); a host that relied on a non-executed turn (e.g. `invalid_params`)
+  wiping the streak will see it survive instead. `state.ts` `errorCount` doc-comment updated.
+
 ## [1.8.0] — 2026-07-23
 
 Additive surface + four behavior fixes, absorbed from a downstream agent — all host-configurable,

@@ -254,7 +254,7 @@ interface HandoffRequest {
 
 ## errorCount (library-managed)
 
-The consecutive backend-failure counter for the auto-handoff guard (`<auto_handoff>`). `number | null`; rides `agentStepZodShape` like the other slots. The runner increments it when a batch ends in a backend failure, resets it to 0 on a clean batch, and clears it to 0 when it auto-triggers a handoff at the threshold. Executors must never write it.
+The consecutive backend-failure counter for the auto-handoff guard (`<auto_handoff>`). `number | null`; rides `agentStepZodShape` like the other slots. The runner increments it when a batch ends in a backend failure, resets it to 0 when a batch in which an executor **actually ran** ends without one, and clears it to 0 when it auto-triggers a handoff at the threshold. Batches where no executor ran (confirm-gate proposals/re-proposals, prereq or param refusals, aborts, handoff signals) are **neutral** — they neither increment nor reset. Executors must never write it.
 
 </types>
 
@@ -571,7 +571,7 @@ Exports (from `index.ts`): `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages(ove
 
 A safety net so a customer is never trapped in an unrecoverable backend-error loop. The runner keeps a consecutive **backend-failure** counter in the library-managed `errorCount` slot; when it reaches a threshold the runner auto-triggers a handoff.
 
-**What counts as a backend failure.** The runner-raised **`executor_error`** (an executor threw, uncaught) ALWAYS counts. A host adds its own executor-returned verdict `error` codes via `BuildAgentStepToolOptions.backendFailureCodes` — list ONLY true backend/network failures there (e.g. `"service_error"`). User mistakes (wrong OTP, value mismatch) and business-logic refusals are recoverable and must NOT be listed, or the counter will escalate recoverable situations. The counter resets to 0 on any batch that does not end in a backend failure.
+**What counts as a backend failure.** The runner-raised **`executor_error`** (an executor threw, uncaught) ALWAYS counts. A host adds its own executor-returned verdict `error` codes via `BuildAgentStepToolOptions.backendFailureCodes` — list ONLY true backend/network failures there (e.g. `"service_error"`). User mistakes (wrong OTP, value mismatch) and business-logic refusals are recoverable and must NOT be listed, or the counter will escalate recoverable situations. The counter resets to 0 only when a batch in which an executor **actually ran** ends without a backend failure — executed work is the only proof the backend recovered. Batches where no executor ran (confirm-gate proposals/re-proposals, prereq or param refusals, aborts, handoff signals) are **neutral**: they neither increment nor reset, so the proposal a confirm gate interleaves between two failing executes cannot wipe the streak (without this, a confirm-gated action could never reach the threshold).
 
 ```ts
 // BuildAgentStepToolOptions additions

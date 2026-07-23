@@ -918,6 +918,12 @@ export async function runSteps<
   const results: StepResult[] = [];
   let failedAt: number | undefined;
   let lastSummary = "";
+  // Whether any step in this batch actually invoked its executor. Steps that
+  // never reach an executor — confirm-gate proposals/re-proposals, prereq
+  // denials, param-validation failures, `abort_pending_input`, handoff
+  // signals — prove nothing about backend health, so the error counter below
+  // treats such batches as NEUTRAL (no increment, no reset).
+  let anExecutorRan = false;
 
   // Snapshot the awaiting-input gate as it stood at BATCH START (before any step
   // in this batch runs). Used to freeze the `requiresMatch` consumer check: a
@@ -1298,6 +1304,7 @@ export async function runSteps<
     const executor = executors[step.action];
     const slice = selector(view);
     let result: Awaited<ReturnType<typeof executor>>;
+    anExecutorRan = true; // set before the call — a throw still counts as ran
     try {
       result = await executor(params, slice);
     } catch (err) {
@@ -1585,9 +1592,15 @@ export async function runSteps<
   // its own executor-returned verdict codes via `opts.backendFailureCodes`.
   // List only true backend/network failures there — user mistakes (wrong OTP,
   // value mismatch) and business-logic refusals are recoverable and must NOT be
-  // listed. The counter resets to 0 on any batch that does not end in a backend
-  // failure. The feature is inert unless a handoff mechanism is available (the
-  // `handoff` opt or an `onErrorThreshold` callback).
+  // listed. The counter resets to 0 only when a batch in which an executor
+  // ACTUALLY RAN ends without a backend failure — executed work is the only
+  // proof the backend recovered. Batches where no executor ran (confirm-gate
+  // proposals, prereq/param refusals, aborts, handoff signals) are NEUTRAL:
+  // without this, a confirm-gated action could never reach the threshold — the
+  // propose interleaved between two failing executes would wipe the streak
+  // every round (fail → 1, re-propose → 0, fail → 1, …). The feature is inert
+  // unless a handoff mechanism is available (the `handoff` opt or an
+  // `onErrorThreshold` callback).
   const autoHandoffEnabled = handoffEnabled || opts.onErrorThreshold != null;
   if (autoHandoffEnabled) {
     const prevErrorCount =
@@ -1636,7 +1649,7 @@ export async function runSteps<
       } else {
         committedRec.errorCount = newErrorCount;
       }
-    } else if (prevErrorCount > 0) {
+    } else if (anExecutorRan && prevErrorCount > 0) {
       committedRec.errorCount = 0;
     }
   }

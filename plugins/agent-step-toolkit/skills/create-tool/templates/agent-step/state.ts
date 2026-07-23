@@ -123,9 +123,13 @@ export interface LibraryManagedSlots {
   /** Consecutive backend-failure counter. The runner increments it on each
    *  batch whose failing step is a backend failure (the runner-raised
    *  `executor_error`, or an executor verdict listed in the host's
-   *  `backendFailureCodes`) and resets it to 0 on any batch that does NOT end
-   *  in one — including a batch that fails with a recoverable user error.
-   *  When it reaches the configured threshold (default 3) the runner
+   *  `backendFailureCodes`) and resets it to 0 when a batch in which an
+   *  executor ACTUALLY RAN ends without one — including a batch that fails
+   *  with a recoverable user error. Batches where no executor ran (confirm-
+   *  gate proposals/re-proposals, prereq or param refusals, aborts, handoff
+   *  signals) are NEUTRAL — they neither increment nor reset, so a proposal
+   *  interleaved between failing executes cannot wipe the streak. When the
+   *  counter reaches the configured threshold (default 3) the runner
    *  auto-triggers a handoff (if a handoff path is configured) so the
    *  customer is not left in an unrecoverable error loop. */
   errorCount?: number | null;

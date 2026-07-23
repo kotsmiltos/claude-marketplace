@@ -11,6 +11,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.18.1] — 2026-07-23
+
+Ships **agent-step library 1.8.1** (`/pull-library` recommended for downstream projects — note the
+behavior delta below). One runner fix: the auto-handoff error counter treats no-executor batches
+as neutral, so the escalation backstop actually works for confirm-gated actions.
+
+### Fixed
+- Library **1.8.1**: the consecutive backend-failure streak survives confirm-gate
+  proposals/re-proposals — the `errorCount` reset now requires that an executor **actually ran**
+  in the batch. Previously the proposal a confirm gate interleaves between two failing executes
+  reset the counter (fail → 1, re-propose → 0, fail → 1, …), making the auto-handoff threshold
+  unreachable for every confirm-gated action. No-executor batches (proposals, prereq/param
+  refusals, aborts, handoff signals) neither increment nor reset. **Downstream impact:** hosts
+  using confirm gates + `backendFailureCodes` now actually escalate at the threshold; nothing
+  should rely on a non-executed turn wiping the streak. Docs: `agent-step-api.md` (`errorCount`
+  slot + `<auto_handoff>`), `create-tool` workflow test count 103 → 105. See
+  [CHANGELOG.md](CHANGELOG.md) and [migrations/1.8.0-to-1.8.1.md](migrations/1.8.0-to-1.8.1.md).
+
 ## [0.18.0] — 2026-07-23
 
 Ships **agent-step library 1.8.0** (`/pull-library` recommended for downstream projects — note the

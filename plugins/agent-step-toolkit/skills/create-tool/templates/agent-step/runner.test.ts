@@ -2091,6 +2091,125 @@ test("auto-handoff: instruction says the platform delivers the closing (no speak
   assert.equal(synthetic2.summary, `SAY: ${DEFAULT_SYSTEM_MESSAGES.auto_handoff}`);
 });
 
+// ─── Error counter neutrality: no-executor batches neither increment nor reset ─ //
+//
+// A confirm-gated action retried during a backend outage necessarily
+// interleaves a proposal between every two failing executes (the failed
+// execute consumed the pending confirmation). Were the proposal — a
+// successful batch in which NO executor ran — allowed to reset the counter,
+// the streak would oscillate 1 → 0 → 1 → 0 … and the auto-handoff threshold
+// would be unreachable for every gated action.
+
+interface GatedAHState {
+  errorCount?: number | null;
+  handoff?: HandoffRequest | null;
+  awaitingInput?: AwaitingInput | null;
+}
+
+const gatedAhAnnotation = Annotation.Root({
+  errorCount: Annotation<number | null>({ reducer: (_, n) => n ?? null, default: () => null }),
+  handoff: Annotation<HandoffRequest | null>({ reducer: (_, n) => n ?? null, default: () => null }),
+  awaitingInput: Annotation<AwaitingInput | null>({
+    reducer: (_, n) => n ?? null,
+    default: () => null,
+  }),
+});
+
+const gatedAhSelectors = { call_backend: (s: GatedAHState) => s };
+
+/** The auto-handoff action, confirm-gated: the first call with given params
+ *  proposes (no executor runs), the same-params re-call executes. */
+function makeGatedAhOpts(
+  extra: Partial<
+    BuildAgentStepToolOptions<GatedAHState, "call_backend", never, typeof gatedAhSelectors>
+  > = {},
+): BuildAgentStepToolOptions<GatedAHState, "call_backend", never, typeof gatedAhSelectors> {
+  const config = defineConfig<"call_backend", never>({
+    tool: { name: "gated_ah_tool", description: "gated auto-handoff test tool" },
+    actions: {
+      call_backend: {
+        description: "confirm-gated call to a backend that may fail",
+        paramsSchema: z.object({ mode: z.string(), code: z.string().optional() }),
+        prereqs: [],
+        controller: { requiresConfirmation: { maxAttempts: 3 } },
+      },
+    },
+  });
+  const executors: ExecutorRegistry<GatedAHState, typeof gatedAhSelectors> = {
+    call_backend: async (raw) => {
+      const p = raw as { mode: string; code?: string };
+      if (p.mode === "verdict")
+        return { resultBody: { summary: "failed", error: p.code }, ok: false };
+      return { resultBody: { summary: "ok" }, ok: true };
+    },
+  };
+  return {
+    config,
+    stateAnnotation: gatedAhAnnotation,
+    selectors: gatedAhSelectors,
+    executors,
+    verifiers: {} as VerifierRegistry<GatedAHState>,
+    backendFailureCodes: ["backend_down"],
+    ...extra,
+  };
+}
+
+test("error counter: confirm-gate proposals are NEUTRAL — the failure streak survives re-proposes", async () => {
+  let fired = 0;
+  const opts = makeGatedAhOpts({ onErrorThreshold: () => void fired++ });
+  const FAIL = { mode: "verdict", code: "backend_down" };
+  let state: GatedAHState = {};
+  const turn = async () => {
+    const res = await runSteps(opts, [{ action: "call_backend", params: FAIL }], state);
+    state = { ...state, ...res.committed };
+    return res;
+  };
+
+  // First call proposes — no executor ran, the counter is untouched.
+  let res = await turn();
+  assert.equal((res.body.results[0] as { needs_confirmation?: boolean }).needs_confirmation, true);
+  assert.equal(state.errorCount ?? null, null, "a proposal never increments");
+  // Same-params re-call executes → backend failure → 1.
+  await turn();
+  assert.equal(state.errorCount, 1);
+  // The failed execute consumed the pending → the retry PROPOSES again.
+  res = await turn();
+  assert.equal((res.body.results[0] as { needs_confirmation?: boolean }).needs_confirmation, true);
+  assert.equal(state.errorCount, 1, "a proposal must not wipe the failure streak");
+  // Execute → 2; propose (neutral); execute → threshold.
+  await turn();
+  assert.equal(state.errorCount, 2);
+  await turn();
+  assert.equal(state.errorCount, 2, "still neutral on the second re-propose");
+  res = await turn();
+  assert.equal(fired, 1, "threshold reached across interleaved proposals");
+  assert.equal(state.errorCount, 0, "reset after escalation");
+  const synthetic = res.body.results[res.body.results.length - 1];
+  assert.equal(synthetic.action, "auto_handoff");
+});
+
+test("error counter: an EXECUTED success resets the streak (its proposal alone does not)", async () => {
+  const opts = makeGatedAhOpts({ onErrorThreshold: () => {} });
+  const FAIL = { mode: "verdict", code: "backend_down" };
+  const OK = { mode: "ok" };
+  let state: GatedAHState = {};
+  const turn = async (params: Record<string, unknown>) => {
+    const res = await runSteps(opts, [{ action: "call_backend", params }], state);
+    state = { ...state, ...res.committed };
+    return res;
+  };
+
+  await turn(FAIL); // propose
+  await turn(FAIL); // execute → fail
+  assert.equal(state.errorCount, 1);
+  // New params → fresh proposal: neutral even though the batch is ok.
+  await turn(OK);
+  assert.equal(state.errorCount, 1, "the OK proposal is still neutral");
+  // The executed success is what proves the backend recovered.
+  await turn(OK);
+  assert.equal(state.errorCount, 0, "executed success resets the counter");
+});
+
 // ─── Templated system messages ──────────────────────────────────────────── //
 
 test("system messages: templated summaries interpolate placeholders and honor overrides", async () => {
