@@ -11,6 +11,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.18.0] — 2026-07-23
+
+Ships **agent-step library 1.8.0** (`/pull-library` recommended for downstream projects — note the
+behavior deltas below). Absorbed from a downstream agent: the confirmation gate now compares
+schema-NORMALIZED params, every runner-emitted summary is host-overridable
+(localization-ready templated messages), invalidation uses deep value equality, and the
+auto-handoff instruction defaults to platform-delivers wording.
+
+### Added
+- Library **1.8.0**: 17 templated `SystemMessages` keys + a `formatMessage` helper — every
+  runner-emitted summary (lockdown, batch-shape, confirmation, OTP/match gate refusals, and more)
+  is now overridable, with `{placeholder}` interpolation; templates are plain strings so overrides
+  can live in JSON locale resources. New `HandoffSpec.actionDescription` for schema-honest
+  `request_handoff` descriptions. Docs: `agent-step-api.md` (`<system_messages>`,
+  `<confirmation_lifecycle>`, `<invalidates_on_change>`, `<auto_handoff>`, `<handoff>`). See
+  [CHANGELOG.md](CHANGELOG.md) and [migrations/1.7.2-to-1.8.0.md](migrations/1.7.2-to-1.8.0.md).
+
+### Changed
+- Library behavior: the confirm gate parses raw re-calls with the action's effective schema before
+  comparing against the stored (parsed) proposal — a value-normalizing schema (e.g. STT separator
+  stripping) no longer re-proposes forever; propose-path `invalid_params` is voice-safe (raw Zod
+  detail in `_debug`); `invalidatesOnChange` uses deep value equality (fresh-but-value-equal
+  object writes no longer fire spurious cascades); the auto-handoff instruction defaults to
+  platform-delivers wording (override `auto_handoff_instruction` with the `{message}` placeholder
+  to restore speak-this). **Downstream impact:** `/pull-library` replaces the vendored library and
+  applies the 1.7.2→1.8.0 transforms; re-verify confirm-gated flows and decide who delivers the
+  auto-handoff closing.
+
+### Fixed
+- `agent-step-api.md`: stale `resolveClosingMessage` comment claimed off_topic always speaks
+  `terminateMessage` (silent hand-back since 1.6.0); `create-tool` workflow library test count
+  94 → 103.
+
 ## [0.17.1] — 2026-07-02
 
 Ships **agent-step library 1.7.2** (`/pull-library` recommended for downstream projects — the

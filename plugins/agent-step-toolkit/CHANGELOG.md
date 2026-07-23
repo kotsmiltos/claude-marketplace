@@ -12,6 +12,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.8.0] — 2026-07-23
+
+Additive surface + four behavior fixes, absorbed from a downstream agent — all host-configurable,
+no domain strings baked in. The confirmation gate now compares schema-NORMALIZED params (a
+value-normalizing schema no longer makes confirmation impossible), `invalidatesOnChange` uses deep
+value equality (no spurious cascades on fresh-but-equal object writes), EVERY runner-emitted
+summary is now a host-overridable templated system message, and the auto-handoff instruction
+defaults to platform-delivers wording. No API removal or signature change. Suite grows 94 → 103.
+Migration: [migrations/1.7.2-to-1.8.0.md](migrations/1.7.2-to-1.8.0.md).
+
+### Added
+- **17 templated `SystemMessages` keys** — the lockdown refusals (`lockdown_confirmation` /
+  `lockdown_otp` / `lockdown_match`), the batch-shape refusals (`handoff_must_be_sole_step`,
+  `mutation_must_be_sole_step`, `mutation_execute_must_be_sole`, `mutation_must_be_last_in_batch`),
+  the confirmation outcomes (`confirm_proposed` / `confirm_reproposed` / `confirm_exhausted`), the
+  OTP/match gate refusals (`otp_not_pending`, `match_not_pending`, `otp_blocked_match_pending`,
+  `match_attempts_exhausted`), `handoff_requested`, `no_steps`, and `auto_handoff_instruction` —
+  with `{placeholder}` interpolation via a new `formatMessage` helper (`messages.ts`; unknown
+  placeholders stay verbatim). Templates are plain strings, so overrides can live in JSON locale
+  resources. English defaults preserve the previous hardcoded strings (except
+  `auto_handoff_instruction`, below). Previously only 9 runner summaries were overridable; now all are.
+- **`HandoffSpec.actionDescription`** — override the LLM-facing description of the auto-injected
+  `request_handoff` schema variant, for hosts whose `resolveClosingMessage` composes every closing
+  from state (the built-in text tells the model its `context` is SPOKEN — describe it truthfully
+  instead, or the schema contradicts the host prompt).
+
+### Changed
+- **Confirm gate compares canonicalized PARSED params** — new `paramsMatchPending` parses the raw
+  re-call with the action's effective schema before comparing against the stored (parsed) proposal;
+  a failed parse counts as drift. The propose branch parses with the same schema (was the bare
+  `paramsSchema`). Fixes a blocking defect: any value-normalizing schema (e.g. a `z.preprocess`
+  stripping STT separators, `"70,76"` ≡ `"7076"`) made a confirmed re-call read as drift →
+  re-propose loop → attempts exhausted without ever executing. Behavior delta: re-calls that
+  normalize to the stored proposal now EXECUTE (previously re-proposed); no legitimate flow relied
+  on the old behavior.
+- **Propose-path `invalid_params` no longer leaks raw Zod text** — the summary is the overridable
+  `invalid_params` system message; the raw detail moves to `_debug`, matching the execute path and
+  the documented `_debug` convention.
+- **`invalidatesOnChange` uses deep value equality** (canonicalized JSON) instead of `Object.is` —
+  an executor writing a fresh-but-value-equal OBJECT no longer fires a spurious cascade. New
+  `types.ts` caveat: invalidation targets must be replace-on-write slots (a record-merge reducer
+  swallows the cascade's `null` at the graph boundary).
+- **Auto-handoff instruction defaults to platform-delivers wording** — the synthetic `auto_handoff`
+  result's summary no longer instructs the model to speak the closing (both taught wiring paths
+  deliver it platform-side; "speak this exact message" invited double-speaking). A host whose graph
+  does NOT deliver the closing overrides `auto_handoff_instruction` and uses the `{message}`
+  placeholder to restore the old behavior.
+
 ## [1.7.2] — 2026-07-02
 
 Patch: two runtime fixes aligning the runner with its documented contract, plus doc-comment

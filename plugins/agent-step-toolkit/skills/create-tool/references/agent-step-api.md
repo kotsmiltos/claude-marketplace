@@ -346,17 +346,20 @@ The runner switches the mutation action into a four-mode state machine. Detected
 **Ordering with prereqs (non-obvious, but guaranteed).** A step's library prereqs (`requiresFlow`) and user verifiers run BEFORE its confirmation mode is acted on (`<state_threading>` step 5a/5b, ahead of the propose in 5e). So a confirm-gated mutation whose `requiresFlow`/prereqs are unmet is **refused, not proposed** — `awaitingInput` is never set into a doomed state. Compose `requiresConfirmation` with `requiresFlow` freely; the gate order is correct.
 
 ### First call (no pending, or pending action ≠ this action) → **propose mode**
-- Validate params, set `awaitingInput = { kind: "confirmation", for_action, params, attempts_left: maxAttempts, max_attempts }`.
+- Parse params with the action's **effective schema** (the declared `paramsSchema`, page-extended for `pageable` actions) and store them **PARSED** — schema normalization (`z.preprocess`, coercion) is applied before storage: `awaitingInput = { kind: "confirmation", for_action, params, attempts_left: maxAttempts, max_attempts }`.
+- A failed parse returns `{ ok: false, error: "invalid_params" }` with the overridable `invalid_params` system-message summary and the raw Zod detail in `_debug` (nothing is stored).
 - Return `{ ok: true, summary, needs_confirmation: true, proposed_params, attempts_left }`.
 - **Executor is NOT invoked.**
 
-### Re-call with **same params** as pending → **execute mode**
+### Re-call whose params **parse to the pending proposal** → **execute mode**
+- The incoming RAW params are parsed with the same effective schema, then compared (deep value equality) against the stored parsed proposal — value normalization never reads as drift (e.g. a `z.preprocess` stripping STT separators: `"70,76"` ≡ `"7076"`). A failed parse counts as drift (→ rePropose).
 - Clear `awaitingInput` atomically BEFORE invoking the executor.
 - Invoke the executor with the parsed params + view.
 - Whatever the executor returns is the result (the executor performs its own pre-read + write + post-read).
 
-### Re-call with **different params** as pending → **rePropose mode**
-- Update `awaitingInput.params` to the new params, decrement `attempts_left`.
+### Re-call with **genuinely different params** (or params that fail to parse) → **rePropose mode**
+- Update `awaitingInput.params` to the newly parsed params, decrement `attempts_left`.
+- If the re-call's params fail to parse: the step fails with `invalid_params` (summary = the overridable system message, raw Zod detail in `_debug`) and the pending proposal is left **unchanged** — no decrement, the prior proposal still stands.
 - If `attempts_left > 0`: return new `needs_confirmation` envelope with decremented `attempts_left`.
 - If `attempts_left === 0`: return `{ ok: false, summary, error: "confirmation_attempts_exhausted" }` and clear pending.
 
@@ -388,12 +391,12 @@ verify_customer: {
 ```
 
 Fire rule (evaluated after the executor's `stateUpdate` has been folded in):
-- Fires only when the watched slot's pre-step value was **non-null** AND `!Object.is(pre, post)`.
+- Fires only when the watched slot's pre-step value was **non-null** AND the written value is not **deep-VALUE-equal** to it (canonicalized-JSON compare — reference identity never counts, so an executor writing a fresh-but-value-equal object does NOT fire).
 - First-time set (`null → value`) does NOT fire — there was nothing downstream to invalidate yet.
-- Same-value writes (no real change) do NOT fire.
+- Same-value writes (no real change) do NOT fire — including a fresh object with identical contents.
 - Slots set later in the same batch are NOT retro-cleared; an executor's own writes to a downstream slot win over the cascade.
 
-Invalidated slots are written as `null` regardless of their declared type, so any slot listed as a target must accept `null` as its "unset" sentinel.
+Invalidated slots are written as `null` regardless of their declared type, so any slot listed as a target must accept `null` as its "unset" sentinel. CAUTION: the `null` must also survive the HOST's reducer for that slot — list only **replace-on-write** slots as invalidation targets. A record-merge reducer (`{...prev, ...(next ?? {})}`) swallows the `null` at the graph boundary, so the slot resurrects on the next turn even though the in-batch view saw it cleared.
 </invalidates_on_change>
 
 <otp_lifecycle>
@@ -487,12 +490,19 @@ interface HandoffSpec<T> {
   offTopic: { mode: "terminate" }
           | { mode: "delegate"; url: string; assistantId: string; replyNode?: string;
               connectTimeoutMs?: number; timeoutMs?: number; headers?: Record<string, string> };
+  actionDescription?: string;        // OPTIONAL — override the LLM-facing description of the
+                                     // auto-injected request_handoff schema variant. The default
+                                     // (HANDOFF_ACTION_DESCRIPTION) says `context` is SPOKEN for
+                                     // completed/abandon — wrong for a host whose resolveClosingMessage
+                                     // composes every closing from state; describe `context` truthfully
+                                     // (e.g. routing metadata) or the schema contradicts the host prompt.
   terminateMessage: string;          // spoken envelope; also the delegate-failure fallback
   resolveClosingMessage?: (state: T, request: HandoffRequest) => string | undefined;
                                      // OPTIONAL — override the completed/abandon closing line from
                                      // actual operation outcomes (honesty invariant). Returns a string
                                      // to replace the LLM-composed `request.context`, or `undefined` to
-                                     // fall through to it. NEVER called for off_topic (always terminateMessage).
+                                     // fall through to it. NEVER called for off_topic (a silent hand-back
+                                     // since 1.6.0; terminateMessage only backs delegate failures).
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
 }
 ```
@@ -513,7 +523,7 @@ Wire a conditional edge after the tool node — `createReactAgent` cannot expres
 <system_messages>
 ## Runner-emitted system messages (`BuildAgentStepToolOptions.messages`)
 
-The runner emits its own `summary` strings for structured refusals/errors it raises directly (not from an executor): executor crash, invalid params, unknown action, the abort outcomes, and the flow gates. These ship as **neutral English defaults** in `src/agent-step/messages.ts` so the library has ZERO dependency on any host project.
+The runner emits its own `summary` strings for structured refusals/errors it raises directly (not from an executor): executor crash, invalid params, unknown action, the abort outcomes, the flow gates, the lockdown/batch-shape refusals, and the confirmation/OTP/match gate outcomes. **Every runner-emitted summary is overridable** (since 1.8.0). These ship as **neutral English defaults** in `src/agent-step/messages.ts` so the library has ZERO dependency on any host project.
 
 ```ts
 interface SystemMessages {
@@ -526,6 +536,28 @@ interface SystemMessages {
   abort_done: string;         // abort_pending_input cleared a pending gate / active flow
   abort_nothing: string;      // abort_pending_input ran with nothing pending (no-op)
   auto_handoff: string;       // spoken when the auto-handoff threshold is hit (see <auto_handoff>)
+
+  // Templated summaries (1.8.0) — may carry `{placeholder}` tokens the runner
+  // interpolates at emit time (via `formatMessage`; unknown placeholders stay
+  // verbatim so a bad override is visible, not silently blanked). Overrides
+  // are plain strings, so they can live in a host's JSON locale resources.
+  lockdown_confirmation: string;         // {action} {abort_action}
+  lockdown_otp: string;                  // {action} {abort_action}
+  lockdown_match: string;                // {action} {capturer} {abort_action}
+  handoff_must_be_sole_step: string;     // {action}
+  mutation_must_be_sole_step: string;    // {action}
+  mutation_execute_must_be_sole: string; // {action}
+  mutation_must_be_last_in_batch: string;// {action}
+  confirm_proposed: string;              // {action}
+  confirm_reproposed: string;            // {action}
+  confirm_exhausted: string;             // {action}
+  otp_not_pending: string;               // {action}
+  match_not_pending: string;             // {action} {capturer}
+  otp_blocked_match_pending: string;     // {action} {match_action}
+  match_attempts_exhausted: string;      // {action}
+  handoff_requested: string;             // {reason}
+  no_steps: string;                      // (no placeholders)
+  auto_handoff_instruction: string;      // {message} — see <auto_handoff>
 }
 ```
 
@@ -550,9 +582,11 @@ onErrorThreshold?: (update: Record<string, unknown>, state: T) => void;
                                   // handoff signal (e.g. write a scaffold `pendingHandoff` slot)
 ```
 
-**At the threshold the runner:** (1) writes the library `handoff` slot `{ reason: "abandon", context: messages.auto_handoff }` when the `handoff` opt is enabled; (2) calls `onErrorThreshold(committed, state)` if provided; (3) resets `errorCount` to 0; (4) appends a synthetic step result `{ action: "auto_handoff", ok: true, isHandoff: true, signal: "abandon", successMessage: <auto_handoff> }`, sets `body.summary` to a "speak this then stop" instruction, and clears `failed_at`.
+**At the threshold the runner:** (1) writes the library `handoff` slot `{ reason: "abandon", context: messages.auto_handoff }` when the `handoff` opt is enabled; (2) calls `onErrorThreshold(committed, state)` if provided; (3) resets `errorCount` to 0; (4) appends a synthetic step result `{ action: "auto_handoff", ok: true, isHandoff: true, signal: "abandon", successMessage: <auto_handoff> }`, sets `body.summary` to the **`auto_handoff_instruction`** template, and clears `failed_at`.
 
-**Inert by default.** The whole mechanism is skipped unless a handoff path exists — i.e. the `handoff` opt is provided OR `onErrorThreshold` is set. A tool with neither never touches `errorCount`. Customize the spoken line via the `auto_handoff` system message (`<system_messages>`).
+**Who speaks the closing.** The default `auto_handoff_instruction` tells the model the turn ends here and to produce NO further answer — **the platform delivers the closing** (a `createHandoffNode` graph speaks the handoff `context`; a scaffold/middleware host speaks `success_message` from the final-message kwargs). Instructing the model to voice it too invites double-speaking. A host whose graph does NOT deliver the closing overrides `auto_handoff_instruction` and uses the `{message}` placeholder (= the `auto_handoff` closing) to have the model speak it — restoring the pre-1.8.0 behavior.
+
+**Inert by default.** The whole mechanism is skipped unless a handoff path exists — i.e. the `handoff` opt is provided OR `onErrorThreshold` is set. A tool with neither never touches `errorCount`. Customize the spoken line via the `auto_handoff` system message and the accompanying instruction via `auto_handoff_instruction` (`<system_messages>`).
 </auto_handoff>
 
 <result_envelope>

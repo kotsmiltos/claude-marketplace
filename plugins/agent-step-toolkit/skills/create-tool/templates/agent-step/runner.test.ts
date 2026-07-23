@@ -2069,3 +2069,291 @@ test("auto-handoff: writes the library `handoff` slot at threshold when handoff 
   const synthetic = res.body.results[res.body.results.length - 1];
   assert.equal(synthetic.isHandoff, true);
 });
+
+test("auto-handoff: instruction says the platform delivers the closing (no speak-this)", async () => {
+  // The synthetic result must not tell the model to voice the closing — hosts
+  // that resolve the handoff in the graph would double-speak. Hosts whose
+  // graph does NOT deliver it can opt back in via the {message} placeholder.
+  const opts = makeAhOpts({ errorHandoffThreshold: 1, onErrorThreshold: () => {} });
+  const res = await runSteps(opts, [{ action: "call_backend", params: { mode: "throw" } }], {});
+  const synthetic = res.body.results[res.body.results.length - 1];
+  assert.equal(synthetic.action, "auto_handoff");
+  assert.equal(synthetic.summary, DEFAULT_SYSTEM_MESSAGES.auto_handoff_instruction);
+  assert.doesNotMatch(synthetic.summary as string, /Speak this exact message/);
+
+  const spoken = makeAhOpts({
+    errorHandoffThreshold: 1,
+    onErrorThreshold: () => {},
+    messages: { auto_handoff_instruction: "SAY: {message}" },
+  });
+  const res2 = await runSteps(spoken, [{ action: "call_backend", params: { mode: "throw" } }], {});
+  const synthetic2 = res2.body.results[res2.body.results.length - 1];
+  assert.equal(synthetic2.summary, `SAY: ${DEFAULT_SYSTEM_MESSAGES.auto_handoff}`);
+});
+
+// ─── Templated system messages ──────────────────────────────────────────── //
+
+test("system messages: templated summaries interpolate placeholders and honor overrides", async () => {
+  // Propose summary ({action}).
+  const proposed = makeConfirmOpts();
+  const proposeRun = await runSteps(
+    { ...proposed.opts, messages: { confirm_proposed: "PROPOSE<{action}>" } },
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  assert.equal(proposeRun.body.results[0].summary, "PROPOSE<change_status>");
+
+  // Lockdown summary ({action} + {abort_action}).
+  const locked = makeConfirmOpts();
+  const lockedSeed: S = {
+    ...SEEDED,
+    awaitingInput: {
+      kind: "confirmation",
+      for_action: "change_status",
+      params: { newStatus: "lost" },
+      attempts_left: 3,
+      max_attempts: 3,
+    },
+  };
+  const lockedRun = await runSteps(
+    { ...locked.opts, messages: { lockdown_confirmation: "LOCKED {action} via {abort_action}" } },
+    [{ action: "fetch_card_status", params: {} }],
+    lockedSeed,
+  );
+  assert.equal(lockedRun.body.results[0].summary, "LOCKED change_status via abort_pending_input");
+
+  // Unknown placeholders stay verbatim (visible, never silently blanked).
+  const exhausted = makeConfirmOpts();
+  const exhaustedSeed: S = {
+    ...SEEDED,
+    awaitingInput: {
+      kind: "confirmation",
+      for_action: "change_status",
+      params: { newStatus: "lost" },
+      attempts_left: 0,
+      max_attempts: 3,
+    },
+  };
+  const exhaustedRun = await runSteps(
+    { ...exhausted.opts, messages: { confirm_exhausted: "EXHAUSTED {nope}" } },
+    [{ action: "change_status", params: { newStatus: "stolen" } }],
+    exhaustedSeed,
+  );
+  assert.equal(exhaustedRun.body.results[0].summary, "EXHAUSTED {nope}");
+});
+
+// ─── Confirmation gate: params normalization (parsed-vs-parsed compare) ──── //
+
+interface NormS {
+  digits?: string | null;
+  awaitingInput?: AwaitingInput | null;
+  currentFlow?: CurrentFlow | null;
+}
+
+const normAnnotation = Annotation.Root({
+  digits: Annotation<string | null>({ reducer: (_, n) => n ?? null, default: () => null }),
+  awaitingInput: Annotation<AwaitingInput | null>({
+    reducer: (_, n) => n ?? null,
+    default: () => null,
+  }),
+  currentFlow: Annotation<CurrentFlow | null>({
+    reducer: (_, n) => n ?? null,
+    default: () => null,
+  }),
+});
+
+const normSelectors = {
+  set_digits: (s: NormS) => s,
+  read_digits: (s: NormS) => s,
+};
+
+/** STT separator stripping, as a voice host's params schema would do. */
+const stripNonDigits = (v: unknown): unknown =>
+  typeof v === "string" ? v.replace(/\D/g, "") : v;
+
+function makeNormOpts(): {
+  opts: BuildAgentStepToolOptions<NormS, "set_digits" | "read_digits", never, typeof normSelectors>;
+  calls: { set: number };
+} {
+  const calls = { set: 0 };
+  return {
+    opts: {
+      config: defineConfig<"set_digits" | "read_digits", never>({
+        tool: { name: "norm_tool", description: "normalization test tool" },
+        actions: {
+          set_digits: {
+            description: "confirm-required digit write",
+            paramsSchema: z.object({
+              digits: z.preprocess(stripNonDigits, z.string().regex(/^\d+$/, "digits only")),
+            }),
+            prereqs: [],
+            controller: { requiresConfirmation: { maxAttempts: 3 }, soleOnExecute: true },
+          },
+          read_digits: {
+            description: "plain read",
+            paramsSchema: z.object({}),
+            prereqs: [],
+          },
+        },
+      }),
+      stateAnnotation: normAnnotation,
+      selectors: normSelectors,
+      executors: {
+        set_digits: async (params) => {
+          calls.set++;
+          return {
+            resultBody: { summary: "digits set" },
+            stateUpdate: { digits: (params as { digits: string }).digits },
+            ok: true,
+          };
+        },
+        read_digits: async () => ({ resultBody: { summary: "read" }, ok: true }),
+      },
+      verifiers: {},
+    },
+    calls,
+  };
+}
+
+const NORM_PENDING: NormS = {
+  awaitingInput: {
+    kind: "confirmation",
+    for_action: "set_digits",
+    params: { digits: "7076" },
+    attempts_left: 3,
+    max_attempts: 3,
+  },
+};
+
+test("confirm gate: propose stores PARSED params (schema preprocess applied)", async () => {
+  const { opts, calls } = makeNormOpts();
+  const { body, committed } = await runSteps(
+    opts,
+    [{ action: "set_digits", params: { digits: "70,76" } }],
+    {},
+  );
+  assert.equal(calls.set, 0);
+  const awaiting = (committed as { awaitingInput?: AwaitingInput }).awaitingInput;
+  assert.ok(awaiting && awaiting.kind === "confirmation");
+  if (awaiting && awaiting.kind === "confirmation") {
+    assert.deepEqual(awaiting.params, { digits: "7076" });
+  }
+  assert.deepEqual(body.results[0].proposed_params, { digits: "7076" });
+});
+
+test("confirm gate: separator-artifact re-call still EXECUTES (raw parsed before compare)", async () => {
+  // The caller confirmed "7076"; the model re-emits with an STT artifact.
+  // Value normalization must never read as drift — this is what makes the
+  // gate usable on digit-string params at all.
+  const { opts, calls } = makeNormOpts();
+  const { body, committed } = await runSteps(
+    opts,
+    [{ action: "set_digits", params: { digits: "70 76" } }],
+    NORM_PENDING,
+  );
+  assert.equal(calls.set, 1, "executor ran — normalized params match the stored proposal");
+  assert.equal(body.results[0].ok, true);
+  assert.equal(body.results[0].needs_confirmation, undefined);
+  assert.equal(
+    (committed as { awaitingInput?: AwaitingInput | null }).awaitingInput,
+    null,
+  );
+  assert.equal((committed as { digits?: string }).digits, "7076");
+});
+
+test("confirm gate: genuine value drift still re-proposes", async () => {
+  const { opts, calls } = makeNormOpts();
+  const { body } = await runSteps(
+    opts,
+    [{ action: "set_digits", params: { digits: "70,77" } }],
+    NORM_PENDING,
+  );
+  assert.equal(calls.set, 0);
+  assert.equal(body.results[0].needs_confirmation, true);
+  assert.equal(body.results[0].attempts_left, 2);
+});
+
+test("confirm gate: invalid params on propose → voice-safe summary, detail in _debug", async () => {
+  const { opts, calls } = makeNormOpts();
+  const { body } = await runSteps(
+    opts,
+    [{ action: "set_digits", params: { digits: "abc" } }],
+    {},
+  );
+  assert.equal(calls.set, 0);
+  assert.equal(body.results[0].error, "invalid_params");
+  assert.equal(body.results[0].summary, DEFAULT_SYSTEM_MESSAGES.invalid_params);
+  assert.match(body.results[0]._debug as string, /Invalid params for "set_digits"/);
+});
+
+test("confirm gate: soleOnExecute execute-prediction normalizes raw params too", async () => {
+  const { opts, calls } = makeNormOpts();
+  const { body } = await runSteps(
+    opts,
+    [
+      { action: "set_digits", params: { digits: "70,76" } },
+      { action: "read_digits", params: {} },
+    ],
+    NORM_PENDING,
+  );
+  assert.equal(calls.set, 0, "refused before execution");
+  assert.equal(body.failed_at, 0);
+  assert.equal(body.results[0].error, "mutation_must_be_sole_step");
+});
+
+// ─── invalidatesOnChange: value equality on object slots ───────────────────── //
+
+test("invalidatesOnChange: fresh-but-value-equal OBJECT re-write does NOT clear downstream", async () => {
+  // Executors write fresh objects each run. Reference identity (Object.is)
+  // would read a same-value re-write as a change and spuriously cascade.
+  interface ObjS {
+    holder?: { code: string } | null;
+    derived?: string | null;
+    awaitingInput?: AwaitingInput | null;
+    currentFlow?: CurrentFlow | null;
+  }
+  const annotation = Annotation.Root({
+    holder: Annotation<{ code: string } | null>({
+      reducer: (_, n) => n ?? null,
+      default: () => null,
+    }),
+    derived: Annotation<string | null>({ reducer: (_, n) => n, default: () => null }),
+    awaitingInput: Annotation<AwaitingInput | null>({
+      reducer: (_, n) => n,
+      default: () => null,
+    }),
+    currentFlow: Annotation<CurrentFlow | null>({
+      reducer: (_, n) => n,
+      default: () => null,
+    }),
+  });
+  const objSelectors = { set_holder: (s: ObjS) => s };
+  const opts: BuildAgentStepToolOptions<ObjS, "set_holder", never, typeof objSelectors> = {
+    config: defineConfig<"set_holder", never>({
+      tool: { name: "obj_tool", description: "object invalidation test" },
+      actions: {
+        set_holder: {
+          description: "sets holder; changes clear derived",
+          paramsSchema: z.object({ code: z.string() }),
+          prereqs: [],
+          invalidatesOnChange: { holder: ["derived"] },
+        },
+      },
+    }),
+    stateAnnotation: annotation,
+    selectors: objSelectors,
+    executors: {
+      set_holder: async (params) => ({
+        resultBody: { summary: "holder set" },
+        stateUpdate: { holder: { code: (params as { code: string }).code } },
+        ok: true,
+      }),
+    },
+    verifiers: {},
+  };
+  const seeded: ObjS = { holder: { code: "C1" }, derived: "X" };
+  const same = await runSteps(opts, [{ action: "set_holder", params: { code: "C1" } }], seeded);
+  assert.equal(same.committed.derived, undefined, "same-value fresh object must not cascade");
+  const changed = await runSteps(opts, [{ action: "set_holder", params: { code: "C2" } }], seeded);
+  assert.equal(changed.committed.derived, null, "a real value change still clears downstream");
+});

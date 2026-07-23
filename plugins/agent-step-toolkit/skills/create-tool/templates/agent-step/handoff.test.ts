@@ -214,6 +214,34 @@ test("tool description advertises request_handoff only when enabled", () => {
   assert.doesNotMatch(withoutIt.description, /request_handoff/);
 });
 
+test("HandoffSpec.actionDescription overrides the request_handoff schema variant description", () => {
+  // A host whose resolveClosingMessage overrides every closing must be able
+  // to describe `context` truthfully — the built-in text promises the model
+  // its context is what gets spoken.
+  const variantDescriptions = (tool: { schema: unknown }): (string | undefined)[] => {
+    const s = tool.schema as {
+      shape: { steps: { element: { options: Array<{ description?: string }> } } };
+    };
+    return s.shape.steps.element.options.map((o) => o.description);
+  };
+
+  const { opts: defaults } = makeOpts(true);
+  const stock = variantDescriptions(buildAgentStepTool(defaults));
+  assert.ok(
+    stock.some((d) => d?.includes("Hand the conversation back")),
+    "without an override the built-in description is used",
+  );
+
+  const { opts: custom } = makeOpts(true);
+  custom.handoff = { ...custom.handoff!, actionDescription: "CUSTOM-HANDOFF-DESC" };
+  const overridden = variantDescriptions(buildAgentStepTool(custom));
+  assert.ok(overridden.includes("CUSTOM-HANDOFF-DESC"), "override replaces the description");
+  assert.ok(
+    !overridden.some((d) => d?.includes("Hand the conversation back")),
+    "the default text is fully replaced",
+  );
+});
+
 // ─── handoff node ─────────────────────────────────────────────────────────── //
 
 function nodeConfig(events: unknown[], threadId = "t-1") {

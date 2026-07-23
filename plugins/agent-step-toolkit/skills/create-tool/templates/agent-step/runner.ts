@@ -62,7 +62,7 @@ import {
   handoffParamsSchema,
   type HandoffSpec,
 } from "./handoff.js";
-import { resolveSystemMessages, type SystemMessages } from "./messages.js";
+import { formatMessage, resolveSystemMessages, type SystemMessages } from "./messages.js";
 
 /** Internal adapter shape for confirmation gating. The runner reads/writes the
  *  canonical `awaitingInput.kind === "confirmation"` slot; this struct is just
@@ -295,11 +295,30 @@ function canonicalize(v: unknown): unknown {
   return out;
 }
 
-/** Drives the "did the customer re-call with the SAME params?" decision —
- *  matching params means propose → execute; drifted params means re-propose
- *  (decrement attemptsLeft). */
+/** Deep value equality over canonicalized JSON shapes. Used for the
+ *  propose→execute params match and for `invalidatesOnChange` change
+ *  detection (a fresh-but-value-equal object write is NOT a change —
+ *  reference identity must never count). */
 function paramsEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
+}
+
+/** Drives the "did the customer re-call with the SAME params?" decision —
+ *  matching params means propose → execute; drifted params means re-propose
+ *  (decrement attemptsLeft). The pending side was stored PARSED (schema
+ *  preprocess applied), so the incoming RAW params are parsed with the same
+ *  schema before comparing — value normalization (e.g. a `z.preprocess`
+ *  stripping STT separators: "70,76" ≡ "7076") must never read as drift.
+ *  A failed parse counts as drift; the re-propose branch then surfaces
+ *  `invalid_params`. */
+function paramsMatchPending(
+  action: AnyActionDef,
+  pendingParams: unknown,
+  rawIncoming: unknown,
+): boolean {
+  const parsed = effectiveParamsSchema(action).safeParse(rawIncoming);
+  if (!parsed.success) return false;
+  return paramsEqual(pendingParams, parsed.data);
 }
 
 export interface BuildAgentStepToolOptions<
@@ -470,7 +489,11 @@ function effectiveParamsSchema(action: ActionDef<string>): z.ZodTypeAny {
   return (schema as z.ZodObject<z.ZodRawShape>).extend(PAGE_PARAMS);
 }
 
-function buildStepSchema(config: AnyConfig, handoffEnabled: boolean) {
+function buildStepSchema(
+  config: AnyConfig,
+  handoffEnabled: boolean,
+  handoffActionDescription?: string,
+) {
   const actionNames = Object.keys(config.actions);
   const stepVariants = actionNames.map((name) => {
     const action = config.actions[name];
@@ -491,7 +514,9 @@ function buildStepSchema(config: AnyConfig, handoffEnabled: boolean) {
     stepVariants.push(
       z
         .object({ action: z.literal(HANDOFF_ACTION), params: handoffParamsSchema })
-        .describe(HANDOFF_ACTION_DESCRIPTION) as (typeof stepVariants)[number],
+        .describe(
+          handoffActionDescription ?? HANDOFF_ACTION_DESCRIPTION,
+        ) as (typeof stepVariants)[number],
     );
   }
   const StepSchema =
@@ -681,12 +706,17 @@ export async function runSteps<
             : awaiting.kind === "otp"
               ? "otp_pending_locked"
               : "match_pending_locked";
+        const lockdownVars = {
+          action: awaiting.for_action,
+          abort_action: ABORT_ACTION,
+          capturer: capturer ?? "",
+        };
         const summary =
           awaiting.kind === "confirmation"
-            ? `A "${awaiting.for_action}" is pending confirmation; only the same action with matching params or "${ABORT_ACTION}" is allowed until it resolves.`
+            ? formatMessage(msgs.lockdown_confirmation, lockdownVars)
             : awaiting.kind === "otp"
-              ? `An OTP for "${awaiting.for_action}" is awaiting validation; only that action or "${ABORT_ACTION}" is allowed until it resolves.`
-              : `A double-entry match for "${awaiting.for_action}" is pending; only that action, the capturer "${capturer}", or "${ABORT_ACTION}" is allowed until it resolves.`;
+              ? formatMessage(msgs.lockdown_otp, lockdownVars)
+              : formatMessage(msgs.lockdown_match, lockdownVars);
         const body: RunnerResultBody = {
           summary,
           results: [
@@ -737,7 +767,9 @@ export async function runSteps<
   if (handoffEnabled && userSteps.length > 1) {
     const handoffIdx = userSteps.findIndex((s) => s.action === HANDOFF_ACTION);
     if (handoffIdx >= 0) {
-      const summary = `"${HANDOFF_ACTION}" must be the only step in the batch.`;
+      const summary = formatMessage(msgs.handoff_must_be_sole_step, {
+        action: HANDOFF_ACTION,
+      });
       const body: RunnerResultBody = {
         summary,
         results: [
@@ -770,7 +802,7 @@ export async function runSteps<
     const m = config.actions[s.action]?.controller;
     if (!m) continue;
     if (m.soleStep && userSteps.length > 1) {
-      const summary = `Mutation "${s.action}" must be the only step in the batch.`;
+      const summary = formatMessage(msgs.mutation_must_be_sole_step, { action: s.action });
       const body: RunnerResultBody = {
         summary,
         results: [
@@ -789,9 +821,11 @@ export async function runSteps<
       const isExecute =
         !!soleCheckPending &&
         soleCheckPending.action === s.action &&
-        paramsEqual(soleCheckPending.params, s.params);
+        paramsMatchPending(config.actions[s.action], soleCheckPending.params, s.params);
       if (isExecute) {
-        const summary = `Mutation "${s.action}" is being executed (confirmed); it must be the only step in the batch.`;
+        const summary = formatMessage(msgs.mutation_execute_must_be_sole, {
+          action: s.action,
+        });
         const body: RunnerResultBody = {
           summary,
           results: [
@@ -807,7 +841,9 @@ export async function runSteps<
         return { body, committed };
       }
       if (i !== userSteps.length - 1) {
-        const summary = `Mutation "${s.action}" must be the last step in the batch (reads may precede it; nothing may follow).`;
+        const summary = formatMessage(msgs.mutation_must_be_last_in_batch, {
+          action: s.action,
+        });
         const body: RunnerResultBody = {
           summary,
           results: [
@@ -855,7 +891,7 @@ export async function runSteps<
         });
         continue;
       }
-      if (paramsEqual(p.params, s.params)) {
+      if (paramsMatchPending(config.actions[s.action], p.params, s.params)) {
         planned.push({ action: s.action, params: s.params, confirmMode: "execute" });
         continue;
       }
@@ -959,7 +995,7 @@ export async function runSteps<
       } as Partial<T>;
       view = mergeState(view, patch);
       committed = mergeState(committed, patch);
-      const summary = `Handoff requested (${params.reason}). The turn ends here — produce no further answer.`;
+      const summary = formatMessage(msgs.handoff_requested, { reason: params.reason });
       const entry: StepResult = {
         action: HANDOFF_ACTION,
         ok: true,
@@ -1038,9 +1074,13 @@ export async function runSteps<
     // ─── Confirm-required propose / re-propose: validate params, store pending,
     // ─── return needs_confirmation without invoking the executor.
     if (step.confirmMode === "propose" || step.confirmMode === "rePropose") {
+      // Parse with the SAME schema the execute-decision compares against
+      // (paramsMatchPending) so stored pending params and re-fired params are
+      // normalized identically. Raw Zod detail goes to `_debug`, never the
+      // summary — mirrors the execute-path invalid_params handling.
       let params: unknown;
       try {
-        params = action.paramsSchema.parse(step.params);
+        params = effectiveParamsSchema(action).parse(step.params);
       } catch (err) {
         const message =
           err instanceof z.ZodError
@@ -1049,8 +1089,9 @@ export async function runSteps<
         const entry: StepResult = {
           action: step.action,
           ok: false,
-          summary: `Invalid params for "${step.action}": ${message}`,
+          summary: msgs.invalid_params,
           error: "invalid_params",
+          _debug: `Invalid params for "${step.action}": ${message}`,
         };
         results.push(entry);
         lastSummary = entry.summary as string;
@@ -1070,8 +1111,8 @@ export async function runSteps<
       committed = mergeState(committed, setPendingPatch<T>(newPending, maxAttempts));
       const summary =
         step.confirmMode === "propose"
-          ? `Proposed "${step.action}"; awaiting confirmation.`
-          : `Re-proposed "${step.action}" with adjusted params; awaiting confirmation.`;
+          ? formatMessage(msgs.confirm_proposed, { action: step.action })
+          : formatMessage(msgs.confirm_reproposed, { action: step.action });
       const entry: StepResult = {
         action: step.action,
         ok: true,
@@ -1089,7 +1130,7 @@ export async function runSteps<
     if (step.confirmMode === "exhausted") {
       view = mergeState(view, clearPendingPatch<T>());
       committed = mergeState(committed, clearPendingPatch<T>());
-      const summary = `Confirmation attempts exhausted for "${step.action}"; pending action dropped.`;
+      const summary = formatMessage(msgs.confirm_exhausted, { action: step.action });
       const entry: StepResult = {
         action: step.action,
         ok: false,
@@ -1121,7 +1162,7 @@ export async function runSteps<
         awaiting.kind === "otp" &&
         awaiting.for_action === step.action;
       if (!gated) {
-        const summary = `Action "${step.action}" requires a pending OTP awaiting validation; none found.`;
+        const summary = formatMessage(msgs.otp_not_pending, { action: step.action });
         const entry: StepResult = {
           action: step.action,
           ok: false,
@@ -1149,7 +1190,10 @@ export async function runSteps<
         awaiting.kind === "match" &&
         awaiting.for_action === step.action;
       if (!gated) {
-        const summary = `Action "${step.action}" requires a pending double-entry match (opened in a prior turn); none found at batch start. The capturer "${stepMutation.requiresMatch.capturer}" must run first, in a separate turn.`;
+        const summary = formatMessage(msgs.match_not_pending, {
+          action: step.action,
+          capturer: stepMutation.requiresMatch.capturer,
+        });
         const entry: StepResult = {
           action: step.action,
           ok: false,
@@ -1176,7 +1220,10 @@ export async function runSteps<
     if (stepMutation?.issuesOtp) {
       const awaiting = getAwaitingInput(view);
       if (awaiting && awaiting.kind === "match") {
-        const summary = `Action "${step.action}" cannot issue an OTP while a double-entry match for "${awaiting.for_action}" is still pending; the match must be consumed first.`;
+        const summary = formatMessage(msgs.otp_blocked_match_pending, {
+          action: step.action,
+          match_action: awaiting.for_action,
+        });
         const entry: StepResult = {
           action: step.action,
           ok: false,
@@ -1330,7 +1377,10 @@ export async function runSteps<
         if (pre == null) continue;
         if (!(watched in stateUpdateRec)) continue;
         const post = stateUpdateRec[watched];
-        if (Object.is(pre, post)) continue;
+        // Canonical VALUE equality — executors write fresh objects each run,
+        // so reference identity (Object.is) would read a same-value re-write
+        // of an object slot as a change and fire a spurious cascade.
+        if (paramsEqual(pre, post)) continue;
         for (const downstream of watchMap[watched]) {
           invalidationPatch[downstream] = null;
         }
@@ -1472,7 +1522,9 @@ export async function runSteps<
               const entryIndex = results.length - 1;
               results[entryIndex] = {
                 ...results[entryIndex],
-                summary: `Match attempts exhausted for "${step.action}"; flow aborted.`,
+                summary: formatMessage(msgs.match_attempts_exhausted, {
+                  action: step.action,
+                }),
                 error: "match_attempts_exhausted",
                 verdict: "match_attempts_exhausted",
                 attempts_left: 0,
@@ -1520,7 +1572,7 @@ export async function runSteps<
   }
 
   const body: RunnerResultBody = {
-    summary: lastSummary || "No steps executed.",
+    summary: lastSummary || msgs.no_steps,
     results,
   };
   if (failedAt !== undefined) body.failed_at = failedAt;
@@ -1563,10 +1615,14 @@ export async function runSteps<
         }
         opts.onErrorThreshold?.(committedRec, initialState);
         committedRec.errorCount = 0;
-        const handoffInstruction =
-          `Handoff triggered after repeated backend failures. ` +
-          `Speak this exact message to the caller: "${msgs.auto_handoff}" ` +
-          `Then stop — do not offer further assistance; the channel will handle routing.`;
+        // Platform-delivers wording: the host graph's handoff resolver speaks
+        // the closing (possibly overriding `auto_handoff` from state), so
+        // instructing the model to voice it invites double-speaking. Hosts
+        // whose graph does NOT deliver it can override the template and use
+        // the `{message}` placeholder.
+        const handoffInstruction = formatMessage(msgs.auto_handoff_instruction, {
+          message: msgs.auto_handoff,
+        });
         body.results.push({
           action: "auto_handoff",
           ok: true,
@@ -1600,7 +1656,11 @@ export function buildAgentStepTool<
   Selectors extends Record<ActionName, Selector<T>>,
 >(opts: BuildAgentStepToolOptions<T, ActionName, PrereqName, Selectors>) {
   validateConfig(opts);
-  const InputSchema = buildStepSchema(opts.config, opts.handoff != null);
+  const InputSchema = buildStepSchema(
+    opts.config,
+    opts.handoff != null,
+    opts.handoff?.actionDescription,
+  );
 
   return tool(
     async (

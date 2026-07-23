@@ -99,13 +99,17 @@ export interface ActionDef<PrereqName extends string> {
    *  re-collected with a different value, anything derived from X is stale."
    *
    *  Change rule: invalidation fires only when the pre-step value was non-null
-   *  AND `!Object.is(pre, post)`. First-time set (null → value) does NOT fire
-   *  — there was nothing downstream to invalidate. Same-value writes (no real
-   *  change) also do not fire.
+   *  AND the written value is not deep-VALUE-equal to it (canonicalized JSON
+   *  compare — reference identity never counts, so an executor writing a
+   *  fresh-but-equal object does not fire). First-time set (null → value)
+   *  does NOT fire — there was nothing downstream to invalidate.
    *
    *  Invalidated slots are written as `null` regardless of their schema type.
-   *  Host annotations should accept `null` as the "unset" sentinel for any
-   *  slot listed here. */
+   *  CAUTION: the `null` must survive the HOST's reducer for that slot —
+   *  list only replace-on-write slots as invalidation targets. A record-merge
+   *  reducer (`{...prev, ...(next ?? {})}`) swallows the `null` at the graph
+   *  boundary, so the slot resurrects on the next turn even though the
+   *  in-batch view saw it cleared. */
   invalidatesOnChange?: Record<string, string[]>;
   /** Opt this read into uniform pagination. `true` self-paginates (executor
    *  returns the FULL set in `resultBody.items`; the runner slices + caches it

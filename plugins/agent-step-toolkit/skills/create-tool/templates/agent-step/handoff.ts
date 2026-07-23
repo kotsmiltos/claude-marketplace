@@ -112,6 +112,15 @@ export interface HandoffSpec<T> {
   /** How off-topic handoffs resolve: terminate with the fixed envelope, or
    *  delegate to another LangGraph deployment and pass its answer through. */
   offTopic: HandoffOffTopicSpec;
+  /** Override the LLM-facing description attached to the auto-injected
+   *  `request_handoff` schema variant. The default
+   *  (`HANDOFF_ACTION_DESCRIPTION`) tells the model its `context` is the
+   *  closing line that gets SPOKEN for completed/abandon — which is wrong for
+   *  a host whose `resolveClosingMessage` overrides every closing from state.
+   *  Such hosts must describe `context` truthfully here (e.g. "routing
+   *  metadata for the receiving system; the platform composes the spoken
+   *  closing"), or the schema contradicts the host prompt. */
+  actionDescription?: string;
   /** The fixed envelope content for off_topic terminate mode — also the
    *  fallback when a delegate run fails. This is what the customer
    *  sees/hears. (completed / abandon don't use it: they speak the
