@@ -12,7 +12,7 @@
       "name": "agent-step-toolkit",
       "source": "./plugins/agent-step-toolkit",
       "description": "Build agent-step LangGraph projects and tools: bootstrap a new project (runner library + streaming CLI + scaffold + the required local sandbox service per sandbox-contract.md), define graph state once as a Zod schema (single source of truth for reducers + invoke-boundary validation; agent-step 1.8.1), localize/override every runner-emitted summary via templated system messages, add domain tools (actions / executors / verifiers / controller hooks + invalidatesOnChange) with sandbox extensions per backend, port an existing project onto agent-step, including read-tool patterns (native paginated reads via `pageable`, LLM-authored data analysis over fetched data), channel-handoff actions with orchestrator/specialized agent roles, completed/abandon/off_topic handbacks, and library-coordinated off-topic delegation via agent-step 1.8.1 (the bootstrap scaffold ships the channel middleware wire/streaming contract), upgrade downstream projects' vendored runner library (/pull-library), lay down the three-layer test methodology, and audit a channel middleware implementation against the wire/streaming/handoff contract.",
-      "version": "0.18.1",
+      "version": "0.19.0",
       "author": {
         "name": "Charalampos Kyfonidis"
       },
@@ -35,6 +35,20 @@
       "keywords": ["langgraph", "langsmith", "debugging", "tracing", "dev-server", "thread", "observability"],
       "category": "development",
       "tags": ["langgraph", "langsmith", "debugging", "observability"]
+    },
+    {
+      "name": "kafka-observability",
+      "source": "./plugins/kafka-observability",
+      "description": "LangSmith-parity observability over Kafka for any LangGraph.js / LangChain.js agent: /add-kafka-observability installs or upgrades a vendored src/observability/ library that attaches a BaseTracer subclass globally (the same callback mechanism LangSmith's tracer uses — one startup() call, zero per-node instrumentation) and publishes EVERY traced run — graph invocation, LangGraph nodes, LLM calls with full prompts/outputs/token usage, tool runs, errors, trace hierarchy — as start/end events to a Kafka topic (bank-standard envelope keyed by event id, thread_id correlation, zod-validated, secret-redacted, 512KB-truncated) over a bounded non-blocking fire-and-forget producer (librdkafka, acks=all, idempotent, bounded shutdown). Disabled by default (KAFKA_ENABLED); runs alongside LangSmith for parallel validation so LangSmith can be unplugged with no code change. The skill also wires the client dependency, .env.example, deployment settings with Key Vault refs, a test script, and verifies with typecheck + the library's unit suite.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Charalampos Kyfonidis"
+      },
+      "repository": "https://github.com/ckifonidis/claude-marketplace",
+      "license": "MIT",
+      "keywords": ["kafka", "observability", "langsmith", "tracing", "langgraph", "langchain", "audit"],
+      "category": "development",
+      "tags": ["kafka", "observability", "langsmith", "tracing"]
     }
   ]
 }

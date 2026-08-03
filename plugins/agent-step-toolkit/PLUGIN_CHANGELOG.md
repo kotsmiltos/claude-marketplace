@@ -11,6 +11,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.19.0] — 2026-08-03
+
+Library unchanged (**1.8.1**). Bootstrap now integrates with the new `kafka-observability`
+plugin so every generated agent gets the bank's Kafka observability layer.
+
+### Added
+- `create-tool` bootstrap **Step 8b — Observability**: after verification, offer to run
+  `/add-kafka-observability` (from the `kafka-observability` plugin, same marketplace) to
+  vendor the LangSmith-parity Kafka run-tracing library into the new project; when that
+  plugin isn't installed, the Step 9 report points at
+  `/plugin install kafka-observability@ckifonidis-marketplace`. The observability library
+  is deliberately NOT bundled into this toolkit — one canonical, versioned source, owned
+  by its own plugin. Step 9's report gains an observability-status line.
+
 ## [0.18.1] — 2026-07-23
 
 Ships **agent-step library 1.8.1** (`/pull-library` recommended for downstream projects — note the

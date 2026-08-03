@@ -88,6 +88,38 @@ Ships two skills:
   responses / token usage; EU/self-hosted endpoints supported) when tracing was on for the thread
   — ending in a state-progression table and root-cause analysis.
 
+### kafka-observability
+
+LangSmith-parity observability over Kafka for **any** LangGraph.js / LangChain.js agent —
+built so LangSmith can eventually be unplugged without losing telemetry.
+
+Install:
+
+```
+/plugin install kafka-observability@ckifonidis-marketplace
+```
+
+Ships one skill:
+
+- **`add-kafka-observability`** — install OR upgrade a vendored `src/observability/`
+  library in the current repo. The library attaches a `BaseTracer` subclass globally (the
+  same callback mechanism LangSmith's own tracer uses — one `startup()` call at the graph
+  entrypoint, zero per-node instrumentation) and publishes **every** traced run — graph
+  invocation, each LangGraph node, each LLM call (full rendered prompts, outputs, token
+  usage), each tool run, errors — as start/end events to a Kafka topic:
+  bank-standard envelope (`id` as Kafka key, `thread_id` correlation), zod-validated,
+  secret-redacted, 512 KB-truncated, over a bounded non-blocking fire-and-forget producer
+  (librdkafka, `acks=all`, idempotent, bounded shutdown). Disabled by default
+  (`KAFKA_ENABLED`); runs alongside LangSmith for parallel validation. The skill also
+  wires the dependency, `.env.example`, deployment settings (Key Vault refs for SASL
+  secrets), a `test:observability` script, and verifies with typecheck + the library's
+  unit suite.
+
+The embedded library (`skills/add-kafka-observability/templates/observability/`) is the
+canonical, versioned source — its `VERSION` travels into every target project at
+`src/observability/VERSION`; `CHANGELOG.md` tracks it, `migrations/` carries upgrade
+guides.
+
 ## Layout
 
 ```
@@ -106,9 +138,15 @@ plugins/
 │       ├── test-agent-step/         # three-layer testing methodology
 │       ├── pull-library/            # upgrade a downstream project's vendored library (consumer side)
 │       └── audit-middleware-contract-compliance/  # audit a channel middleware against the wire/streaming/handoff contract
-└── langgraph-plugin/
+├── langgraph-plugin/
+│   ├── .claude-plugin/plugin.json   # plugin manifest
+│   └── skills/
+│       ├── run-langgraph-conversation/      # execute a test conversation, capture thread_id
+│       └── follow-langgraph-conversation/   # investigate a thread (dev server + LangSmith) → root cause
+└── kafka-observability/
     ├── .claude-plugin/plugin.json   # plugin manifest
+    ├── CHANGELOG.md                 # observability library version history
+    ├── migrations/                  # per-version upgrade guides
     └── skills/
-        ├── run-langgraph-conversation/      # execute a test conversation, capture thread_id
-        └── follow-langgraph-conversation/   # investigate a thread (dev server + LangSmith) → root cause
+        └── add-kafka-observability/ # install/upgrade the vendored library + wiring (templates incl. the canonical observability library)
 ```
