@@ -1,16 +1,16 @@
 ---
 name: publish-release
-description: Cut a release of a plugin in this marketplace (agent-step-toolkit, langgraph-plugin, or any future plugin). Detects unreleased changes since the last release commit, sweeps the plugin's docs for staleness BEFORE bumping anything, gates on /bump-version when the embedded agent-step library changed without a library version bump, classifies the plugin semver bump, syncs plugin.json + the marketplace.json entry, writes the PLUGIN_CHANGELOG entry, and lands the conventional "Release <plugin> X.Y.Z" commit. Use when the user wants to release, publish, ship, or version-bump a plugin, or asks why installed plugins don't show recent changes.
+description: Cut a release of a plugin in this marketplace (agent-step-toolkit, langgraph-plugin, kafka-observability, or any future plugin). Detects unreleased changes since the last release commit, sweeps the plugin's docs for staleness BEFORE bumping anything, gates on /bump-version when an embedded vendored library (agent-step runner, observability library) changed without a library version bump, classifies the plugin semver bump, syncs plugin.json + the marketplace.json entry, writes the PLUGIN_CHANGELOG entry, and lands the conventional "Release <plugin> X.Y.Z" commit. Use when the user wants to release, publish, ship, or version-bump a plugin, or asks why installed plugins don't show recent changes.
 ---
 
 <objective>
 Publish a plugin-package release for this marketplace repo. The deliverable is one release commit on `main` that moves the plugin's version everywhere it lives (plugin.json + marketplace.json), documents the delta (PLUGIN_CHANGELOG), and ships docs that are verifiably honest about the package's current contents.
 
-This skill owns the **plugin package** lifecycle only. The **agent-step library** lifecycle (library `VERSION`, `CHANGELOG.md`, `migrations/`) belongs to `/bump-version` — this skill gates on it, never duplicates it.
+This skill owns the **plugin package** lifecycle only. Every **vendored library** lifecycle (library `VERSION`, `CHANGELOG.md`, `migrations/` — the agent-step runner and the observability library alike) belongs to `/bump-version` — this skill gates on it, never duplicates it.
 </objective>
 
 <essential_principles>
-**1. Plugin release ≠ library bump.** `/bump-version` owns `skills/create-tool/templates/agent-step/VERSION`, `CHANGELOG.md`, and `migrations/`. If the embedded library changed since the last release but its `VERSION` did not move, HALT and direct the user to run `/bump-version` first. Never write library version artifacts from this skill.
+**1. Plugin release ≠ library bump.** `/bump-version` owns every vendored library's `VERSION`, `CHANGELOG.md`, and `migrations/` — agent-step-toolkit's `skills/create-tool/templates/agent-step/` AND kafka-observability's `skills/add-kafka-observability/templates/observability/` (any future `templates/**/VERSION`-marked library likewise). If an embedded library changed since the last release but its `VERSION` did not move, HALT and direct the user to run `/bump-version` (with the matching library target) first. Never write library version artifacts from this skill.
 
 **2. Docs are part of the release.** Run the staleness sweep (`references/staleness-checks.md`) BEFORE bumping any version. A release publishes the docs as the package's description of itself; shipping a release whose own inventory files are wrong defeats the point. Fixes found by the sweep ride in the same release commit.
 
@@ -37,7 +37,7 @@ Follow `workflows/publish-release.md` exactly — phases 0–6 with a hard appro
 **Release commit convention** (matches repo history):
 ```
 Release <plugin> X.Y.Z                      # plain plugin release
-Release <plugin> X.Y.Z (ships agent-step library A.B.C)   # when a library bump rides along
+Release <plugin> X.Y.Z (ships <library> library A.B.C)    # when a vendored-library bump rides along
 ```
 Body: short narrative + bullet list of manifest/changelog edits and the headline changes.
 
@@ -48,7 +48,7 @@ Body: short narrative + bullet list of manifest/changelog edits and the headline
 | `.claude-plugin/marketplace.json` | the plugin's entry: `version` (+ `description`) |
 | `plugins/<plugin>/PLUGIN_CHANGELOG.md` | new top entry (create the file if the plugin lacks one — copy the header conventions from agent-step-toolkit's) |
 
-**Out of scope:** the marketplace `metadata.version` in `marketplace.json` (left alone unless the marketplace itself restructures); the agent-step library artifacts (see principle 1); deep contract-vs-runtime conformance audits (an occasional, separate exercise — the staleness sweep is the cheap, every-release subset).
+**Out of scope:** the marketplace `metadata.version` in `marketplace.json` (left alone unless the marketplace itself restructures); the vendored-library artifacts (see principle 1); deep contract-vs-runtime conformance audits (an occasional, separate exercise — the staleness sweep is the cheap, every-release subset).
 </quick_reference>
 
 <reference_index>
@@ -63,9 +63,9 @@ Body: short narrative + bullet list of manifest/changelog edits and the headline
 
 <success_criteria>
 - [ ] Staleness sweep ran; every finding either fixed in this release or explicitly deferred with the user's consent.
-- [ ] If `templates/agent-step/*` changed: library `VERSION` moved, CHANGELOG + migration exist (else the release was halted for `/bump-version`).
+- [ ] If any vendored library changed (`templates/agent-step/*`, `templates/observability/*`): its `VERSION` moved, CHANGELOG + migration exist (else the release was halted for `/bump-version`).
 - [ ] `plugin.json` and the `marketplace.json` entry hold the SAME new version; descriptions refreshed if the capability set changed.
-- [ ] PLUGIN_CHANGELOG has a new top entry naming the version, date, and (for agent-step-toolkit) which library version ships.
+- [ ] PLUGIN_CHANGELOG has a new top entry naming the version, date, and (for plugins shipping a vendored library) which library version ships.
 - [ ] One release commit with the conventional message; remote `main` verified to be at that commit (or PR opened, per the chosen mode).
 - [ ] User reminded that installed plugins pick this up via `/plugin marketplace update`.
 </success_criteria>
