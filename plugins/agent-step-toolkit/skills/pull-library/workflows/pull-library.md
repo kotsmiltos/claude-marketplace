@@ -85,12 +85,21 @@ Revise on request; proceed only on explicit approval.
    (Use the project's actual scripts; `npm test` runs the vendored library tests and should pass once
    any test-glob broadening a migration prescribes — e.g. `dist/agent-step/*.test.js` for
    `paginate.test.js` in 1.1.0+ — has been applied.)
-2. **Report:**
+2. **Courtesy check — other vendored libraries (report-only, never edit them here).** This skill
+   owns `src/agent-step/` ONLY. But the user is updating vendored libraries right now, so surface
+   drift in the others: if `src/observability/VERSION` exists, compare it against the installed
+   `kafka-observability` plugin's
+   `skills/add-kafka-observability/templates/observability/VERSION` (skip silently if that plugin
+   isn't installed). If the plugin ships a newer version, add one line to the report:
+   "observability library is at `<X>`, the kafka-observability plugin ships `<Y>` — run
+   `/add-kafka-observability` to upgrade."
+3. **Report:**
    - Version old → new; migration chain applied.
    - Library files replaced; tools/actions adapted (with the transforms applied to each).
    - Typecheck / test outcome.
+   - Any other-library drift found by the courtesy check.
    - **Manual follow-ups:** every transform that couldn't be fully applied, with concrete file:line
      and what the user must decide/do by hand. Be explicit — a half-migrated project that typechecks
      by luck is worse than a clear list of what's left.
-3. If typecheck still fails after transforms, surface the errors grouped by file — they are the
+4. If typecheck still fails after transforms, surface the errors grouped by file — they are the
    precise remaining migration work, not a reason to revert.

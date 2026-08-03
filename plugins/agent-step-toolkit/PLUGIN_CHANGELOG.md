@@ -13,8 +13,9 @@ template, **patch** = doc or fix with no new surface.
 
 ## [0.19.0] — 2026-08-03
 
-Library unchanged (**1.8.1**). Bootstrap now integrates with the new `kafka-observability`
-plugin so every generated agent gets the bank's Kafka observability layer.
+Library unchanged (**1.8.1**). The toolkit's workflows now integrate with the new
+`kafka-observability` plugin so every generated agent gets the bank's Kafka observability
+layer — and existing agents get pointed at it at the natural moments.
 
 ### Added
 - `create-tool` bootstrap **Step 8b — Observability**: after verification, offer to run
@@ -24,6 +25,17 @@ plugin so every generated agent gets the bank's Kafka observability layer.
   `/plugin install kafka-observability@ckifonidis-marketplace`. The observability library
   is deliberately NOT bundled into this toolkit — one canonical, versioned source, owned
   by its own plugin. Step 9's report gains an observability-status line.
+- `create-tool` port workflow (Step 2): a port that reuses an existing project (skipping
+  bootstrap and its Step 8b) now checks for `src/observability/` and offers
+  `/add-kafka-observability`; a source project's `src/observability/` is explicitly never
+  copied over (the sandbox reuse exception does not extend to vendored libraries) — the
+  target gets the library from its canonical plugin instead.
+- `pull-library` Phase 5: a report-only courtesy check — if `src/observability/VERSION`
+  is older than what the installed `kafka-observability` plugin ships, the report says so
+  and points at `/add-kafka-observability`. This skill still upgrades `src/agent-step/`
+  ONLY; each vendored library keeps exactly one upgrade skill. (No change to the add-tool
+  workflow: the observability tracer hooks the callback system globally, so new
+  tools/actions are traced automatically with zero wiring.)
 
 ## [0.18.1] — 2026-07-23
 
