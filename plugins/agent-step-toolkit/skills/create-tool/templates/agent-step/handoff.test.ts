@@ -6,14 +6,22 @@ import type { AIMessage } from "@langchain/core/messages";
 
 import { defineConfig } from "./define-config.js";
 import { buildAgentStepTool, runSteps, type BuildAgentStepToolOptions } from "./runner.js";
-import { createHandoffNode, HANDOFF_ACTION, handoffRequested, type HandoffSpec } from "./handoff.js";
+import {
+  createHandoffNode,
+  createTerminalHandoff,
+  HANDOFF_ACTION,
+  handoffRequested,
+  type HandoffSpec,
+} from "./handoff.js";
 import type { ExecutorRegistry, VerifierRegistry } from "./types.js";
-import type { AwaitingInput, CurrentFlow, HandoffRequest } from "./state.js";
+import { HandoffRequestSchema, type AwaitingInput, type CurrentFlow, type HandoffRequest } from "./state.js";
+import type { PagedCache } from "./paginate.js";
 
 interface S {
   thing?: string | null;
   awaitingInput?: AwaitingInput | null;
   currentFlow?: CurrentFlow | null;
+  pagedRead?: PagedCache<unknown> | null;
   handoff?: HandoffRequest | null;
 }
 
@@ -26,6 +34,7 @@ const testStateAnnotation = Annotation.Root({
   thing: Annotation<string | null>(replaceNull<string>()),
   awaitingInput: Annotation<AwaitingInput | null>(replaceNull<AwaitingInput>()),
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
+  pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
 });
 
@@ -92,6 +101,10 @@ const HANDOFF_STEP = {
   action: HANDOFF_ACTION,
   params: { reason: "off_topic", context: "wants a transfer" },
 };
+const ABANDON_STEP = {
+  action: HANDOFF_ACTION,
+  params: { reason: "abandon", context: "lost_card:human_requested" },
+};
 
 // ─── runner: built-in request_handoff action ──────────────────────────────── //
 
@@ -129,7 +142,35 @@ test("request_handoff with an invalid reason fails param validation", async () =
   assert.equal(committed.handoff, undefined);
 });
 
-test("request_handoff is allowed while a confirmation is pending (lockdown bypass)", async () => {
+test("request_handoff atomically abandons pending interaction, flow, and page state", async () => {
+  const { opts } = makeOpts(true);
+  const initial: S = {
+    awaitingInput: {
+      kind: "confirmation",
+      for_action: "change_thing",
+      params: { v: "y" },
+      attempts_left: 2,
+      max_attempts: 3,
+      flow_ref: "change_flow",
+    },
+    currentFlow: { name: "change_flow", data: { proposed: "y" } },
+    pagedRead: {
+      key: "read_thing",
+      signature: "{}",
+      rows: ["stale"],
+      extras: { summary: "old page" },
+    },
+  };
+  const { body, committed } = await runSteps(opts, [HANDOFF_STEP], initial);
+  assert.equal(body.failed_at, undefined);
+  assert.equal(body.results[0].ok, true);
+  assert.deepEqual(committed.handoff, { reason: "off_topic", context: "wants a transfer" });
+  assert.equal(committed.awaitingInput, null);
+  assert.equal(committed.currentFlow, null);
+  assert.equal(committed.pagedRead, null);
+});
+
+test("request_handoff from a pending confirmation resolves exactly once", async () => {
   const { opts } = makeOpts(true);
   const initial: S = {
     awaitingInput: {
@@ -139,10 +180,31 @@ test("request_handoff is allowed while a confirmation is pending (lockdown bypas
       attempts_left: 2,
       max_attempts: 3,
     },
+    currentFlow: { name: "change_flow", data: {} },
+    pagedRead: { key: "read_thing", signature: "{}", rows: [], extras: {} },
   };
-  const { body, committed } = await runSteps(opts, [HANDOFF_STEP], initial);
-  assert.equal(body.results[0].ok, true);
-  assert.deepEqual(committed.handoff, { reason: "off_topic", context: "wants a transfer" });
+  const { committed } = await runSteps(opts, [ABANDON_STEP], initial);
+  const pending = { ...initial, ...committed };
+  const node = createHandoffNode<S>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+  });
+  const events: unknown[] = [];
+
+  const first = await node(pending, nodeConfig(events));
+  const messages = first.messages as AIMessage[];
+  assert.equal(first.handoff, null);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].additional_kwargs.is_handoff, true);
+  assert.equal(messages[0].additional_kwargs.handoff_type, "abandon");
+  assert.deepEqual(
+    (events as { type: string }[]).map((event) => event.type),
+    ["handoff", "handoff_complete"],
+  );
+
+  const second = await node({ ...pending, handoff: first.handoff as null }, nodeConfig(events));
+  assert.deepEqual(second, {});
+  assert.equal(events.length, 2, "a consumed handoff emits no second control-plane signal");
 });
 
 test("request_handoff without the handoff opt is an unknown action", async () => {
@@ -449,4 +511,32 @@ test("handoff node (delegate) stream timer starts after connect, not at delegate
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+
+// ─── createTerminalHandoff ────────────────────────────────────────────────── //
+
+test("createTerminalHandoff maps each outcome to its reason and namespaced context", () => {
+  const terminalHandoff = createTerminalHandoff("lost_card", {
+    identification_dead_end: "abandon",
+    already_closed: "completed",
+  });
+  assert.deepEqual(terminalHandoff("identification_dead_end"), {
+    reason: "abandon",
+    context: "lost_card:identification_dead_end",
+  });
+  assert.deepEqual(terminalHandoff("already_closed"), {
+    reason: "completed",
+    context: "lost_card:already_closed",
+  });
+});
+
+test("createTerminalHandoff produces a valid `handoff` slot value", () => {
+  const terminalHandoff = createTerminalHandoff("card_pin", { afm_unknown: "abandon" });
+  // The pair goes straight into an executor's stateUpdate, so it must satisfy
+  // the same schema the built-in action's params are parsed against.
+  assert.deepEqual(HandoffRequestSchema.parse(terminalHandoff("afm_unknown")), {
+    reason: "abandon",
+    context: "card_pin:afm_unknown",
+  });
 });

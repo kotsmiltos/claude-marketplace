@@ -479,7 +479,7 @@ Opt-in machinery for a SPECIALIZED agent's off-topic plays (see `streaming-and-c
 Pass `handoff: HandoffSpec<T>` to `buildAgentStepTool`. The runner then:
 
 - Auto-injects the reserved **`request_handoff`** action into the tool schema (with the opt provided, declaring it in `config.actions` throws; WITHOUT the opt the name is free — the orchestrator/scaffold mechanism uses it for its own action). Params = `HandoffRequestSchema`: `{ reason: "off_topic" | "completed" | "abandon", context }` — `context` is the customer's request for `off_topic`, the LLM-composed closing line for `completed` / `abandon`.
-- Handles the action internally in `runSteps` as a **pure slot write** — validates params, patches the `handoff` slot into view + committed state, returns an ok result telling the model the turn ends here. No I/O in the runner.
+- Handles the action internally in `runSteps` as a **pure state transition** — validates params, then in ONE patch abandons every transient runner slot (`awaitingInput`, `currentFlow`, `pagedRead`) and writes the `handoff` slot into view + committed state, returning an ok result telling the model the turn ends here. No I/O in the runner. The clear is what makes a handoff safe from inside a pending gate: a thread routed back later resumes nothing stale.
 - Enforces **exclusivity**: batched with anything else ⇒ the whole batch is refused with `error: "handoff_must_be_sole_step"`, nothing executes.
 - **No prereqs**, and allowed as the first step under input lockdown (pending confirmation / OTP / match) — "transfer me" must work before any data is loaded and cannot be blocked by a pending gate.
 
@@ -513,7 +513,31 @@ neutral/failed phrasing. It runs in `createHandoffNode` for `completed` / `aband
 string becomes the final message `content` (and `handoff_metadata.success_message`), `undefined` falls
 through to `request.context`.
 
-Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `createHandoffNode(spec)`.
+### Executor half (`createTerminalHandoff`) — since 1.9.0
+
+The model is not the only writer of the `handoff` slot. When an executor establishes a **deterministic business-terminal outcome** — the backend reports the account is already closed, the confirmed identifier resolves to nobody — there is no judgement left to make, and waiting for the model to issue a second `request_handoff` call is a bug waiting to happen: it forgets, and the caller dead-ends. Such an executor writes the slot itself, in the SAME `stateUpdate` as its domain outcome, so `handoffRequested` is true the moment the batch commits.
+
+`createTerminalHandoff(namespace, outcomes)` builds the host's mapper:
+
+```ts
+const terminalHandoff = createTerminalHandoff("lost_card", {
+  identification_dead_end: "abandon",
+  already_closed: "completed",
+} as const);
+
+// inside the executor:
+return {
+  resultBody: { summary: M.already_closed, verdict: "already_closed" },
+  stateUpdate: { lossReportOutcome: "already_closed", handoff: terminalHandoff("already_closed") },
+  ok: true,
+};
+```
+
+The outcome table is typed against `HandoffRequest["reason"]`, so a host's mapping is checked at compile time and the returned `reason` stays literal per outcome. `context` is `` `${namespace}:${outcome}` `` — **routing metadata, never caller-audible text**: the spoken closing is `resolveClosingMessage`'s job, keyed on the exact pair.
+
+The alternative hosts reach for — a graph node that watches an outcome enum and forces the handback — duplicates knowledge the executor already had, and is the node this export exists to delete. See `orchestration-boundaries.md`.
+
+Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `createHandoffNode(spec)`, `createTerminalHandoff(namespace, outcomes)`.
 
 Wire a conditional edge after the tool node — `createReactAgent` cannot express it, so the graph is hand-rolled: `addConditionalEdges("tools", s => handoffRequested(s) ? HANDOFF_NODE : "agent")`, `addNode(HANDOFF_NODE, createHandoffNode(spec))`, `addEdge(HANDOFF_NODE, END)`. The node emits a `handoff` custom event FIRST (streaming clients abort TTS / reroute before any content), resolves the response (terminate envelope, or a delegate run over the Platform API with live `delegated_token` pass-through and a behavioral fallback to the envelope on failure), emits `handoff_complete`, and returns `{ handoff: null, messages: [AIMessage] }` — the model never paraphrases the result.
 

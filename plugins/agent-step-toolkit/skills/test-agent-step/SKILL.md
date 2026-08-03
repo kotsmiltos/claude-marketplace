@@ -138,4 +138,6 @@ Order matters: write the sandbox test against the executor **before** touching t
 - **A sandbox test for a routing concern** ("the LLM should batch X with Y") — that's prompt-input; the sandbox never sees the LLM.
 - **A prompt-input test for an executor-internal concern** ("the verdict should be `ok` when status=00") — that's sandbox; the prompt-input layer never executes.
 - **Re-proving the runner for a new action.** The runner's own tests cover gating. Add a runner unit test only for a genuinely new mode combination.
+- **Treating three green layers as proof the change is live-safe.** All three stop at the agent boundary: none of them exercises the channel middleware, the routing that reaches this agent, or the frames a client actually receives. A change to handoff behaviour, streaming, or the reply envelope is verified only end-to-end through the real middleware — see `../create-tool/references/streaming-and-channel-contract.md` and the `audit-middleware-contract-compliance` skill.
+- **Accepting a stale trace as evidence.** For any end-to-end pass, the captured frames, state history and traces must come from the build under test. An old green run proves the old build was green. If you cannot tie the evidence to the current revision, you have not verified it.
 </anti_patterns>

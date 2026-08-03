@@ -345,10 +345,11 @@ export interface BuildAgentStepToolOptions<
   executors: ExecutorRegistry<T, Selectors>;
   verifiers: VerifierRegistry<T>;
   /** Opt into the library-managed handoff: auto-injects the built-in
-   *  `request_handoff` action (sole-step, no prereqs) whose only effect is
-   *  writing the `handoff` state slot. The slot is RESOLVED by the host
-   *  graph's handoff node (`createHandoffNode(spec)` from handoff.ts) — the
-   *  runner never performs the terminate/delegate I/O itself. */
+   *  `request_handoff` action (sole-step, no prereqs), which atomically clears
+   *  transient interaction/flow/page state and writes the `handoff` slot. The
+   *  slot is RESOLVED by the host graph's handoff node
+   *  (`createHandoffNode(spec)` from handoff.ts) — the runner never performs
+   *  the terminate/delegate I/O itself. */
   handoff?: HandoffSpec<T>;
   /** Optional overrides for the runner's own system `summary` strings (executor
    *  error, invalid params, abort, flow gates). Shallow-merged over
@@ -969,12 +970,12 @@ export async function runSteps<
       continue;
     }
 
-    // ─── Handoff action (library-handled, no user executor). Pure slot write:
-    //     validate params, patch the library-managed `handoff` slot, return ok.
-    //     No prereqs by design — "transfer me" must work before any data is
-    //     loaded. The host graph's handoff node resolves the slot after the
-    //     batch commits (event emission + terminate/delegate I/O live there;
-    //     the runner stays side-effect-free).
+    // ─── Handoff action (library-handled, no user executor). Pure state
+    //     transition: validate params, abandon transient runner state, patch
+    //     the library-managed `handoff` slot, return ok. No prereqs by design —
+    //     "transfer me" must work before any data is loaded. The host graph's
+    //     handoff node resolves the slot after the batch commits (event emission
+    //     + terminate/delegate I/O live there; the runner stays side-effect-free).
     if (handoffEnabled && step.action === HANDOFF_ACTION) {
       let params: HandoffRequest;
       try {
@@ -996,7 +997,13 @@ export async function runSteps<
         failedAt = results.length - 1;
         break;
       }
+      // A handoff abandons the active conversation path. Clear every transient
+      // runner slot that could otherwise resume stale work if this graph thread
+      // is routed back to later: the pending interaction + owning flow via the
+      // canonical helper, and the independent pageable-read cache.
       const patch = {
+        ...clearAllPatch<T>(),
+        pagedRead: null,
         handoff: { reason: params.reason, context: params.context },
       } as Partial<T>;
       view = mergeState(view, patch);

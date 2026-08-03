@@ -178,7 +178,7 @@ Expected: zero errors in the new tool's files. (Unrelated WIP errors in other di
 ```bash
 npx tsc && node --test dist/agent-step/*.test.js
 ```
-Expected: all library unit tests still pass (currently 105: runner + paginate + handoff + zod-state). The count may grow as the library evolves — what matters is zero failures. The new tool shouldn't affect them.
+Expected: all library unit tests still pass (currently 108: runner + paginate + handoff + zod-state). The count may grow as the library evolves — what matters is zero failures. The new tool shouldn't affect them.
 
 ```bash
 npm run test:sandbox

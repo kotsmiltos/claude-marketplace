@@ -6,8 +6,9 @@
  * 1. The runner auto-injects a built-in `request_handoff` action into the tool
  *    schema when `BuildAgentStepToolOptions.handoff` is provided. The action is
  *    the LLM's actuator — detection lives in the host's prompt. Its "executor"
- *    (runner-internal, see runner.ts) only patches the library-managed
- *    `handoff` state slot; it performs no I/O, so the runner stays pure.
+ *    (runner-internal, see runner.ts) atomically abandons transient runner
+ *    state and patches the library-managed `handoff` slot; it performs no I/O,
+ *    so the runner stays pure.
  *
  * 2. `createHandoffNode` builds the graph node that RESOLVES the slot. The host
  *    graph wires a conditional edge after its tool node (`handoffRequested`)
@@ -56,8 +57,8 @@ export const HANDOFF_ACTION = "request_handoff";
  *  library-managed slot already claims that name.) */
 export const HANDOFF_NODE = "resolve_handoff";
 
-/** Params the LLM provides to `request_handoff` — the slot schema itself:
- *  the action is a pure slot write. */
+/** Params the LLM provides to `request_handoff` — the handoff-slot schema
+ *  itself. The action is a pure state transition with no external I/O. */
 export const handoffParamsSchema = HandoffRequestSchema;
 
 /** Handback signal emitted as `handoff_type` for each handoff reason — the
@@ -69,6 +70,38 @@ export const HANDBACK_SIGNALS = {
   completed: "completed",
   abandon: "abandon",
 } as const satisfies Record<HandoffRequest["reason"], string>;
+
+/** Builds a host's `outcome → { reason, context }` mapper for DETERMINISTIC
+ *  business-terminal outcomes — the ones an executor establishes itself, with
+ *  no model judgement left to make.
+ *
+ *  Such an executor writes the library-managed `handoff` slot in the SAME state
+ *  update as its domain outcome, so the graph resolves the handoff right after
+ *  the tool batch. Without this, the host must either trust the model to issue
+ *  a second `request_handoff` call (it forgets, and the caller dead-ends) or
+ *  add a graph node that watches an outcome enum and forces the handback — a
+ *  node that duplicates what the executor already knew.
+ *
+ *  `context` is routing metadata, never caller-audible text: the host's
+ *  `HandoffSpec` owns the spoken closing and keys it on the exact pair.
+ *
+ *  @example
+ *  const terminalHandoff = createTerminalHandoff("lost_card", {
+ *    identification_dead_end: "abandon",
+ *    already_closed: "completed",
+ *  });
+ *  terminalHandoff("already_closed");
+ *  // → { reason: "completed", context: "lost_card:already_closed" }
+ */
+export function createTerminalHandoff<M extends Record<string, HandoffRequest["reason"]>>(
+  namespace: string,
+  outcomes: M,
+): <K extends keyof M & string>(outcome: K) => { reason: M[K]; context: string } {
+  return (outcome) => ({
+    reason: outcomes[outcome],
+    context: `${namespace}:${outcome}`,
+  });
+}
 
 /** LLM-facing mechanics attached to the `request_handoff` schema variant. */
 export const HANDOFF_ACTION_DESCRIPTION =
@@ -424,4 +457,3 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     };
   };
 }
-

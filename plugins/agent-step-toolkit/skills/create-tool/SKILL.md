@@ -117,6 +117,7 @@ The sandbox tests can't run without it. If a new tool calls a backend the sandbo
 All domain knowledge in `references/`:
 
 - **agent-step-api.md** — Runner types (ActionDef, ControllerHooks, Verifier, ConfirmationOpts, invalidatesOnChange), construction-time checks, library invariants.
+- **orchestration-boundaries.md** — Where an action ends and the library begins: no empty-parameter wrapper actions, terminal outcomes written by the executor (`createTerminalHandoff`) instead of a forcing graph node, the three-node graph target, why a graph-level "act now" confirmation nudge is forbidden (measured to execute an irreversible action against the user's intent), and handoff honesty. Read before adding an action, a graph node, or a model-input guard — and when a project's graph has grown past `agent` / `tools` / `resolve_handoff`.
 - **tool-directory-layout.md** — Per-file purpose, naming conventions, file-creation order.
 - **executor-patterns.md** — Read executor vs mutation executor patterns; backend client usage; state update shape; voice-safe outputs.
 - **state-and-prompt-integration.md** — How to patch `src/state.ts`, `src/prompt.ts`, `src/tools/index.ts`.

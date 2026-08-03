@@ -12,6 +12,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [1.9.0] — 2026-08-03
+
+Minor: one additive export and one runner behaviour fix, absorbed from a downstream agent that
+simplified its graph from six nodes to three. `request_handoff` now abandons transient runner state
+atomically, and `createTerminalHandoff` lets an executor write the handoff slot for outcomes it
+established itself — together they remove the host-side "watch an outcome enum and force the
+handback" graph node. No API removal or signature change. Suite grows 105 → 108. Ships alongside a
+new authoring doctrine reference, `references/orchestration-boundaries.md`.
+Migration: [migrations/1.8.1-to-1.9.0.md](migrations/1.8.1-to-1.9.0.md).
+
+### Added
+- **`createTerminalHandoff(namespace, outcomes)`** (exported from `handoff.ts` / `index.ts`) — builds
+  a host's `outcome → { reason, context }` mapper for DETERMINISTIC business-terminal outcomes. The
+  executor that established the outcome writes the `handoff` slot in the SAME `stateUpdate` as its
+  domain outcome, so `handoffRequested` is true the moment the batch commits. The outcome table is
+  typed against `HandoffRequest["reason"]`, so a host's mapping is checked at compile time and the
+  returned `reason` stays literal per outcome; `context` is `` `${namespace}:${outcome}` `` — routing
+  metadata for `resolveClosingMessage` to key on, never caller-audible text. Replaces two host-side
+  patterns: trusting the model to issue a second `request_handoff` call (it forgets, and the caller
+  dead-ends), and the graph node that watches an outcome enum to force the handback (it duplicates
+  knowledge the executor already had).
+
+### Fixed
+- **`request_handoff` abandons transient runner state atomically.** The built-in action previously
+  wrote only the `handoff` slot, leaving `awaitingInput`, `currentFlow` and `pagedRead` behind. A
+  handoff abandons the active conversation path by definition, so a graph thread routed back later
+  could resume work the customer had already walked away from — a pending confirmation being the
+  dangerous case, since the runner locks every following step until it resolves. The action now
+  patches `clearAllPatch()` + `pagedRead: null` together with the slot, in one state update. This is
+  what makes a handoff safe from inside a pending gate: the clear and the slot write cannot be
+  observed apart. The pending-gate test was rewritten to assert the clear, and a test that a handoff
+  from a pending confirmation resolves exactly once was added.
+
+### Changed
+- `agent-step-api.md` no longer describes the built-in action as a "pure slot write" — it is a pure
+  state *transition* (no I/O, but more than one slot). New § *Executor half (`createTerminalHandoff`)*.
+- `templates/project/package.json.template` — `test:sandbox` / `test:prompt` used
+  `[ -n "$F" ] && node --test $F || echo "…"`, so a FAILING suite fell through to the `echo` and the
+  script exited 0. Any project that took these scripts unchanged reports green while failing.
+  Rewritten as `if/then/else`, plus `rm -rf dist` on all three test scripts so a stale
+  build cannot resurrect deleted tests. Not a library change; shipped here because the template is
+  the source every project inherits.
+
 ## [1.8.1] — 2026-07-23
 
 Patch: the auto-handoff error counter now treats **no-executor batches as NEUTRAL** — they neither

@@ -38,10 +38,13 @@ export {
 export type { AwaitingInput, CurrentFlow, HandoffRequest, LibraryManagedSlots } from "./state.js";
 
 // Handoff: the built-in `request_handoff` action is auto-injected by the
-// runner when `BuildAgentStepToolOptions.handoff` is provided (it only writes
-// the `handoff` slot). The host graph resolves the slot with a node built by
-// `createHandoffNode(spec)`, wired after the tool node behind the
-// `handoffRequested` edge predicate, with a direct edge to END.
+// runner when `BuildAgentStepToolOptions.handoff` is provided. It abandons
+// transient runner state and writes the `handoff` slot atomically. The host
+// graph resolves the slot with a node built by `createHandoffNode(spec)`, wired
+// after the tool node behind the `handoffRequested` edge predicate, with a
+// direct edge to END. Deterministic business-terminal outcomes skip the action
+// entirely: the executor that established the outcome writes the slot in its
+// own state update, pairing it with `createTerminalHandoff(namespace, outcomes)`.
 export {
   HANDOFF_ACTION,
   HANDOFF_NODE,
@@ -50,6 +53,7 @@ export {
   handoffParamsSchema,
   handoffRequested,
   createHandoffNode,
+  createTerminalHandoff,
 } from "./handoff.js";
 export type {
   HandoffSpec,
