@@ -59,7 +59,11 @@ Otherwise it is a **first install**.
 Then gather, asking only for what cannot be derived:
 1. **`APPLICATION_NAME`** — propose the snake_cased `package.json` name.
 2. **`KAFKA_BOOTSTRAP_SERVERS`** and **`KAFKA_OBSERVABILITY_TOPIC`** — per environment if
-   the repo has `configuration/**/settings.*.json` files.
+   the repo has `configuration/**/settings.*.json` files. Before asking, scan sibling
+   repos in the parent directory for an existing install (`src/observability/VERSION`
+   present) and propose their `KAFKA_*` values (brokers, topic naming convention, security
+   mode, Key Vault secret names) as defaults — agents in one workspace usually share the
+   same Kafka estate. Propose, never silently adopt: the user confirms every value.
 3. **Security** — none (PLAINTEXT, e.g. local/compose) or SASL (`KAFKA_SECURITY_PROTOCOL`,
    `KAFKA_SASL_MECHANISM`, username, and the Key Vault secret name for the password).
 4. **Enable now or ship disabled?** Default: disabled everywhere; flipping QA/PROD to

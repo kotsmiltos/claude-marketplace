@@ -31,6 +31,11 @@ topic (per environment where deployment settings exist), security mode (PLAINTEX
 + Key Vault secret name for the password), enable-now-or-ship-disabled (default disabled),
 and which settings files to touch.
 
+For brokers/topic/security defaults, first scan sibling repos in the parent directory for
+an existing install (`src/observability/VERSION` present) and read their `.env.example` +
+`configuration/**/settings.*.json` `KAFKA_*` values; propose those as per-environment
+defaults for the user to confirm. Read-only — never write outside the target repo.
+
 ## Step 3: Plan + approval gate (mandatory before any project-file write)
 
 Present:
@@ -39,7 +44,7 @@ Present:
 # Kafka observability — <install|upgrade to> <version>: <repo name>
 
 ## Vendored (replaced wholesale, safe)
-- src/observability/  (~17 files: library + tests + README + VERSION)
+- src/observability/  (20 files: library + tests + README + VERSION)
 
 ## Project edits (need your OK)
 - package.json         + "@confluentinc/kafka-javascript", + "test:observability" script
