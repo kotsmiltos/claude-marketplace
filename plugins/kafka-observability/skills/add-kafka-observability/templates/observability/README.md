@@ -95,6 +95,13 @@ KafkaEventProducer (kafka-producer.ts)
 - **Graceful shutdown**: `await shutdown()` drains the queue, flushes librdkafka's
   buffer, then disconnects — each phase bounded by a timeout race (librdkafka's own
   flush/disconnect timeouts do NOT reliably bound a never-connected broker).
+- **Connection visibility**: startup logs "Kafka run tracing initialized (producer
+  connecting in background)" — the handshake happens asynchronously after it. When the
+  broker handshake completes, the producer logs `[observability] Kafka producer
+  connected`; if it still hasn't after 30 s (10× the socket setup timeout, generous for
+  SASL_SSL), a one-shot watchdog warns that events are accumulating in memory, with the
+  current queue fill. Without it a never-connected producer is silent: the drain loop
+  no-ops until "ready" and the queue-full warning needs `KAFKA_QUEUE_MAXSIZE` events.
 - **Fire-and-forget**: validation/redaction/transport errors are logged, never thrown
   into the run. **Known gap**: no replay — sustained broker unavailability or queue
   saturation loses events (accepted tradeoff for never blocking the caller).

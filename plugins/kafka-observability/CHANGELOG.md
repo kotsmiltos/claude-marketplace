@@ -6,6 +6,33 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.1.0 (2026-08-04)
+
+Connection-diagnostics release, motivated by a real QA incident: an agent's events never
+reached the shared sink, and the logs made the failure undiagnosable — startup printed
+"Kafka run tracing ready" **before** any broker/SASL handshake, and a producer that never
+connects is otherwise silent (the drain loop no-ops until librdkafka's "ready" event,
+`event.error` does not reliably fire against black-holed egress, and the queue-full
+warning needs `KAFKA_QUEUE_MAXSIZE` events to trigger). "Connected" and "never connected"
+were indistinguishable from application logs.
+
+No behavior changes beyond logging: `produce()`, drain, shutdown semantics, config keys,
+and the disabled-by-default contract are untouched. Pure file refresh for consumers —
+re-run `/add-kafka-observability` (see `migrations/1.0.0-to-1.1.0.md`).
+
+- **`kafka-producer.ts`** — logs `[observability] Kafka producer connected` when the
+  broker handshake actually completes, and arms a one-shot, `unref()`'d connection
+  watchdog (default 30 s — 10× the 3 s socket setup timeout, generous for SASL_SSL) that
+  warns when the producer has still not connected, including the current in-memory queue
+  fill (`queue N/max`). Cleared on "ready" and on `shutdown()`. The threshold is an
+  injectable constructor parameter so tests don't wait 30 s.
+- **`index.ts`** — the startup line no longer claims readiness:
+  "Kafka run tracing ready: …" → "Kafka run tracing initialized (producer connecting in
+  background): …" (same app/topic/brokers/retries fields).
+- **`kafka-producer.test.ts`** — two new watchdog tests on the existing
+  unreachable-broker harness: the not-connected warning fires with the queue fill, and
+  `shutdown()` clears the watchdog (no stray warning after a deliberate close).
+
 ## 1.0.0 (2026-08-03)
 
 Initial release.

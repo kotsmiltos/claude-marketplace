@@ -48,6 +48,15 @@ const OPTIONAL_CONFIG_KEYS: Array<[keyof KafkaSettings, string]> = [
 // down broker from blocking shutdown() for anywhere near as long.
 const SOCKET_CONNECTION_SETUP_TIMEOUT_MS = 3000;
 
+// 10× the socket setup timeout — generous even for a SASL_SSL handshake (TCP
+// + TLS + SASL round trips, retries across brokers). A producer that never
+// connects is otherwise SILENT: drainOnce() no-ops until "ready", event.error
+// does not reliably fire against black-holed egress, and the queue-full
+// warning needs queueMaxSize events first — so from the logs, "connected" and
+// "never connected" look identical while events pile up in memory. The
+// watchdog is the one signal that distinguishes them.
+const CONNECT_WARN_AFTER_MS = 30_000;
+
 export function buildConfig(settings: KafkaSettings): Record<string, unknown> {
   const config: Record<string, unknown> = {
     "bootstrap.servers": settings.bootstrapServers,
@@ -72,12 +81,18 @@ export class KafkaEventProducer implements EventProducer {
   private closed = false;
   private droppedEvents = 0;
   private drainTimer: NodeJS.Timeout | null = null;
+  private connectWatchdog: NodeJS.Timeout | null = null;
 
-  constructor(settings: KafkaSettings) {
+  // connectWarnAfterMs is injectable so tests can exercise the watchdog
+  // without waiting the real 30s.
+  constructor(settings: KafkaSettings, connectWarnAfterMs = CONNECT_WARN_AFTER_MS) {
     this.queue = new BoundedQueue(settings.queueMaxSize);
     this.producer = new ProducerCtor(buildConfig(settings));
     this.producer.on("ready", () => {
       this.ready = true;
+      if (this.connectWatchdog) clearTimeout(this.connectWatchdog);
+      this.connectWatchdog = null;
+      console.log("[observability] Kafka producer connected");
     });
     this.producer.on("event.error", (err) => {
       console.error("[observability] Kafka producer error:", err);
@@ -86,6 +101,16 @@ export class KafkaEventProducer implements EventProducer {
       if (err) console.error("[observability] Kafka delivery failed:", err);
     });
     this.producer.connect();
+    // One-shot never-connected watchdog (see CONNECT_WARN_AFTER_MS).
+    this.connectWatchdog = setTimeout(() => {
+      if (this.ready) return;
+      console.warn(
+        `[observability] Kafka producer has NOT connected after ${connectWarnAfterMs} ms — ` +
+          `events are accumulating in memory (queue ${this.queue.size}/${settings.queueMaxSize}) ` +
+          `and will be lost on shutdown or dropped once the queue fills; check broker/SASL connectivity`,
+      );
+    }, connectWarnAfterMs);
+    this.connectWatchdog.unref?.(); // never keeps the process alive on its own
     this.drainTimer = setInterval(() => this.drainOnce(), DRAIN_INTERVAL_MS);
     this.drainTimer.unref?.(); // never keeps the process alive on its own
   }
@@ -147,6 +172,10 @@ export class KafkaEventProducer implements EventProducer {
     if (this.closed) return;
     this.closed = true;
     if (this.drainTimer) clearInterval(this.drainTimer);
+    // A watchdog outliving shutdown would warn about a producer we closed on
+    // purpose — a deliberate shutdown is not a connectivity problem.
+    if (this.connectWatchdog) clearTimeout(this.connectWatchdog);
+    this.connectWatchdog = null;
 
     const deadline = Date.now() + timeoutMs;
     while (this.queue.size > 0 && Date.now() < deadline) {

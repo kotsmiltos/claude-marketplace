@@ -17,4 +17,6 @@ For multi-step jumps, apply the files in version order. A project with no
 `src/observability/VERSION` is a fresh install — no migrations apply; the skill vendors
 the current library directly.
 
-No migrations yet — 1.0.0 is the initial release.
+| Step | Summary |
+|------|---------|
+| `1.0.0-to-1.1.0.md` | Connection diagnostics (connected log, never-connected watchdog, startup reword). Pure file refresh — no project-level transforms. |

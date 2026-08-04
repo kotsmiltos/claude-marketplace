@@ -104,3 +104,47 @@ describe("KafkaEventProducer — bounded queue against an unreachable broker", (
     await assert.doesNotReject(() => producer.shutdown(150));
   });
 });
+
+describe("KafkaEventProducer — connection watchdog against an unreachable broker", () => {
+  // console.warn is swapped by hand (not node:test mocks) so the other
+  // producer warnings (queue-full, closed) keep flowing through the capture
+  // too — the tests filter on the watchdog's own wording.
+  function captureWarn(): { warnings: string[]; restore: () => void } {
+    const original = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    return { warnings, restore: () => (console.warn = original) };
+  }
+
+  const watchdogWarnings = (warnings: string[]) => warnings.filter((w) => w.includes("has NOT connected"));
+
+  test("warns once the threshold passes without a connection, including the queue fill state", async () => {
+    const { warnings, restore } = captureWarn();
+    const producer = new KafkaEventProducer(settings({ queueMaxSize: 10 }), 50);
+    try {
+      producer.produce("t", "k1", Buffer.from("{}"));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const fired = watchdogWarnings(warnings);
+      assert.equal(fired.length, 1, "exactly one watchdog warning (one-shot)");
+      assert.match(fired[0], /queue 1\/10/, "warning must show the current queue fill");
+    } finally {
+      restore();
+      await producer.shutdown(200);
+    }
+  });
+
+  test("shutdown() clears the watchdog — no stray warning after a deliberate close (edge case)", async () => {
+    const { warnings, restore } = captureWarn();
+    try {
+      const producer = new KafkaEventProducer(settings({ queueMaxSize: 10 }), 100);
+      await producer.shutdown(150);
+      // Well past the 100ms threshold — a leaked timer would have fired by now.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(watchdogWarnings(warnings).length, 0, "deliberate shutdown is not a connectivity problem");
+    } finally {
+      restore();
+    }
+  });
+});

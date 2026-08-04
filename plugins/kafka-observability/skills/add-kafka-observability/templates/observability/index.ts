@@ -49,8 +49,13 @@ export function startup(): void {
   // within a run tree; inheritable so child runs — nodes, LLM calls, tools —
   // report to the same instance).
   registerConfigureHook({ handlerClass: KafkaRunTracer, envVar: "KAFKA_ENABLED", inheritable: true });
+  // "initialized", NOT "ready": the broker/SASL handshake is still in flight
+  // here. The producer logs "Kafka producer connected" when it completes, and
+  // warns if it never does — claiming readiness at this point sent a real QA
+  // incident down the wrong path (events silently queued, log said "ready").
   console.log(
-    `[observability] Kafka run tracing ready: app=${settings.applicationName} topic=${settings.topic} ` +
+    `[observability] Kafka run tracing initialized (producer connecting in background): ` +
+      `app=${settings.applicationName} topic=${settings.topic} ` +
       `brokers=${settings.bootstrapServers} retries=${settings.retries} ` +
       `delivery_timeout_ms=${settings.deliveryTimeoutMs}`,
   );
