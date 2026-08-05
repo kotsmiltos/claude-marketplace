@@ -102,9 +102,11 @@ Install:
 Ships one skill:
 
 - **`add-kafka-observability`** — install OR upgrade a vendored `src/observability/`
-  library in the current repo. The library attaches a `BaseTracer` subclass globally (the
-  same callback mechanism LangSmith's own tracer uses — one `startup()` call at the graph
-  entrypoint, zero per-node instrumentation) and publishes **every** traced run — graph
+  library in the current repo. The library attaches a `BaseTracer` subclass globally
+  through two redundant paths — the configure hook plus the configure-slot LangSmith's
+  own tracer occupies, so it attaches even on platform runtimes that sever async-context
+  ancestry (one `startup()` call at the graph entrypoint, zero per-node
+  instrumentation) — and publishes **every** traced run — graph
   invocation, each LangGraph node, each LLM call (full rendered prompts, outputs, token
   usage), each tool run, errors — as start/end events to a Kafka topic:
   bank-standard envelope (`id` as Kafka key, `thread_id` correlation), zod-validated,

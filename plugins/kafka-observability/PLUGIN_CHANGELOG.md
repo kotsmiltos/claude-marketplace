@@ -11,6 +11,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.3.0] — 2026-08-05
+
+Ships observability library **1.2.0**. Because 0.2.0 shipped 1.0.0, this release also
+carries the library's 1.1.0 connection diagnostics. Downstream projects upgrade via
+`/add-kafka-observability` (applies `migrations/1.0.0-to-1.1.0.md` then
+`1.1.0-to-1.2.0.md` in order; one idempotent `.env.example` transform, no wiring change).
+
+### Added
+- **Library 1.2.0 — ancestry-proof attachment** (INC-2026-0045 root cause): upstream's
+  `registerConfigureHook` stores its registry in AsyncLocalStorage, so a hook registered
+  at graph-module load never fires for runs whose async context does not descend from
+  `startup()` (LangGraph Platform on Azure App Service severs exactly that ancestry —
+  hook registered at boot, zero tracer events). The library now also attaches via a
+  configure-slot wrap of its own `CallbackManager._configureSync` (the
+  ancestry-independent slot LangSmith's tracer occupies), deduped by handler name; new
+  optional `KAFKA_ATTACH_MODE` env var (`hook` | `patch` | `both`, default `both`);
+  one-line boot attachment diagnostics (core copy URL, ALS presence, boot-visible hooks,
+  `NODE_OPTIONS`/`execArgv`); an `ALS context break detected` warning with store
+  classification; a duplicate-library sentinel. New library files: `configure-slot.ts`,
+  `configure-slot.test.ts` (vendored set now 22 files).
+- **Library 1.1.0 — connection diagnostics** (committed after 0.2.0, first shipped
+  here): `Kafka producer connected` log on real handshake completion, a one-shot 30 s
+  never-connected watchdog with queue fill, startup line reworded from "ready" to
+  "initialized (producer connecting in background)".
+
+### Changed
+- `add-kafka-observability` SKILL + workflow + library README describe the dual
+  attachment; the workflow's `.env.example` block gains the commented `KAFKA_ATTACH_MODE`
+  line; vendored-directory file count 20 → 22; plugin + marketplace descriptions
+  refreshed accordingly.
+
+### Fixed
+- Staleness sweep: root `README.md` attachment wording updated; the repo-level
+  `bump-version` tracked-assets inventory gains the two new library files.
+
 ## [0.2.0] — 2026-08-04
 
 Library unchanged (**1.0.0**). No downstream upgrade needed — changes affect the
