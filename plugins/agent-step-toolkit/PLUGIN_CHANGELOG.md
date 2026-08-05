@@ -11,9 +11,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
-## [Unreleased]
+## [0.20.0] — 2026-08-05
 
-Library unchanged. The toolkit's workflows now integrate with the new
+Library unchanged (**2.0.0**). The toolkit's workflows now integrate with the new
 `kafka-observability` plugin so every generated agent gets the bank's Kafka observability
 layer — and existing agents get pointed at it at the natural moments.
 
