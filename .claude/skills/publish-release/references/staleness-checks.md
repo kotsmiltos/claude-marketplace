@@ -27,7 +27,10 @@ each inventory against the actual directory listing, both directions:
    the library" — hold it to that.
 3. **agent-step-toolkit only:** the bootstrap workflow's library copy list
    (`workflows/bootstrap-project.md`) vs `templates/agent-step/*`.
-4. **Root `README.md`** — the per-plugin skill listings and layout tree vs the actual
+4. **kafka-observability only:** `.claude/skills/bump-version/references/tracked-assets-observability.md`
+   (repo-level maintainer skill) — its tier file lists vs the real
+   `templates/observability/*` tree and the skill's own docs.
+5. **Root `README.md`** — the per-plugin skill listings and layout tree vs the actual
    `plugins/*/skills/` directories.
 
 ```bash
@@ -65,7 +68,8 @@ when the source defines `abort_pending_input`).
    camelCase terms (`grep -o '\`[a-z][a-z0-9_]*\`'`, `grep -o '\`[a-z][a-zA-Z0-9]*\`'`), action
    names, exported symbols, error codes, template file names.
 2. For each, confirm it exists where the doc implies it lives — the library source
-   (`templates/agent-step/*.ts`), the templates tree, or the skill's own files.
+   (`templates/agent-step/*.ts` / `templates/observability/*.ts`), the templates tree, or the
+   skill's own files.
 3. A term that exists nowhere is a finding: either the doc is stale (rename happened) or the term is
    illustrative — if illustrative, it should read as such in context.
 
@@ -83,6 +87,11 @@ The same fact stated in two places must agree. Known multi-source facts in this 
   `agent-step-api.md` vs runner defaults.
 - The semver rules — PLUGIN_CHANGELOG header vs CHANGELOG header vs any SKILL prose quoting them.
 - Which copy of the library is canonical — bump-version SKILL prose vs root README.
+- **kafka-observability:** the `KAFKA_*` env-var list — `settings.ts`/`env.ts` (source of truth)
+  vs the skill SKILL.md `<quick_reference>` vs the workflow's `.env.example` block vs the
+  library `README.md` tables.
+- **kafka-observability:** the event envelope/data fields — `schemas.ts` (source of truth) vs the
+  library `README.md` event-schema example vs the plugin `CHANGELOG.md` prose.
 
 When two sources disagree and the source of truth is clear, fix the other; when it isn't clear,
 **block** and ask.

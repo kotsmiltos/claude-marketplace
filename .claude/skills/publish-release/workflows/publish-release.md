@@ -29,20 +29,31 @@ Run every check in `references/staleness-checks.md` against the target plugin (p
 - **Block** — a doc describes behavior/contract that contradicts the source and the right fix isn't obvious. Surface it and stop until resolved.
 - **Defer** — cosmetic or out-of-scope; list it in the proposal so the user can opt in or consciously skip.
 
-## Phase 3: Library gate (agent-step-toolkit only)
+## Phase 3: Library gate (any plugin shipping a vendored library)
+
+Applies to every plugin that ships a versioned vendored library — detected by a `VERSION`
+file anywhere under the plugin's `templates/`:
 
 ```bash
-git diff --name-only <baseline>..HEAD -- plugins/agent-step-toolkit/skills/create-tool/templates/agent-step/
+find plugins/<plugin>/skills/*/templates -name VERSION
 ```
 
-- Library files changed AND `VERSION` among them, with a matching `CHANGELOG.md` entry and `migrations/<from>-to-<to>.md` → fine; the release commit message gains "(ships agent-step library A.B.C)".
-- Library files changed but `VERSION` did NOT move (or CHANGELOG/migration missing) → **HALT.** Tell the user to run `/bump-version` first, then re-run this skill.
-- Library untouched → plain plugin release.
+Known instances: agent-step-toolkit (`skills/create-tool/templates/agent-step/`, owned by
+`/bump-version`) and kafka-observability (`skills/add-kafka-observability/templates/observability/`,
+same `/bump-version` flow with the `observability` target). For each library dir found:
+
+```bash
+git diff --name-only <baseline>..HEAD -- plugins/<plugin>/<library-dir>/
+```
+
+- Library files changed AND `VERSION` among them, with a matching `CHANGELOG.md` entry and `migrations/<from>-to-<to>.md` → fine; the release commit message gains "(ships <library> library A.B.C)".
+- Library files changed but `VERSION` did NOT move (or CHANGELOG/migration missing) → **HALT.** Tell the user to run `/bump-version` (with the matching library target) first, then re-run this skill.
+- Library untouched (or the plugin ships no vendored library) → plain plugin release.
 
 ## Phase 4: Classify + draft
 
 1. **Semver:** apply the rule (major = removed/renamed skill or breaking workflow; minor = new skill/capability/template; patch = docs/fix, no new surface) to the Phase 1+2 change list. The HIGHEST-ranked change wins.
-2. **Draft the PLUGIN_CHANGELOG entry** — Keep-a-Changelog format, newest-first, dated today, with Added/Changed/Fixed sections drawn from the change list (including the staleness fixes). For agent-step-toolkit, state which library version ships and whether `/pull-library` is needed. If the plugin has no PLUGIN_CHANGELOG.md yet, draft the file (copy the header conventions from agent-step-toolkit's).
+2. **Draft the PLUGIN_CHANGELOG entry** — Keep-a-Changelog format, newest-first, dated today, with Added/Changed/Fixed sections drawn from the change list (including the staleness fixes). For a plugin shipping a vendored library, state which library version ships and whether downstream projects need the upgrade skill (`/pull-library` for agent-step-toolkit, `/add-kafka-observability` for kafka-observability). If the plugin has no PLUGIN_CHANGELOG.md yet, draft the file (copy the header conventions from agent-step-toolkit's).
 3. **Draft the manifest edits** — new version for both files; decide whether the capability set changed enough to refresh either `description` (plugin.json and/or the marketplace entry), and draft the new text if so.
 4. **Draft the commit message** per the convention in `<quick_reference>`.
 

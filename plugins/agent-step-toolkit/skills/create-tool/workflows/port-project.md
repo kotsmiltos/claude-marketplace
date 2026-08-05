@@ -48,8 +48,15 @@ Record this as prose + a capability table. Do NOT transcribe the source's file s
 ## Step 2: Establish the agent-step project
 
 - If the target directory has **no** `src/agent-step/`, run `workflows/bootstrap-project.md`
-  first to scaffold the project (library, graph/state/prompt skeleton, CLI, test harness).
-- If an agent-step project already exists, reuse it.
+  first to scaffold the project (library, graph/state/prompt skeleton, CLI, test harness). Its
+  Step 8b (observability) rides along.
+- If an agent-step project already exists, reuse it — and since bootstrap (and its Step 8b) is
+  skipped, check for `src/observability/`: if absent, offer `/add-kafka-observability` per
+  bootstrap Step 8b's instructions.
+- **If the SOURCE project has a `src/observability/`, never copy it over.** Observability is not
+  a domain artifact (the sandbox exception does NOT extend to it) — it's a vendored library with
+  one canonical source, the `kafka-observability` plugin. The target gets it via
+  `/add-kafka-observability`, which vendors the current version and wires it properly.
 
 ## Step 2b: Establish the sandbox
 

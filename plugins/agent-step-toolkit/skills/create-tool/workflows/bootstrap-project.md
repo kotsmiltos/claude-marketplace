@@ -218,11 +218,30 @@ npm run dev
 ```
 Wait for `Welcome to LangGraph.js dev server` (or similar). Kill the process after confirming. If the boot fails with `agent-step: ...`, the library wasn't copied correctly; check Step 5 outputs.
 
+## Step 8b: Observability (Kafka run tracing — via the kafka-observability plugin)
+
+Every bank agent ships the Kafka observability layer (LangSmith-parity run events on a
+Kafka topic; the bank is phasing LangSmith out). The library is NOT part of this toolkit —
+it is owned by the **`kafka-observability`** plugin (same marketplace) so all agents share
+one canonical, versioned source.
+
+- If the `kafka-observability` plugin is installed (its `/add-kafka-observability` skill is
+  available): tell the user the bootstrap is ready for it and **offer to run
+  `/add-kafka-observability` now** (it has its own intake + approval gate; it vendors
+  `src/observability/`, wires one `startup()` call into `src/graph.ts`, and updates
+  `.env.example` / deployment settings). Run it only on user confirmation.
+- If the plugin is NOT installed: add a line to the Step 9 report —
+  `/plugin install kafka-observability@ckifonidis-marketplace`, then
+  `/add-kafka-observability` inside the project.
+
+Never copy observability files by hand from another project — that forks the library.
+
 ## Step 9: Report + suggest next step
 
 Tell the user:
 - ✅ Bootstrap complete at `<PROJECT>`.
 - The project has graph, agent, state, prompt, CLI, and the **shared test harness** scaffolding, but **no tools yet**.
+- Observability status (Step 8b): `/add-kafka-observability` was run (summarize its report), was offered and declined, or requires installing the `kafka-observability` plugin first — state which.
 - Test scripts are wired: `npm test` (runner unit, fast), `npm run test:sandbox` (per-tool sandbox tests, needs the local sandbox up), `npm run test:prompt` (prompt-input, live model). The sandbox/prompt scripts are no-ops until the first tool ships its tests.
 - Sandbox status: either `sandbox/` is established (how it was acquired, how to start it) or it was explicitly deferred — in which case say plainly that it must exist before the first tool's sandbox tests can run.
 - Next: `cd <PROJECT> && /create-tool` to add the first tool — it scaffolds that tool's tests against the harness shipped here.

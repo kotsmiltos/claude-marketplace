@@ -11,6 +11,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [Unreleased]
+
+Library unchanged. The toolkit's workflows now integrate with the new
+`kafka-observability` plugin so every generated agent gets the bank's Kafka observability
+layer — and existing agents get pointed at it at the natural moments.
+
+### Added
+- `create-tool` bootstrap **Step 8b — Observability**: after verification, offer to run
+  `/add-kafka-observability` (from the `kafka-observability` plugin, same marketplace) to
+  vendor the LangSmith-parity Kafka run-tracing library into the new project; when that
+  plugin isn't installed, the Step 9 report points at
+  `/plugin install kafka-observability@ckifonidis-marketplace`. The observability library
+  is deliberately NOT bundled into this toolkit — one canonical, versioned source, owned
+  by its own plugin. Step 9's report gains an observability-status line.
+- `create-tool` port workflow (Step 2): a port that reuses an existing project (skipping
+  bootstrap and its Step 8b) now checks for `src/observability/` and offers
+  `/add-kafka-observability`; a source project's `src/observability/` is explicitly never
+  copied over (the sandbox reuse exception does not extend to vendored libraries) — the
+  target gets the library from its canonical plugin instead.
+- `pull-library` Phase 5: a report-only courtesy check — if `src/observability/VERSION`
+  is older than what the installed `kafka-observability` plugin ships, the report says so
+  and points at `/add-kafka-observability`. This skill still upgrades `src/agent-step/`
+  ONLY; each vendored library keeps exactly one upgrade skill. (No change to the add-tool
+  workflow: the observability tracer hooks the callback system globally, so new
+  tools/actions are traced automatically with zero wiring.)
+
 ## [0.19.0] — 2026-08-05
 
 Ships **agent-step library 2.0.0** — a major library release; `/pull-library` is **required** for
