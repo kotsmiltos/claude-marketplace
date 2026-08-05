@@ -46,7 +46,7 @@ If the tool has a multi-turn flow (OTP-gated activation, double-entry PIN, etc.)
 
 | flow | opened by | closed by | scratch data shape (currentFlow.data) |
 |------|-----------|-----------|----------------------------------------|
-| {{flow_1}} | {{request_action}} (startsFlow) | {{commit_action}} (endsFlow) or `lifecycle.abortFlow` | `{ customerId, challengeId, otpValidated?, encryptedPin? ... }` |
+| {{flow_1}} | {{request_action}} (startsFlow) | {{commit_action}} (endsFlow) or an `abort_flow` effect | `{ customerId, challengeId, otpValidated?, encryptedPin? ... }` |
 
 ## Backend env vars (per-tool, in backend/env.ts)
 

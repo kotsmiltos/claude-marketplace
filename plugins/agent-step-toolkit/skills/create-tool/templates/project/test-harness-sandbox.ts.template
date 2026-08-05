@@ -79,3 +79,81 @@ export async function resetViaHttp(url: string, body?: unknown): Promise<void> {
     );
   }
 }
+
+// ─── Confirmation gates across caller turns ──────────────────────────────────
+//
+// The runner stamps every confirmation proposal with the caller turn it was
+// proposed on and REFUSES a matching re-call on that same turn
+// (`confirmation_same_turn_locked`) — execution requires the caller to have
+// actually answered on a later turn. Tests that drive the propose → execute
+// handshake by hand must therefore simulate the answering turn: append a fresh
+// human message id between the two calls. These helpers do exactly that.
+// (The guard keys on the latest human/user message id — or the host's
+// `getCallerTurnId` — and is inert when the state carries no such identity.)
+
+let confirmTurnSeq = 0;
+
+/** A minimal human-message stand-in carrying exactly what the runner's default
+ *  caller-turn resolution reads (`type: "human"` + a stable `id`). Real
+ *  `HumanMessage` instances work identically; this avoids constructing
+ *  LangChain messages in state fixtures. */
+export function callerTurn(id: string): { type: string; id: string; content: string } {
+  return { type: "human", id, content: "(caller turn)" };
+}
+
+/** Return `state` with a fresh caller turn appended — "the caller answered".
+ *  Thread a manual propose → execute sequence through this between the two
+ *  `runSteps` calls, exactly as a real conversation would (the same-turn
+ *  re-call is refused by design). */
+export function answeredTurn<T extends LibraryManagedSlots & { messages?: unknown[] }>(
+  state: T,
+): T {
+  return {
+    ...state,
+    messages: [...(state.messages ?? []), callerTurn(`answer-${++confirmTurnSeq}`)],
+  };
+}
+
+/** Drive a confirm-gated action through the runner's propose → execute
+ *  handshake ACROSS TWO CALLER TURNS, the way production works: the proposal
+ *  lands on one caller turn, a fresh human message (the caller's "yes")
+ *  arrives, and only then does the matching re-call execute. Returns the
+ *  EXECUTE call's body plus the state threaded through BOTH calls. Throws if
+ *  the first call did not propose (e.g. a prereq denial) so tests fail loudly
+ *  at the right step. Pass the tool's `toolOpts` bundle; override `fold` when
+ *  a slot needs a merge smarter than the shallow `foldCommitted`. */
+export async function runConfirmed<T extends LibraryManagedSlots & { messages?: unknown[] }>(
+  opts: unknown,
+  action: string,
+  params: Record<string, unknown>,
+  state: T,
+  fold: (prev: T, committed: Partial<T>) => T = foldCommitted,
+): Promise<{ body: RunResult<T>["body"]; committed: Partial<T>; state: T }> {
+  const seq = ++confirmTurnSeq;
+  const proposeState: T = {
+    ...state,
+    messages: [...(state.messages ?? []), callerTurn(`confirm-turn-${seq}-ask`)],
+  };
+  const propose = await runSteps(
+    opts as never,
+    [{ action, params }],
+    proposeState as never,
+  );
+  const first = propose.body.results[0] as { needs_confirmation?: boolean } | undefined;
+  if (first?.needs_confirmation !== true) {
+    throw new Error(
+      `runConfirmed: expected a proposal for "${action}", got ${JSON.stringify(propose.body)}`,
+    );
+  }
+  const mid = fold(proposeState, propose.committed as Partial<T>);
+  const answered: T = {
+    ...mid,
+    messages: [...(mid.messages ?? []), callerTurn(`confirm-turn-${seq}-yes`)],
+  };
+  const execute = await runSteps(opts as never, [{ action, params }], answered as never);
+  return {
+    body: execute.body as RunResult<T>["body"],
+    committed: execute.committed as Partial<T>,
+    state: fold(answered, execute.committed as Partial<T>),
+  };
+}

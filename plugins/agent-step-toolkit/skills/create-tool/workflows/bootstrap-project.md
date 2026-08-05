@@ -53,18 +53,8 @@ Target: /absolute/path/to/<project_name>/
 - build_and_push.sh
 
 ### Agent-step library source (verbatim from skill templates)
-- src/agent-step/types.ts
-- src/agent-step/state.ts
-- src/agent-step/runner.ts
-- src/agent-step/runner.test.ts
-- src/agent-step/zod-state.test.ts
-- src/agent-step/paginate.ts
-- src/agent-step/paginate.test.ts
-- src/agent-step/handoff.ts
-- src/agent-step/handoff.test.ts
-- src/agent-step/messages.ts
-- src/agent-step/define-config.ts
-- src/agent-step/index.ts
+The ENTIRE `templates/agent-step/` tree, copied recursively — top-level files (`types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `index.ts`, the six `*.test.ts` files) plus the five phase-module directories (`compile/`, `run/`, `interaction/`, `controls/`, `handoff/`):
+- src/agent-step/**  (see `references/project-bootstrap-structure.md` for the per-file inventory)
 - src/agent-step/VERSION  (library version marker; lets `/pull-library` know what the project currently vendors)
 
 ### Graph scaffold (tool-empty; first tool added via /create-tool)
@@ -143,23 +133,13 @@ After writing, the project directory looks like:
 
 ## Step 5: Copy agent-step library source
 
-These files are NOT templates — they're verbatim source. Just copy:
+These files are NOT templates — they're verbatim source. Copy the whole tree recursively (top-level files, the five phase-module directories `compile/` `run/` `interaction/` `controls/` `handoff/`, and the `VERSION` marker):
 
 ```bash
-cp templates/agent-step/types.ts        "$PROJECT/src/agent-step/types.ts"
-cp templates/agent-step/state.ts        "$PROJECT/src/agent-step/state.ts"
-cp templates/agent-step/runner.ts       "$PROJECT/src/agent-step/runner.ts"
-cp templates/agent-step/runner.test.ts  "$PROJECT/src/agent-step/runner.test.ts"
-cp templates/agent-step/zod-state.test.ts "$PROJECT/src/agent-step/zod-state.test.ts"
-cp templates/agent-step/paginate.ts      "$PROJECT/src/agent-step/paginate.ts"
-cp templates/agent-step/paginate.test.ts "$PROJECT/src/agent-step/paginate.test.ts"
-cp templates/agent-step/handoff.ts       "$PROJECT/src/agent-step/handoff.ts"
-cp templates/agent-step/handoff.test.ts  "$PROJECT/src/agent-step/handoff.test.ts"
-cp templates/agent-step/messages.ts      "$PROJECT/src/agent-step/messages.ts"
-cp templates/agent-step/define-config.ts "$PROJECT/src/agent-step/define-config.ts"
-cp templates/agent-step/index.ts        "$PROJECT/src/agent-step/index.ts"
-cp templates/agent-step/VERSION         "$PROJECT/src/agent-step/VERSION"
+cp -R templates/agent-step/ "$PROJECT/src/agent-step/"
 ```
+
+Sanity-check the copy landed complete: `"$PROJECT/src/agent-step/VERSION"` exists, and `runner.ts`, `compile/plan.ts`, `run/execution.ts`, `interaction/bounded-choice.ts`, `controls/registry.ts`, `handoff/node.ts` all resolve.
 
 Don't edit them. If the templates need updating later, treat that as a separate maintenance task (sync new library changes back into `templates/agent-step/`).
 

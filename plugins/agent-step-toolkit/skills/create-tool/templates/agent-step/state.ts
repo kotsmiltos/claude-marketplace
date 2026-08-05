@@ -40,6 +40,15 @@ export const AwaitingInputSchema = z.discriminatedUnion("kind", [
     attempts_left: z.number().int().nonnegative(),
     max_attempts: z.number().int().positive(),
     flow_ref: z.string().optional(),
+    /** Stable identity of the caller turn on which this proposal was stored
+     *  (the latest LangGraph HumanMessage id by default). A matching re-call
+     *  on the SAME caller turn is refused (`confirmation_same_turn_locked`)
+     *  instead of executed: legitimate confirmation always arrives on a LATER
+     *  turn — after the caller actually answered the read-back. Absent when
+     *  no stable identity existed at propose time (e.g. direct `runSteps`
+     *  consumers without message ids), in which case the same-turn guard is
+     *  deliberately unavailable rather than guessing. */
+    proposed_on_caller_turn_id: z.string().min(1).optional(),
   }),
   z.object({
     kind: z.literal("otp"),
@@ -68,6 +77,31 @@ export const CurrentFlowSchema = z.object({
   data: z.record(z.string(), z.unknown()),
 });
 
+/** Schema for the library-managed `boundedChoice` overlay. Unlike
+ *  `awaitingInput`, this does NOT replace or unlock a confirmation/OTP/match
+ *  gate: a caller-facing meta-choice may temporarily suspend the spoken
+ *  question while the original gate remains authoritative underneath.
+ *
+ *  `pending` means the caller still owes one of the configured selections.
+ *  `resolved` deliberately remains in state until the surrounding flow ends
+ *  or hands off, so the same one-shot choice cannot be offered again later in
+ *  the conversation. The runner is the only writer. */
+export const BoundedChoiceSchema = z.object({
+  name: z.string(),
+  status: z.enum(["pending", "resolved"]),
+  selection: z.string().optional(),
+  /** Stable identity of the caller turn on which the choice was OFFERED.
+   *  While that turn is current, the choice cannot be resolved and no
+   *  direct-input action may consume it — the caller must actually hear the
+   *  fork and reply before anything counts as their selection. */
+  requested_on_caller_turn_id: z.string().min(1).optional(),
+  /** Stable identity of the caller turn on which a nonterminal selection
+   *  resolved (the latest LangGraph HumanMessage id by default). Domain
+   *  actions remain locked while that turn is current; a later caller turn
+   *  has a different id and unlocks normal processing. */
+  resolved_on_caller_turn_id: z.string().min(1).optional(),
+});
+
 /** What input the customer owes right now, or `null`. Inferred from
  *  {@link AwaitingInputSchema} so the runtime schema and the compile-time type
  *  cannot diverge. */
@@ -76,6 +110,10 @@ export type AwaitingInput = z.infer<typeof AwaitingInputSchema>;
 /** The active multi-turn flow, or `null`. Inferred from
  *  {@link CurrentFlowSchema}. */
 export type CurrentFlow = z.infer<typeof CurrentFlowSchema>;
+
+/** One engine-owned, one-shot conversational choice layered over any pending
+ *  domain input, or `null` when no such choice has been used. */
+export type BoundedChoice = z.infer<typeof BoundedChoiceSchema>;
 
 /** Schema for the library-managed `handoff` slot — set by the built-in
  *  `request_handoff` action (enabled via `BuildAgentStepToolOptions.handoff`)
@@ -118,6 +156,7 @@ export const PagedCacheSchema = z.object({
 export interface LibraryManagedSlots {
   awaitingInput?: AwaitingInput | null;
   currentFlow?: CurrentFlow | null;
+  boundedChoice?: BoundedChoice | null;
   pagedRead?: PagedCache<unknown> | null;
   handoff?: HandoffRequest | null;
   /** Consecutive backend-failure counter. The runner increments it on each
@@ -155,6 +194,7 @@ const replaceNull = <T>() => ({
 export const agentStepStateSpec = {
   awaitingInput: Annotation<AwaitingInput | null>(replaceNull<AwaitingInput>()),
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
+  boundedChoice: Annotation<BoundedChoice | null>(replaceNull<BoundedChoice>()),
   pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
   errorCount: Annotation<number | null>(replaceNull<number>()),
@@ -184,6 +224,9 @@ export const agentStepZodShape = {
   currentFlow: withLangGraph(CurrentFlowSchema.nullable(), {
     default: (): CurrentFlow | null => null,
   }),
+  boundedChoice: withLangGraph(BoundedChoiceSchema.nullable(), {
+    default: (): BoundedChoice | null => null,
+  }),
   pagedRead: withLangGraph(PagedCacheSchema.nullable(), {
     default: (): PagedCache<unknown> | null => null,
   }),
@@ -203,6 +246,7 @@ export const agentStepZodShape = {
 export const agentStepInternalSlotMask = {
   awaitingInput: true,
   currentFlow: true,
+  boundedChoice: true,
   pagedRead: true,
   handoff: true,
   errorCount: true,

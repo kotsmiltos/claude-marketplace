@@ -12,6 +12,89 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.0.0] — 2026-08-05
+
+Major: the executor contract is reshaped around **typed effects**, the runner is restructured into
+phase modules with explicit contracts, and the library absorbs the **bounded-choice** capability
+plus a hardening round of turn-provenance guards. Runtime semantics for existing flows are
+otherwise 1.8.1's, and the model-facing tool surface (name + description + provider JSON schema)
+is byte-identical to 1.8.1 (golden-verified upstream). Absorbed from a downstream agent where the
+restructure was developed and verified (full unit suite + 182 host sandbox tests).
+Migration: [migrations/1.8.1-to-2.0.0.md](migrations/1.8.1-to-2.0.0.md).
+
+### Breaking
+- **`ExecutorResult` reshape.** `lifecycle` and `flowData` are gone; both are typed entries in the
+  new optional `effects: ExecutorEffect[]`: `lifecycle.issuesOtp: {…}` → `{ type: "otp_issued" }`
+  (the payload was never read by the runner — keep challenge details in `resultBody` /
+  `merge_flow_data`); `lifecycle.clearAwaitingInput` → `{ type: "clear_awaiting_input" }`;
+  `lifecycle.abortFlow` → `{ type: "abort_flow" }`; `flowData: {…}` →
+  `{ type: "merge_flow_data", data: {…} }`.
+- **`stateUpdate` is domain-only.** Writing a library-managed slot (`awaitingInput`, `currentFlow`,
+  `boundedChoice`, `pagedRead`, `handoff`, `errorCount`) through `stateUpdate` now throws. An
+  executor-requested terminal handoff is `{ type: "request_handoff", request }` — and unlike the
+  1.x slot write, it applies the same atomic cleanup as the built-in `request_handoff` action.
+- **`stateAnnotation` option removed** (deprecated alias since 1.7.0) — pass `stateSchema` (same
+  accepted values: `Annotation.Root` or Zod object).
+- **`ConfirmationOpts.ttlMs` removed** (was accepted-but-inert) and **`OtpOpts` deleted** (was an
+  empty placeholder; never exported) — `requiresOtp` is plain `boolean`.
+- **Stricter construction-time validation.** Cross-action config pairs
+  (`startsMatchFor`↔`requiresMatch`, `issuesOtp.consumer_action` / `requiresMatch.capturer`
+  existence) fail at construction instead of mid-conversation; `buildAgentStepTool` also rejects a
+  state schema missing a channel for any library slot the configuration writes.
+- **Confirmation turn-provenance.** Proposals are stamped with the caller turn
+  (`proposed_on_caller_turn_id`, additive `AwaitingInputSchema` field); a matching re-call on the
+  SAME caller turn is refused (`confirmation_same_turn_locked`) without spending an attempt —
+  execution requires the caller to have actually answered on a later turn. Enforced only when both
+  turn identities exist; identity-less direct `runSteps` fixtures keep params-only behavior.
+  Test suites driving propose → execute by hand must simulate the answering turn (the bootstrap
+  harness ships `runConfirmed` / `answeredTurn` / `callerTurn` helpers).
+- **Import paths for non-index imports** changed (`handoff.js` split into `handoff/contract.js` +
+  `handoff/node.js` + `handoff/delegate-client.js`). Projects importing only from
+  `agent-step/index.js` (the documented surface) are unaffected — every 1.x index export except the
+  deleted items above is still there.
+
+### Added
+- **Bounded-choice overlay.** `BuildAgentStepToolOptions.boundedChoices` injects two library-owned
+  controls — `request_bounded_choice` / `resolve_bounded_choice` — implementing one engine-owned,
+  one-shot conversational choice layered OVER any pending domain gate: lockdown while pending
+  (only controls / abort / handoff / configured `directInputActions` run), offered-this-turn and
+  resolved-this-turn locks keyed on caller-turn identity, consume-on-acceptance for direct inputs,
+  an `onRepeatHandoff` atomic fallback, and a persistent `resolved` state so the choice is never
+  re-offered. New `boundedChoice` state slot (rides `agentStepZodShape`), `BoundedChoiceSchema` /
+  `BoundedChoice` / `BoundedChoiceDef` / `BoundedChoiceRegistry` exports, and the
+  `REQUEST_/RESOLVE_BOUNDED_CHOICE_ACTION` constants.
+- **`getCallerTurnId` option** — stable caller-turn identity resolver backing the turn-keyed
+  guards (defaults to the latest human message id; hosts that compact or replace messages must
+  provide one).
+- **`ExecutorEffect`** exported type.
+
+### Changed
+- **Phase-module restructure.** One 2,268-line `runner.ts` becomes `compile/` (validate →
+  normalize → schema/description), `run/` (admission → planning → execution → finalize, with
+  `batch-state.ts` as the single write path), `interaction/` (one policy module per gate kind),
+  `controls/` (model-facing library actions in an ordered registry), `handoff/` (contract / node /
+  delegate transport). `runner.ts` is now the thin public entry point; hosts import only from
+  `index.js`.
+- **Handoff monotonicity enforced.** Once the `handoff` slot is set (control or executor effect),
+  the step's remaining interaction lifecycle is skipped and the batch ends after the current step.
+- **Abort-aware planning + admission.** Confirm steps after an `abort_pending_input` in the same
+  batch plan against no pending (propose fresh, full attempts); `soleOnExecute`'s execute
+  prediction is abort-aware the same way.
+- **Bounded-choice consume-on-acceptance** and same-turn locks (see Added) are enforced batch-wide
+  by admission, in a fixed, documented rule order.
+- **Canonical value equality** builds null-prototype objects — own `__proto__` keys are data,
+  never prototype writes.
+- Test suite grows 105 → 144 across six files: `runner.test.ts`, `handoff.test.ts`,
+  `paginate.test.ts`, `zod-state.test.ts` + new `bounded-choice.test.ts` and `hardening.test.ts`.
+
+### Unchanged on purpose
+- State slot names and shapes (persisted threads and observability tooling keep their vocabulary).
+- `runSteps(opts, steps, initialState)` / `buildAgentStepTool(opts)` signatures — the test and
+  host seams.
+- The wire result body (`{ summary, results, failed_at? }`, entry fields, error codes, `_debug`)
+  and all runner-emitted summaries/messages (`messages.ts` is byte-identical).
+- The channel contract (handoff node events + final-message `additional_kwargs` envelope).
+
 ## [1.8.1] — 2026-07-23
 
 Patch: the auto-handoff error counter now treats **no-executor batches as NEUTRAL** — they neither

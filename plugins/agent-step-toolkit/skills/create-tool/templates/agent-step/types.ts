@@ -1,38 +1,65 @@
+// FILE: src/agent-step/types.ts
+//
+// Public authoring contracts for the agent-step library: what a host DECLARES
+// (actions, controller hooks, registries) and what an executor RETURNS. The
+// compiled/runtime shapes derived from these live under compile/ and run/ —
+// hosts never import those.
+
 import type { z } from "zod";
 import type { PageableSpec } from "./paginate.js";
+import type { HandoffRequest } from "./state.js";
+
+/** A typed library-state transition an executor may request. Effects are
+ *  SIGNALS, not an ordered program: the runner honours each one at a fixed,
+ *  documented point of the step lifecycle (see run/execution.ts):
+ *
+ *  - `request_handoff` — terminal business outcome: atomically clears every
+ *    transient runner slot (`awaitingInput`, `currentFlow`, `boundedChoice`,
+ *    `pagedRead`) and writes the `handoff` slot, exactly like the built-in
+ *    `request_handoff` action. Honoured regardless of `ok` — a refusal verdict
+ *    (e.g. "already closed") may still be terminal. TERMINAL IS ENFORCED:
+ *    once the handoff is set, the step's remaining interaction lifecycle
+ *    (flow open, OTP/match gates) is skipped and the batch ends after the
+ *    current step — later steps do not run (handoff monotonicity, see
+ *    run/execution.ts). This is the ONLY way an executor requests a handoff;
+ *    writing the `handoff` slot through `stateUpdate` is rejected loudly.
+ *  - `merge_flow_data` — shallow-merge into `currentFlow.data`. Honoured on
+ *    `ok: true`; requesting it with no active flow (and no `startsFlow` on the
+ *    action) is a programmer mistake and throws.
+ *  - `otp_issued` — this step minted an SCA challenge; the runner opens the
+ *    OTP gate for the consumer named in the action's `issuesOtp` hook.
+ *    Honoured on `ok: true`; requires an active flow and the config hook.
+ *  - `clear_awaiting_input` — drop the pending input gate only, keep the flow.
+ *    Used for "the current OTP is dead but the flow continues" (e.g. timeout).
+ *    Honoured regardless of `ok`.
+ *  - `abort_flow` — terminal in-flow failure; drop the gate AND the flow (and
+ *    any bounded-choice overlay). Honoured regardless of `ok`. */
+export type ExecutorEffect =
+  | { type: "request_handoff"; request: HandoffRequest }
+  | { type: "merge_flow_data"; data: Record<string, unknown> }
+  | { type: "otp_issued" }
+  | { type: "clear_awaiting_input" }
+  | { type: "abort_flow" };
 
 /** Result a single executor returns to the runner. `resultBody` is the
- *  JSON-serializable object the LLM sees as that step's payload. `stateUpdate`
- *  is a partial patch the runner threads to subsequent steps in the batch AND
- *  accumulates into the final tool Command. `ok` is a batch-continuation
- *  control flag, NOT a success/verdict signal: `ok: true` proceeds to the next
- *  step; `ok: false` short-circuits the batch and sets `failed_at`. An executor
- *  may return `ok: true` for a "negative" domain outcome (carry the verdict in
- *  `resultBody`) when later steps should still run, or `ok: false` to stop the
- *  batch — decide on whether the batch should continue, not on whether the
+ *  JSON-serializable object the LLM sees as that step's payload. `ok` is a
+ *  batch-continuation control flag, NOT a success/verdict signal: `ok: true`
+ *  proceeds to the next step; `ok: false` short-circuits the batch and sets
+ *  `failed_at`. An executor may return `ok: true` for a "negative" domain
+ *  outcome (carry the verdict in `resultBody`) when later steps should still
+ *  run — decide on whether the batch should continue, not on whether the
  *  outcome was "good".
  *
- *  `flowData` is shallow-merged into `currentFlow.data` post-execution — used
- *  by flow-bound executors to update their own scratch state. Writing
- *  `flowData` when no flow is active (and the action doesn't open one via
- *  `startsFlow`) is a programmer mistake and the runner errors loudly.
- *
- *  `lifecycle` is a typed union of library-managed state transitions:
- *  - `issuesOtp` — this step minted an SCA challenge; runner sets
- *    `awaitingInput.kind="otp"` for the configured consumer action.
- *  - `clearAwaitingInput` — drop `awaitingInput` only, keep `currentFlow`.
- *    Used for "current OTP is dead but the flow continues" (e.g. timeout).
- *  - `abortFlow` — terminal failure; drop `awaitingInput` AND `currentFlow`.
- *    Used for "OTP locked, no recovery within this flow." */
+ *  `stateUpdate` is a partial patch of HOST-OWNED slots, threaded to
+ *  subsequent steps in the batch AND accumulated into the final tool Command.
+ *  Library-managed slots (`awaitingInput`, `currentFlow`, `boundedChoice`,
+ *  `pagedRead`, `handoff`, `errorCount`) may NOT appear in it — the runner is
+ *  their only writer and rejects such a patch loudly. Library transitions go
+ *  through `effects` instead. */
 export interface ExecutorResult<T> {
   resultBody: object;
   stateUpdate?: Partial<T>;
-  flowData?: Record<string, unknown>;
-  lifecycle?: {
-    issuesOtp?: { challengeId: string; mobile_masked: string };
-    clearAwaitingInput?: true;
-    abortFlow?: true;
-  };
+  effects?: ExecutorEffect[];
   ok: boolean;
 }
 
@@ -50,10 +77,9 @@ export type SelectorRegistry<T, ActionName extends string> = Record<ActionName, 
 
 /** Executor called by the runner for each step. Receives `Slice` — whatever the
  *  action's selector returned — NOT the whole state, so it can't see anything
- *  the selector didn't hand it. Returns an `ExecutorResult` whose `stateUpdate`
- *  may patch any host slot (writes are unrestricted; the reducers merge them).
- *  Mutations that need verification (e.g. read-back after the write) handle it
- *  internally — the library has no wrap concept. */
+ *  the selector didn't hand it. Mutations that need verification (e.g.
+ *  read-back after the write) handle it internally — the library has no wrap
+ *  concept. */
 export type Executor<Slice, T> = (
   params: unknown,
   state: Slice,
@@ -132,24 +158,14 @@ export interface ActionDef<PrereqName extends string> {
  *  switches the action into a two-mode runner (propose / execute) with a
  *  lockdown that refuses unrelated steps while pending and bounded re-proposes.
  *  Library injects a generic `abort_pending_input` action into the
- *  tool schema whenever any mutation opts in to a library-managed gate. */
+ *  tool schema whenever any mutation opts in to a library-managed gate.
+ *
+ *  There is deliberately NO TTL: the runner times nothing out. Stale gates
+ *  clear via `abort_pending_input` or via backend signals the executor
+ *  surfaces as `clear_awaiting_input` / `abort_flow` effects. */
 export interface ConfirmationOpts {
   maxAttempts?: number;
-  /** INERT — accepted for forward-compat but never read; the runner times
-   *  nothing out. Stale gates clear via `abort_pending_input` or via backend
-   *  signals the executor surfaces as `lifecycle.clearAwaitingInput` /
-   *  `lifecycle.abortFlow`. Setting it has no effect today. */
-  ttlMs?: number;
   lockdown?: boolean;
-}
-
-/** Opts for actions opted into `requiresOtp`. Currently empty — present for
- *  symmetry with `ConfirmationOpts` and as a forward-compat slot for any
- *  future per-action OTP knobs. Library does NOT count OTP attempts; the
- *  backend is authoritative for lock/timeout/wrong-code outcomes. */
-export interface OtpOpts {
-  // Reserved for future use (e.g. allowed retry budget if ever needed).
-  // Library currently has no fields to honour here.
 }
 
 /** Per-action behavioural opts coordinated by the runner. Covers
@@ -177,25 +193,24 @@ export interface ControllerHooks {
   requiresConfirmation?: boolean | ConfirmationOpts;
   /** This action validates an OTP. The runner refuses it unless
    *  `awaitingInput.kind === "otp"` and `for_action` matches this action's
-   *  name. The library never counts attempts; the executor returns
-   *  `lifecycle.clearAwaitingInput` (drop the gate, keep the flow) or
-   *  `lifecycle.abortFlow` (terminal) based on backend response. */
-  requiresOtp?: boolean | OtpOpts;
-  /** This action issues an SCA challenge. The executor reports the
-   *  challenge metadata via `lifecycle.issuesOtp`; the runner sets
-   *  `awaitingInput.kind="otp"` for the named consumer action. */
+   *  name. The library never counts OTP attempts; the executor returns a
+   *  `clear_awaiting_input` effect (drop the gate, keep the flow) or an
+   *  `abort_flow` effect (terminal) based on the backend response. */
+  requiresOtp?: boolean;
+  /** This action issues an SCA challenge. The executor reports success via
+   *  the `otp_issued` effect; the runner opens the OTP gate for the named
+   *  consumer action. */
   issuesOtp?: { consumer_action: string };
   /** This action opens (or re-enters) a multi-turn flow. On `ok`, the
    *  runner creates `currentFlow` with the given `name` (or merges
-   *  `flowData` into the existing flow if `currentFlow.name` matches).
+   *  `merge_flow_data` into the existing flow if `currentFlow.name` matches).
    *  Refused if a different flow is currently active.
    *
    *  A flow persists across turns once opened and is cleared ONLY by `endsFlow`
-   *  or `lifecycle.abortFlow` — never implicitly. There is no "a new goal resets
-   *  the flow" affordance: if a turn pursues an unrelated goal mid-flow, the
-   *  prior flow (and its now-stale `flowData`) stays open until the host drives
-   *  a reset — end the old flow (`endsFlow` / `abortFlow`) before `startsFlow`
-   *  of the new one. */
+   *  or an `abort_flow` effect — never implicitly. There is no "a new goal
+   *  resets the flow" affordance: if a turn pursues an unrelated goal mid-flow,
+   *  the prior flow (and its now-stale data) stays open until the host drives
+   *  a reset — end the old flow before `startsFlow` of the new one. */
   startsFlow?: { name: string };
   /** This action terminates the active flow successfully. On `ok`, the
    *  runner clears `currentFlow` AND `awaitingInput`. */
@@ -213,7 +228,7 @@ export interface ControllerHooks {
    *  - `ok: true` → library treats as match, auto-clears `awaitingInput`.
    *  - `ok: false` + `resultBody.verdict === "match_mismatch"` → library
    *    decrements `attempts_left`; on exhaustion clears `awaitingInput` and
-   *    fires `abortFlow`. Otherwise leaves the awaiting slot alone so the
+   *    aborts the flow. Otherwise leaves the awaiting slot alone so the
    *    customer can retry.
    *  - `ok: false` + any other verdict → library leaves state alone
    *    (unrelated failure, e.g. backend error). */
@@ -224,7 +239,8 @@ export interface ControllerHooks {
    *  the library sets `awaitingInput.kind="match"` for the named consumer
    *  with `attempts_left = consumer.requiresMatch.maxAttempts`. Idempotent —
    *  re-running the capturer while a match is already awaiting just resets
-   *  the attempts counter (and the host's stored token, via `flowData`). */
+   *  the attempts counter (and the host's stored token, via a
+   *  `merge_flow_data` effect). */
   startsMatchFor?: { consumer_action: string };
 }
 

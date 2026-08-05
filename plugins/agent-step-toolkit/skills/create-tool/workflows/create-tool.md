@@ -37,7 +37,7 @@ For each action, capture:
 - **description** (1–3 sentences, LLM-facing — what the action does, what verdicts/states it can return, what it changes in session state)
 - **params schema** (Zod) — only fields the LLM should send
 - **prereqs** — list of named state predicates the runner checks before invoking
-- **mutation?** — if yes: pick `soleStep` (strict alone) or `soleOnExecute` (propose may ride; execute alone); plus `requiresConfirmation` opts (`maxAttempts` default 3; `lockdown` default true — `ttlMs` exists but is currently inert, don't set it) if confirm-required
+- **mutation?** — if yes: pick `soleStep` (strict alone) or `soleOnExecute` (propose may ride; execute alone); plus `requiresConfirmation` opts (`maxAttempts` default 3; `lockdown` default true; no TTL — the runner never times gates out) if confirm-required
 - **lifecycle opts?** — if the action is part of a multi-turn flow: `startsFlow` / `endsFlow` / `requiresFlow`; OTP: `issuesOtp` / `requiresOtp`; double-entry: `startsMatchFor` / `requiresMatch`
 - **invalidatesOnChange?** — if the action writes an upstream slot that downstream journey state depends on (e.g. re-identifying a customer should drop the previously-selected card), declare which downstream slots to clear when that slot's value changes. The runner clears them automatically — don't re-clear in an executor. See `agent-step-api.md` `<invalidates_on_change>`.
 - **backend endpoints touched** — for the executor's implementation. Check each against the root
@@ -178,7 +178,7 @@ Expected: zero errors in the new tool's files. (Unrelated WIP errors in other di
 ```bash
 npx tsc && node --test dist/agent-step/*.test.js
 ```
-Expected: all library unit tests still pass (currently 105: runner + paginate + handoff + zod-state). The count may grow as the library evolves — what matters is zero failures. The new tool shouldn't affect them.
+Expected: all library unit tests still pass (currently 144: runner + paginate + handoff + bounded-choice + hardening + zod-state). The count may grow as the library evolves — what matters is zero failures. The new tool shouldn't affect them.
 
 ```bash
 npm run test:sandbox

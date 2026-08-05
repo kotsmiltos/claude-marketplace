@@ -54,12 +54,16 @@ Revise on request; proceed only on explicit approval.
 
 ## Phase 4 — Apply
 
-1. **Replace the vendored library** from the toolkit (verbatim):
+1. **Replace the vendored library** from the toolkit (verbatim, wholesale — delete first so files
+   the new version removed don't linger; since 2.0.0 the library is a TREE with five phase-module
+   subdirectories, so the copy must be recursive):
    ```
-   cp <plugin>/skills/create-tool/templates/agent-step/{types,state,runner,runner.test,paginate,paginate.test,define-config,index}.ts src/agent-step/
-   cp <plugin>/skills/create-tool/templates/agent-step/VERSION src/agent-step/VERSION
+   rm -rf src/agent-step
+   cp -R <plugin>/skills/create-tool/templates/agent-step/ src/agent-step/
    ```
-   Mirror any added/removed library files the migration notes.
+   Sanity-check: `src/agent-step/VERSION` reads the toolkit version, and `index.ts` resolves.
+   (A project-side `UPSTREAM.md` or similar local note inside `src/agent-step/` is lost by the
+   wipe — surface it to the user before deleting if one exists.)
 
 2. **Apply each migration's `<transforms>` in chain order**, top to bottom. For each transform:
    - Resolve `target` to the concrete files in this project.

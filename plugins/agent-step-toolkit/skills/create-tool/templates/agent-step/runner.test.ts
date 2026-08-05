@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { validate } from "@cfworker/json-schema";
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { Annotation } from "@langchain/langgraph";
@@ -168,7 +169,7 @@ function makeOpts(
   return {
     opts: {
       config: makeConfig(),
-      stateAnnotation: testStateAnnotation,
+      stateSchema: testStateAnnotation,
       selectors: baseSelectors,
       executors,
       verifiers,
@@ -193,10 +194,10 @@ test("construction throws when prereq verifier is missing", () => {
   assert.throws(() => buildAgentStepTool(bad), /prereq "cardVerified"/);
 });
 
-test("construction throws when neither stateSchema nor stateAnnotation is provided", () => {
+test("construction throws when neither stateSchema nor stateSchema is provided", () => {
   const { opts } = makeOpts();
   const bad = { ...opts };
-  delete (bad as Record<string, unknown>).stateAnnotation;
+  delete (bad as Record<string, unknown>).stateSchema;
   assert.throws(() => buildAgentStepTool(bad), /requires `stateSchema`/);
 });
 
@@ -352,10 +353,12 @@ test("empty batch is schema-valid (no minItems) and runs as a no-op", async () =
   // `minItems` is not permitted under OpenAI strict structured outputs, so the
   // schema intentionally does NOT reject an empty batch. The runner handles it
   // gracefully: the step loops are length-guarded, so an empty batch produces
-  // no results rather than an error.
+  // no results rather than an error. The tool is bound with the JSON-schema
+  // rendering (shape-only wrapper validation), so assert through the same
+  // validator the wrapper uses.
   const t = buildAgentStepTool(opts);
-  const parsed = t.schema.safeParse({ steps: [] });
-  assert.equal(parsed.success, true);
+  const parsed = validate({ steps: [] }, t.schema as never);
+  assert.equal(parsed.valid, true);
 
   const { body } = await runSteps(opts, [], EMPTY);
   assert.equal(body.results.length, 0);
@@ -366,13 +369,12 @@ test("empty batch is schema-valid (no minItems) and runs as a no-op", async () =
 
 function makeConfirmOpts(
   mock: MockOpts = {},
-  confirm: { maxAttempts?: number; ttlMs?: number; lockdown?: boolean } = {},
+  confirm: { maxAttempts?: number; lockdown?: boolean } = {},
 ): { opts: BuildAgentStepToolOptions<S, string, string, typeof baseSelectors>; calls: Calls } {
   const base = makeOpts(mock);
   const cfg = makeConfig();
   cfg.actions.change_status.controller!.requiresConfirmation = {
     maxAttempts: confirm.maxAttempts ?? 3,
-    ttlMs: confirm.ttlMs ?? 300_000,
     ...(confirm.lockdown !== undefined && { lockdown: confirm.lockdown }),
   };
   return { ...base, opts: { ...base.opts, config: cfg } };
@@ -616,7 +618,7 @@ test("library refuses user action named abort_pending_input", () => {
     prereqs: [],
     executor: "verifyCustomer",
   };
-  cfg.actions.change_status.controller!.requiresConfirmation = { maxAttempts: 3, ttlMs: 300_000 };
+  cfg.actions.change_status.controller!.requiresConfirmation = { maxAttempts: 3 };
   assert.throws(
     () => buildAgentStepTool({ ...opts, config: cfg }),
     /reserved action name/,
@@ -630,7 +632,7 @@ test("same-batch bypass blocked: propose-then-execute in one batch never satisfi
   // batch).
   const cfg = makeConfig();
   cfg.actions.change_status.controller!.soleStep = false;
-  cfg.actions.change_status.controller!.requiresConfirmation = { maxAttempts: 3, ttlMs: 300_000 };
+  cfg.actions.change_status.controller!.requiresConfirmation = { maxAttempts: 3 };
   const base = makeOpts();
   const opts = { ...base.opts, config: cfg };
   const { body, committed } = await runSteps(
@@ -701,8 +703,10 @@ function makeFlowOpts(mock?: {
       return {
         ok: true,
         resultBody: { summary: "flow A opened", otp_sent: true },
-        flowData: { challengeId: `ch-${calls.openA}`, mobile_masked: "***1234" },
-        lifecycle: { issuesOtp: { challengeId: `ch-${calls.openA}`, mobile_masked: "***1234" } },
+        effects: [
+          { type: "merge_flow_data", data: { challengeId: `ch-${calls.openA}`, mobile_masked: "***1234" } },
+          { type: "otp_issued" },
+        ],
       };
     },
     validate_a_otp: async () => {
@@ -714,20 +718,20 @@ function makeFlowOpts(mock?: {
           return {
             ok: false,
             resultBody: { summary: "code expired", error: "otp_timeout" },
-            lifecycle: { clearAwaitingInput: true },
+            effects: [{ type: "clear_awaiting_input" }],
           };
         case "lock":
           return {
             ok: false,
             resultBody: { summary: "locked", error: "otp_locked" },
-            lifecycle: { abortFlow: true },
+            effects: [{ type: "abort_flow" }],
           };
         case "ok":
         default:
           return {
             ok: true,
             resultBody: { summary: "otp validated", otp_valid: true },
-            flowData: { otpValidated: true },
+            effects: [{ type: "merge_flow_data", data: { otpValidated: true } }],
           };
       }
     },
@@ -743,8 +747,10 @@ function makeFlowOpts(mock?: {
       return {
         ok: true,
         resultBody: { summary: "flow B opened" },
-        flowData: { challengeId: "ch-b" },
-        lifecycle: { issuesOtp: { challengeId: "ch-b", mobile_masked: "***5678" } },
+        effects: [
+          { type: "merge_flow_data", data: { challengeId: "ch-b" } },
+          { type: "otp_issued" },
+        ],
       };
     },
   };
@@ -791,7 +797,7 @@ function makeFlowOpts(mock?: {
     },
   });
   return {
-    opts: { config: cfg, stateAnnotation: testStateAnnotation, selectors: flowSelectors, executors, verifiers },
+    opts: { config: cfg, stateSchema: testStateAnnotation, selectors: flowSelectors, executors, verifiers },
     calls,
   };
 }
@@ -1148,7 +1154,7 @@ function makeSoeOpts(): {
   };
   const verifiers: VerifierRegistry<SoeS> = {};
   return {
-    opts: { config, stateAnnotation: soeAnnotation, selectors: soeSelectors, executors, verifiers },
+    opts: { config, stateSchema: soeAnnotation, selectors: soeSelectors, executors, verifiers },
     calls,
   };
 }
@@ -1350,7 +1356,7 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
       // store the captured value in flow data — the consumer will compare
       return {
         resultBody: { summary: "captured" },
-        flowData: { captured: v },
+        effects: [{ type: "merge_flow_data", data: { captured: v } }],
         ok: true,
       };
     },
@@ -1372,7 +1378,7 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
       if (outcome === "backend_failed") {
         return {
           resultBody: { summary: "backend refused", error: "backend_failed" },
-          lifecycle: { abortFlow: true },
+          effects: [{ type: "abort_flow" }],
           ok: false,
         };
       }
@@ -1385,8 +1391,10 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
       calls.issue++;
       return {
         resultBody: { summary: "otp issued", otp_sent: true },
-        flowData: { challengeId: "ch-1" },
-        lifecycle: { issuesOtp: { challengeId: "ch-1", mobile_masked: "***1234" } },
+        effects: [
+          { type: "merge_flow_data", data: { challengeId: "ch-1" } },
+          { type: "otp_issued" },
+        ],
         ok: true,
       };
     },
@@ -1394,7 +1402,7 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
   return {
     opts: {
       config,
-      stateAnnotation: matchAnnotation,
+      stateSchema: matchAnnotation,
       selectors: matchSelectors,
       executors,
       verifiers: {},
@@ -1706,7 +1714,7 @@ function makeInvalidateOpts(): BuildAgentStepToolOptions<
         },
       },
     }),
-    stateAnnotation: invalidateStateAnnotation,
+    stateSchema: invalidateStateAnnotation,
     selectors: invSelectors,
     executors: {
       set_card: async (params) => ({
@@ -1845,7 +1853,7 @@ test("invalidatesOnChange: executor's own writes to downstream slots win over th
         },
       },
     }),
-    stateAnnotation: annotation,
+    stateSchema: annotation,
     selectors: selfSelectors,
     executors: {
       set_amount: async (params) => {
@@ -1958,7 +1966,7 @@ function makeAhOpts(
   };
   return {
     config,
-    stateAnnotation: ahAnnotation,
+    stateSchema: ahAnnotation,
     selectors: ahSelectors,
     executors,
     verifiers: {} as VerifierRegistry<AHState>,
@@ -2145,7 +2153,7 @@ function makeGatedAhOpts(
   };
   return {
     config,
-    stateAnnotation: gatedAhAnnotation,
+    stateSchema: gatedAhAnnotation,
     selectors: gatedAhSelectors,
     executors,
     verifiers: {} as VerifierRegistry<GatedAHState>,
@@ -2315,7 +2323,7 @@ function makeNormOpts(): {
           },
         },
       }),
-      stateAnnotation: normAnnotation,
+      stateSchema: normAnnotation,
       selectors: normSelectors,
       executors: {
         set_digits: async (params) => {
@@ -2459,7 +2467,7 @@ test("invalidatesOnChange: fresh-but-value-equal OBJECT re-write does NOT clear 
         },
       },
     }),
-    stateAnnotation: annotation,
+    stateSchema: annotation,
     selectors: objSelectors,
     executors: {
       set_holder: async (params) => ({

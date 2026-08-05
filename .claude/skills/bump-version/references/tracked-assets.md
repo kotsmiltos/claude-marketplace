@@ -17,21 +17,26 @@ All paths are relative to the plugin root (`plugins/agent-step-toolkit/`).
 
 <tier name="1_library_copy">
 ## Tier 1 — Library copy (verbatim replace; mechanical)
-The embedded runner. Replaced byte-for-byte from the new source; never hand-merged.
+The embedded runner. Replaced byte-for-byte from the new source; never hand-merged. Since 2.0.0
+the library is a TREE (five phase-module subdirectories) — replace recursively, not per-file.
 
-- `skills/create-tool/templates/agent-step/types.ts`
-- `skills/create-tool/templates/agent-step/state.ts`
-- `skills/create-tool/templates/agent-step/runner.ts`
-- `skills/create-tool/templates/agent-step/runner.test.ts`
-- `skills/create-tool/templates/agent-step/zod-state.test.ts` — isolation test: the runner derives its merger from a Zod state schema (reducers read off `withLangGraph` channels)
-- `skills/create-tool/templates/agent-step/paginate.ts`
-- `skills/create-tool/templates/agent-step/paginate.test.ts`
-- `skills/create-tool/templates/agent-step/handoff.ts`
-- `skills/create-tool/templates/agent-step/handoff.test.ts`
-- `skills/create-tool/templates/agent-step/messages.ts` — runner-emitted system `summary` strings (neutral English defaults; host-overridable via `BuildAgentStepToolOptions.messages`)
-- `skills/create-tool/templates/agent-step/define-config.ts`
-- `skills/create-tool/templates/agent-step/index.ts`
-- `skills/create-tool/templates/agent-step/VERSION` — rewrite to the new version string.
+Top level (`skills/create-tool/templates/agent-step/`):
+- `types.ts` — the authoring contracts (`ExecutorResult` / `ExecutorEffect`, `ActionDef`, `ControllerHooks`, registries)
+- `state.ts` — the library-managed slot schemas + spreadable fragments (`agentStepZodShape`, `agentStepStateSpec`, `agentStepInternalSlotMask`)
+- `runner.ts` — the thin public entry points (`buildAgentStepTool`, `runSteps`)
+- `messages.ts` — runner-emitted system `summary` strings (neutral English defaults; host-overridable via `BuildAgentStepToolOptions.messages`)
+- `define-config.ts`, `index.ts` (the public surface), `paginate.ts`
+- Tests: `runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
+- `VERSION` — rewrite to the new version string.
+
+Phase modules (internal layout; hosts import only from `index.ts`):
+- `compile/` — `validate.ts`, `plan.ts` (`BuildAgentStepToolOptions`), `schema.ts`, `describe.ts`, `state-schema.ts`
+- `run/` — `admission.ts`, `planning.ts`, `execution.ts`, `finalize.ts`, `batch-state.ts`, `value-equal.ts`
+- `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts`
+- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`
+- `handoff/` — `contract.ts`, `node.ts`, `delegate-client.ts`
+
+A source repo may carry an `UPSTREAM.md` (its own porting note) — do NOT copy it into the toolkit.
 
 **Touched by:** every library change (this IS the library). If the new source adds/removes files
 in `src/agent-step/`, mirror that here AND update the bootstrap copy list

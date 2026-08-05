@@ -87,12 +87,16 @@ If the user requests changes, revise and re-present. Only proceed to Phase 4 on 
 
 In dependency order:
 
-1. **Verbatim replace** every Tier-1 file from the staged source:
+1. **Verbatim replace** the Tier-1 tree from the staged source (recursive since 2.0.0 — wipe
+   first so removed files don't linger; exclude any source-repo-only notes like `UPSTREAM.md`):
    ```
-   cp "$staged"/{types,state,runner,runner.test,paginate,paginate.test,define-config,index}.ts skills/create-tool/templates/agent-step/
+   rm -rf skills/create-tool/templates/agent-step
+   cp -R "$staged"/ skills/create-tool/templates/agent-step/
+   rm -f skills/create-tool/templates/agent-step/UPSTREAM.md
    ```
-   Mirror any added/removed library files into the bootstrap copy list
-   (`workflows/bootstrap-project.md` Step 5 + file-list) and `create-tool/SKILL.md` `templates_index`.
+   Mirror any added/removed library files into the bootstrap copy prose
+   (`workflows/bootstrap-project.md` Step 5 + file-list), `create-tool/SKILL.md` `templates_index`,
+   and this skill's `references/tracked-assets.md` Tier-1 inventory.
 
 2. **Write the new `VERSION`:** `skills/create-tool/templates/agent-step/VERSION`.
 
@@ -125,7 +129,7 @@ The templates aren't a standalone TS project, so prove the bump by bootstrapping
    ```
    npm install
    npm run typecheck
-   npx tsc && node --test dist/agent-step/runner.test.js
+   npx tsc && node --test dist/agent-step/*.test.js
    ```
 3. Expected: zero typecheck errors, all runner tests pass. Failures here mean drift between the new
    library and a hand-edited template — fix the template, not the library.

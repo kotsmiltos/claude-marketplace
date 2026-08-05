@@ -6,9 +6,9 @@ Executors do the actual work: parse the LLM-supplied params, call the backend, i
 1. **Read-only executor** — fetches data, no state mutation (some still update state for caching, e.g. `verify_*` updates `verifiedCustomer`).
 2. **Identity/verification executor** — locates an entity by user-supplied identifiers; populates state slots so subsequent actions can rely on them.
 3. **Mutation executor** — modifies backend state. Owns its own pre-check (reject before write if state isn't acceptable) and post-read (verify write landed); returns `preState`/`postState`.
-4. **OTP issuer (`issuesOtp` + typically `startsFlow`)** — opens a multi-turn flow and mints an SCA challenge. Returns `lifecycle: { issuesOtp }` and `flowData` so the consumer can read `challengeId` later.
-5. **OTP consumer (`requiresOtp`)** — validates the customer's 6-digit code against the backend. Library auto-clears the gate on `ok:true`; executor signals timeout / lockout via `lifecycle.clearAwaitingInput` / `lifecycle.abortFlow`.
-6. **Double-entry capturer + consumer (`startsMatchFor` / `requiresMatch`)** — captures the first entry into `flowData`, then verifies the repeat matches.
+4. **OTP issuer (`issuesOtp` + typically `startsFlow`)** — opens a multi-turn flow and mints an SCA challenge. Returns the `otp_issued` effect plus a `merge_flow_data` effect so the consumer can read `challengeId` later.
+5. **OTP consumer (`requiresOtp`)** — validates the customer's 6-digit code against the backend. Library auto-clears the gate on `ok:true`; executor signals timeout / lockout via the `clear_awaiting_input` / `abort_flow` effects.
+6. **Double-entry capturer + consumer (`startsMatchFor` / `requiresMatch`)** — captures the first entry into flow data (`merge_flow_data`), then verifies the repeat matches.
 7. **Self-sufficient read executor** — a read that loads its own dependencies on demand instead of gating on a prior step via a prereq.
 8. **Reference resolver** — turns a user's human-terms reference into a concrete entity (or a candidate set) by matching over more than primary keys.
 9. **Compute / analysis executor** — runs a computation over data already in state; the agent supplies the computation, the host runs it.
@@ -22,24 +22,24 @@ Every executor matches:
 
 ```ts
 // `Slice` is whatever this action's stateSelector returned — NOT the whole
-// state. The executor receives only its slice; its result may still patch any
-// host slot via stateUpdate (ExecutorResult<T>, T = full state).
+// state. The executor receives only its slice; its result may patch any
+// HOST-OWNED slot via stateUpdate (ExecutorResult<T>, T = full state).
 type Executor<Slice, T> = (params: unknown, state: Slice) => Promise<ExecutorResult<T>>;
 
 interface ExecutorResult<T> {
   resultBody: object;              // JSON-serializable; spread into the StepResult the LLM sees
-  stateUpdate?: Partial<T>;        // patch threaded to next step and committed at end
-  flowData?: Record<string, unknown>;
-                                   // shallow-merged into currentFlow.data (on ok, or when this
-                                   // action declares startsFlow). Writing flowData with no flow
-                                   // active is a programmer error → runner throws.
-  lifecycle?: {
-    issuesOtp?: { challengeId: string; mobile_masked: string };
-    clearAwaitingInput?: true;
-    abortFlow?: true;
-  };
+  stateUpdate?: Partial<T>;        // HOST-OWNED slots only — threaded to next step, committed at end.
+                                   // Library-managed slots in the patch throw (see <state_update_shape>).
+  effects?: ExecutorEffect[];      // typed library-state transitions (see below)
   ok: boolean;                     // false short-circuits the batch
 }
+
+type ExecutorEffect =
+  | { type: "request_handoff"; request: HandoffRequest }   // terminal; atomic cleanup + handoff slot
+  | { type: "merge_flow_data"; data: Record<string, unknown> } // shallow-merge into currentFlow.data
+  | { type: "otp_issued" }                                 // open the OTP gate (needs issuesOtp hook)
+  | { type: "clear_awaiting_input" }                       // drop the gate, keep the flow
+  | { type: "abort_flow" };                                // drop the gate AND the flow
 ```
 
 Key points:
@@ -47,7 +47,7 @@ Key points:
 - `state` is the **slice** this action's `stateSelector.ts` produced from the step-start snapshot (which includes any in-batch updates from earlier steps). Import the slice type as `import type { Slice } from "./stateSelector.js"`. The executor sees only what the selector handed it — narrow the selector to what the action actually reads.
 - `resultBody` should always contain a `summary` field (human-readable for the LLM) plus structured fields the prompt expects (`verdict`, `error`, action-specific data).
 - `ok: false` ends the batch but commits all preceding state updates.
-- `flowData` and `lifecycle` are reserved for actions opted into the corresponding `controller.*` lifecycle hook. Returning them outside that context will (for `flowData`/`issuesOtp`) throw at runtime.
+- `effects` entries pair with `controller.*` hooks: `merge_flow_data` / `otp_issued` require a flow (and, for `otp_issued`, the `issuesOtp` opt) or the runner throws; `request_handoff` is honoured regardless of `ok` and ends the batch (handoff monotonicity). See `agent-step-api.md` `<types>` for the full per-effect semantics.
 </contract>
 
 <pattern_1_read_executor>
@@ -102,7 +102,7 @@ Rules:
 <pattern_2_verification_executor>
 ## Pattern 2: Verification / identity executor
 
-Example: `verify_customer` (locate customer by AFM + name).
+Example: `verify_customer` (locate customer by tax number + name).
 
 ```ts
 export async function verifyCustomer(
@@ -232,7 +232,7 @@ Rules:
 <pattern_4_otp_issuer>
 ## Pattern 4: OTP issuer (`issuesOtp` + `startsFlow`)
 
-Opens a multi-turn flow and mints an SCA challenge. The library wires `awaitingInput.kind = "otp"` for the named consumer when the executor returns `lifecycle.issuesOtp`.
+Opens a multi-turn flow and mints an SCA challenge. The library wires `awaitingInput.kind = "otp"` for the named consumer when the executor returns the `otp_issued` effect.
 
 Example: `request_card_activation` (simplified).
 
@@ -266,15 +266,22 @@ export async function requestCardActivation(
       otp_sent: true,
       mobile_masked: masked,
     },
-    // Scratch data the consumer (confirm_otp) will read from currentFlow.data.
-    flowData: {
-      customerId,
-      challengeId,
-      cardNumber: card.cardNumber,
-      psdAccepted: p.psdAccepted === true,
-    },
-    // Library reads this and sets awaitingInput.kind="otp" for the named consumer.
-    lifecycle: { issuesOtp: { challengeId, mobile_masked: masked } },
+    effects: [
+      // Library opens awaitingInput.kind="otp" for the consumer named in the
+      // action's issuesOtp hook.
+      { type: "otp_issued" },
+      // Scratch data the consumer (confirm_otp) will read from currentFlow.data —
+      // the challenge details live HERE (the runner never reads them).
+      {
+        type: "merge_flow_data",
+        data: {
+          customerId,
+          challengeId,
+          cardNumber: card.cardNumber,
+          psdAccepted: p.psdAccepted === true,
+        },
+      },
+    ],
     ok: true,
   };
 }
@@ -291,7 +298,7 @@ request_card_activation: {
 }
 ```
 
-Idempotency: re-running the same issuer while its flow is already active does NOT reset `currentFlow.data` (idempotent merge of `flowData`). Useful for "the customer asked to resend the code" — re-call the issuer, get a fresh `challengeId`, the consumer reads the new one.
+Idempotency: re-running the same issuer while its flow is already active does NOT reset `currentFlow.data` (`merge_flow_data` merges idempotently). Useful for "the customer asked to resend the code" — re-call the issuer, get a fresh `challengeId`, the consumer reads the new one.
 </pattern_4_otp_issuer>
 
 <pattern_5_otp_consumer>
@@ -328,7 +335,7 @@ export async function confirmOtp(
   if (resp?.exception?.code === "SCA012" || resp?.exception?.code === "SCA002") {
     return {
       resultBody: { summary: `OTP locked. ${flow.name} flow cleared.`, error: "otp_locked", verdict: "otp_locked" },
-      lifecycle: { abortFlow: true },
+      effects: [{ type: "abort_flow" }],
       ok: false,
     };
   }
@@ -337,7 +344,7 @@ export async function confirmOtp(
   if (resp?.exception?.code === "SCA006" || resp?.exception?.code === "SCA005") {
     return {
       resultBody: { summary: "OTP timed out. Offer to resend.", error: "otp_timeout", verdict: "otp_timeout" },
-      lifecycle: { clearAwaitingInput: true },
+      effects: [{ type: "clear_awaiting_input" }],
       ok: false,
     };
   }
@@ -350,15 +357,15 @@ export async function confirmOtp(
   // Success — library will auto-clear awaitingInput.
   return {
     resultBody: { summary: `OTP validated. Proceed to the next flow step.`, otp_valid: true },
-    flowData: { otpValidated: true },
+    effects: [{ type: "merge_flow_data", data: { otpValidated: true } }],
     ok: true,
   };
 }
 ```
 
 Rules:
-- Lockdown lifecycle signals are mutually exclusive: pick `abortFlow` (terminal) or `clearAwaitingInput` (recoverable). Never both.
-- The `flowData` write on success (`otpValidated: true`) is the natural way to gate the next step in the flow (the next action can refuse if `state.currentFlow.data.otpValidated !== true`).
+- The gate signals are mutually exclusive: pick `abort_flow` (terminal) or `clear_awaiting_input` (recoverable). Never both.
+- The `merge_flow_data` write on success (`otpValidated: true`) is the natural way to gate the next step in the flow (the next action can refuse if `state.currentFlow.data.otpValidated !== true`).
 - The library prevents replay: once the gate clears, this executor can't run again until a fresh issuer fires.
 </pattern_5_otp_consumer>
 
@@ -383,11 +390,11 @@ export async function proposeNewPin(
     return { resultBody: { summary: ruleResult.summary, error: "pin_rule_violation", verdict: ruleResult.reason }, ok: false };
   }
 
-  // Wrap via the backend's encryption endpoint; persist ciphertext in flowData.
+  // Wrap via the backend's encryption endpoint; persist ciphertext in flow data.
   const encrypted = await encryptPin(pin);
   return {
     resultBody: { summary: "PIN captured. Ask the customer to repeat the PIN.", pin_accepted: true },
-    flowData: { encryptedPin: encrypted },
+    effects: [{ type: "merge_flow_data", data: { encryptedPin: encrypted } }],
     ok: true,
   };
 }
@@ -504,11 +511,11 @@ Not every agent-step tool fetches data. A router/classifier (e.g. an IVR intent 
 
 - **One action, called repeatedly.** A single action (e.g. `narrow`) advances one level of a decision tree per step. The LLM batches several picks in one tool call; the runner threads them in order.
 - **Always `ok: true`; the verdict lives in `resultBody`.** Every outcome — a match, an ambiguous set, an invalid pick, a terminal route — returns `ok: true`, carrying the decision under `resultBody` (e.g. `{ kind: "Candidates" | "Route" | "Fallback" | "InvalidPick" }`). This is the deliberate use of the `ExecutorResult.ok` contract: `ok` controls **batch continuation**, not success (see the type doc-comment). The router *wants* the whole batch to run so the walk threads end-to-end, so it never returns `ok: false` for a "logically negative" pick. (Contrast Pattern 2's verification executor, which returns `ok: false` precisely to stop the batch.)
-- **`currentFlow.data` as a cross-turn accumulator.** Open the walk with `startsFlow`, accumulate the path in `flowData` (shallow-merged into `currentFlow.data`), and reset on a terminal step via `lifecycle.abortFlow` (or `endsFlow`). The flow rehydrates next turn, so a multi-turn clarification continues from where it left off.
+- **`currentFlow.data` as a cross-turn accumulator.** Open the walk with `startsFlow`, accumulate the path via `merge_flow_data` effects (shallow-merged into `currentFlow.data`), and reset on a terminal step via an `abort_flow` effect (or `endsFlow`). The flow rehydrates next turn, so a multi-turn clarification continues from where it left off.
 - **No prereqs, no pagination, no mutation gates.** Routing gates nothing on journey-state, returns one decision (not lists), and performs no side effects — so verifiers, `pageable`, and the confirmation/OTP/match machinery are all simply unused.
 - **Mind the goal-switch.** Because a non-terminal turn leaves the flow open (no `abortFlow`), an unrelated new goal next turn must be handled by the host — drive a `restart`/`abortFlow`, since the library never resets a flow implicitly (see `startsFlow` doc).
 
-The library *core* (config → schema → selector→executor dispatch → `flowData` threading → Command commit) generalises cleanly to this shape; only the data-tool surface goes unused.
+The library *core* (config → schema → selector→executor dispatch → flow-data threading → Command commit) generalises cleanly to this shape; only the data-tool surface goes unused.
 </pattern_10_router_classifier>
 
 <state_update_shape>
@@ -537,11 +544,11 @@ return {
 
 You can return state updates from `ok: false` executors too — but they only land if the executor returns `ok: false` AFTER doing something legitimately persistable. Most failure paths return no `stateUpdate`.
 
-**Never write `awaitingInput` or `currentFlow` from `stateUpdate`.** Those slots are library-managed. Use the `ActionDef.controller.*` opts and the `flowData` / `lifecycle` fields on the return value instead.
+**`stateUpdate` is domain-only (enforced).** Writing any library-managed slot — `awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `handoff`, `errorCount` — through it throws at runtime. Library transitions go through the `ActionDef.controller.*` opts and the `effects` field on the return value instead; a terminal handoff in particular is the `{ type: "request_handoff", request }` effect (which also gets the built-in action's atomic cleanup), never a slot write.
 </state_update_shape>
 
 <error_handling>
-- **Backend HTTP error** — let the `postBackend` helper throw; the runner catches the throw at the executor boundary, marks the step `ok: false`, and short-circuits. The agent's prompt should handle these gracefully ("προσωρινό τεχνικό πρόβλημα").
+- **Backend HTTP error** — let the `postBackend` helper throw; the runner catches the throw at the executor boundary, marks the step `ok: false`, and short-circuits. The agent's prompt should handle these gracefully ("a temporary technical problem").
 - **Domain "negative" outcome** (e.g. `card_not_found`, `name_mismatch`) — return `{ ok: false }` with a structured `verdict` field. The batch short-circuits cleanly.
 - **Library-managed gate failure** (no flow, no OTP awaiting) — the runner intercepts BEFORE calling the executor, with error codes `no_flow_active` / `wrong_flow` / `otp_not_pending` / `match_not_pending`. You don't need to check these in the executor; they're library-enforced.
 - **Unrecoverable bug** — throw. The runner catches and short-circuits.
@@ -555,7 +562,7 @@ The executor's `resultBody` is LLM-facing JSON — the LLM reads it before produ
 But the result body still shouldn't include:
 - Long, repetitive prose (wastes tokens)
 - Internal IDs the customer would never hear (e.g. full PAN, raw challenge IDs)
-- Sensitive raw data (the new PIN's plaintext — only persist ciphertext in `flowData`; only echo masked tails in the summary)
+- Sensitive raw data (the new PIN's plaintext — only persist ciphertext in flow data; only echo masked tails in the summary)
 
 Keep result bodies focused: enough for the LLM to compose a correct spoken reply, no more.
 

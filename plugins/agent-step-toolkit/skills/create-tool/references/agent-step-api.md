@@ -1,7 +1,9 @@
 # Reference: agent-step Library API
 
 <overview>
-This is the runner contract the new tool consumes. The library lives at `src/agent-step/` and is **treated as immutable**: never modify it; only call `buildAgentStepTool({...})` with the right shape. The summary below is the canonical contract — match it exactly. The ground truth is in `src/agent-step/types.ts` + `src/agent-step/runner.ts`; if this doc disagrees with those, the source wins.
+This is the runner contract the new tool consumes. The library lives at `src/agent-step/` and is **treated as immutable**: never modify it; only call `buildAgentStepTool({...})` with the right shape. The summary below is the canonical contract — match it exactly. The ground truth is in `src/agent-step/types.ts` (authoring contracts) + `src/agent-step/index.ts` (the public surface); if this doc disagrees with those, the source wins.
+
+Since 2.0.0 the library is laid out as phase modules — `compile/` (validate → normalize → model-facing schema), `run/` (admission → planning → execution → finalize), `interaction/` (one policy module per gate kind), `controls/` (the library-owned model-facing actions), `handoff/` (contract + graph node + delegate transport). **Hosts import ONLY from `src/agent-step/index.js`** — the module layout is internal and free to move; everything a tool consumes is re-exported at the index.
 </overview>
 
 <runner_signature>
@@ -15,11 +17,13 @@ export const myTool = buildAgentStepTool({
   executors,                       // ExecutorRegistry<T, typeof selectors>
   verifiers,                       // VerifierRegistry<T>
   handoff: handoffSpec,            // OPTIONAL — opt into the built-in request_handoff (see <handoff>)
+  boundedChoices: { ... },         // OPTIONAL — opt into the one-shot bounded-choice overlay (see <bounded_choice>)
+  getCallerTurnId: (state) => id,  // OPTIONAL — stable caller-turn identity resolver (see <caller_turn_identity>)
   messages: { ... },               // OPTIONAL — override the runner's own system summary strings (see <system_messages>)
 });
 ```
 
-`stateSchema` is `StateSchemaLike = LangGraphAnnotationLike | z.ZodObject` — it accepts **either** a LangGraph `Annotation.Root` **or** a Zod object schema whose fields carry reducer/default metadata via `withLangGraph` (`@langchain/langgraph/zod`). Both resolve to the same channel classes (`BinaryOperatorAggregate` / `LastValue`), so the runner derives the intra-batch merger uniformly. The bootstrap scaffold defines graph state **once** as a Zod schema (`AgentStateSchema` in `state.ts`) and passes it here — a single source of truth for reducers AND invoke validation, no Annotation/Zod drift. (The older `stateAnnotation` option is still accepted as a **deprecated alias** for backward compatibility; new code uses `stateSchema`. The runner throws at construction if neither is set.)
+`stateSchema` is **required**: `StateSchemaLike = LangGraphAnnotationLike | z.ZodObject` — it accepts **either** a LangGraph `Annotation.Root` **or** a Zod object schema whose fields carry reducer/default metadata via `withLangGraph` (`@langchain/langgraph/zod`). Both resolve to the same channel classes (`BinaryOperatorAggregate` / `LastValue`), so the runner derives the intra-batch merger uniformly. The bootstrap scaffold defines graph state **once** as a Zod schema (`AgentStateSchema` in `state.ts`) and passes it here — a single source of truth for reducers AND invoke validation, no Annotation/Zod drift. (The pre-2.0 `stateAnnotation` alias was **removed** in 2.0.0 — pass `stateSchema`, which accepts the same values.)
 
 `selectors` and `executors` are both **keyed 1:1 by the exact action name** (snake_case). Build `selectors` with `satisfies SelectorRegistry<State, ActionName>` (not a type annotation) so each selector's precise return type is preserved into `typeof selectors`; `executors` is then `ExecutorRegistry<State, typeof selectors>`, which types each executor's `state` param from its selector's return — a mismatch is a compile error here, at the construction boundary. See `<conventions>` §1.
 
@@ -82,9 +86,9 @@ interface ControllerHooks {
   requiresConfirmation?: boolean | ConfirmationOpts;
 
   // ─── SCA / OTP gating ──────────────────────────────────────────────────────
-  requiresOtp?: boolean | OtpOpts;          // refuse unless awaitingInput.kind="otp"
+  requiresOtp?: boolean;                    // refuse unless awaitingInput.kind="otp"
                                             // for this action; auto-clears on ok:true.
-  issuesOtp?: { consumer_action: string };  // executor reports lifecycle.issuesOtp;
+  issuesOtp?: { consumer_action: string };  // executor reports the `otp_issued` effect;
                                             // library sets awaitingInput=otp.
 
   // ─── Multi-turn flow lifecycle ─────────────────────────────────────────────
@@ -105,20 +109,14 @@ interface ConfirmationOpts {
   maxAttempts?: number;            // re-propose budget before the gate exhausts. Default 3 —
                                    // almost always right. Lower to 1–2 for high-stakes mutations
                                    // where you want to bail fast on param drift.
-  ttlMs?: number;                  // INERT. The field exists on the type for forward-compat, but the
-                                   // runner removed time-based expiry (see runner.ts: "timestamps
-                                   // removed; runner no longer does TTL"). Gating is conversation-
-                                   // driven, not time-driven. Setting it does nothing today — omit it.
   lockdown?: boolean;              // default true — refuses unrelated batches while a confirmation is
                                    // pending. Leave it true. Set false only if you deliberately want
                                    // unrelated READS to proceed mid-confirmation (rare; weakens the
                                    // safety gate, since the customer can wander off the pending action).
 }
-
-interface OtpOpts {
-  // Reserved for future use. Library never counts OTP attempts (backend-authoritative).
-}
 ```
+
+There is deliberately **no TTL**: the runner times nothing out. Stale gates clear via `abort_pending_input` or via backend signals the executor surfaces as `clear_awaiting_input` / `abort_flow` effects. (2.0.0 removed the inert `ttlMs` field and the empty `OtpOpts` type — `requiresOtp` is a plain `boolean`; the library never counts OTP attempts, the backend is authoritative.)
 
 The executor owns any pre-read and post-read; the library enforces the gates above plus the propose-then-execute handshake (see `<confirmation_lifecycle>`).
 
@@ -135,27 +133,50 @@ Self-contained: the predicate AND the denial body live together in one file. The
 
 The `check` predicate is a snapshot of **journey progress** — "is the user identified?", "is an entity selected?" — not a record of step ordering. Gate on *where the user is*, never on *what ran first*. The companion mechanism for keeping that progress coherent when an upstream slot changes is `invalidatesOnChange` (see `<invalidates_on_change>` below).
 
-## ExecutorResult
+## ExecutorResult + ExecutorEffect
 
 ```ts
 interface ExecutorResult<T> {
   resultBody: object;              // JSON-serializable; the LLM sees this
-  stateUpdate?: Partial<T>;        // threaded to subsequent batch steps + committed at end
-  flowData?: Record<string, unknown>;
-                                   // shallow-merged into currentFlow.data on ok (or when the
-                                   // action declares startsFlow); error to write when no flow active.
-  lifecycle?: {
-    issuesOtp?: { challengeId: string; mobile_masked: string };
-                                   // pair with controller.issuesOtp.consumer_action;
-                                   // library sets awaitingInput=otp for the named consumer.
-    clearAwaitingInput?: true;     // drop awaitingInput only; keep currentFlow.
-                                   // Use for "OTP timeout: gate dead, flow continues."
-    abortFlow?: true;              // terminal failure; drop awaitingInput AND currentFlow.
-                                   // Use for "OTP locked, no recovery within this flow."
-  };
+  stateUpdate?: Partial<T>;        // HOST-OWNED slots only — threaded to subsequent batch
+                                   // steps + committed at end. Writing a library-managed slot
+                                   // (awaitingInput, currentFlow, boundedChoice, pagedRead,
+                                   // handoff, errorCount) through it THROWS — library
+                                   // transitions go through `effects` instead.
+  effects?: ExecutorEffect[];      // typed library-state transitions (below)
   ok: boolean;                     // false short-circuits the batch
 }
+
+type ExecutorEffect =
+  | { type: "request_handoff"; request: HandoffRequest }
+                                   // terminal business outcome: atomically clears every transient
+                                   // runner slot (awaitingInput, currentFlow, boundedChoice,
+                                   // pagedRead) and writes the `handoff` slot — exactly like the
+                                   // built-in request_handoff action. Honoured regardless of `ok`
+                                   // (a refusal verdict may still be terminal). TERMINAL IS
+                                   // ENFORCED: once the handoff is set, the step's remaining
+                                   // interaction lifecycle is skipped and the batch ends after
+                                   // the current step (handoff monotonicity). The ONLY way an
+                                   // executor requests a handoff.
+  | { type: "merge_flow_data"; data: Record<string, unknown> }
+                                   // shallow-merge into currentFlow.data. Honoured on ok:true;
+                                   // requesting it with no active flow (and no startsFlow on the
+                                   // action) is a programmer mistake and throws.
+  | { type: "otp_issued" }         // this step minted an SCA challenge; the runner opens the OTP
+                                   // gate for the consumer named in the action's issuesOtp hook.
+                                   // Honoured on ok:true; requires an active flow + the config
+                                   // hook. Keep challenge details (challengeId etc.) in
+                                   // resultBody and/or a merge_flow_data effect — the runner
+                                   // never read them.
+  | { type: "clear_awaiting_input" }
+                                   // drop the pending input gate only, keep the flow. Use for
+                                   // "the current OTP is dead but the flow continues" (timeout).
+                                   // Honoured regardless of `ok`.
+  | { type: "abort_flow" };        // terminal in-flow failure; drop the gate AND the flow (and
+                                   // any bounded-choice overlay). Honoured regardless of `ok`.
 ```
+
+Effects are **signals, not an ordered program** — the runner honours each one at a fixed, documented point of the step lifecycle (see `<state_threading>` step 5f). Pre-2.0 executors expressed these as `flowData` and a `lifecycle` object; both are gone.
 
 ## Selector / SelectorRegistry
 
@@ -174,8 +195,9 @@ The runner runs `selectors[action](view)` and hands the result to the executor a
 
 ```ts
 // Receives `Slice` — whatever the action's selector returned — NOT the whole
-// state. Returns an ExecutorResult<T> whose stateUpdate may still patch ANY
-// host slot (writes are unrestricted; the reducers merge them).
+// state. Returns an ExecutorResult<T> whose stateUpdate may patch any
+// HOST-OWNED slot (the reducers merge them); library-managed slots are
+// rejected loudly — request those transitions via `effects`.
 type Executor<Slice, T> = (params: unknown, state: Slice) => Promise<ExecutorResult<T>>;
 
 // Keyed 1:1 by action name. Each entry's `state` param is derived from that
@@ -193,7 +215,12 @@ The runner's lockdown slot. Discriminated union over the three input gates:
 ```ts
 type AwaitingInput =
   | { kind: "confirmation"; for_action: string; params: object;
-      attempts_left: number; max_attempts: number; flow_ref?: string }
+      attempts_left: number; max_attempts: number; flow_ref?: string;
+      proposed_on_caller_turn_id?: string }   // the caller turn the proposal was stored on;
+                                              // a matching re-call on the SAME turn is refused
+                                              // (confirmation_same_turn_locked) — see
+                                              // <confirmation_lifecycle>. Absent when no stable
+                                              // turn identity existed at propose time.
   | { kind: "otp";          for_action: string; flow_ref: string }
   | { kind: "match";        for_action: string;
       attempts_left: number; max_attempts: number; flow_ref?: string };
@@ -207,20 +234,38 @@ Lockdown semantics (first step of the next batch must satisfy this):
 | `otp` | `for_action` or `abort_pending_input` | `otp_pending_locked` |
 | `match` | `for_action`, the **capturer** (re-capture resets), or `abort_pending_input` | `match_pending_locked` |
 
-The library does NOT TTL any slot. Stale gates clear via `abort_pending_input` or via backend signals (timeout/lockout, surfaced by the executor as `lifecycle.clearAwaitingInput` / `lifecycle.abortFlow`).
+The library does NOT TTL any slot. Stale gates clear via `abort_pending_input` or via backend signals (timeout/lockout, surfaced by the executor as `clear_awaiting_input` / `abort_flow` effects).
 
 ## CurrentFlow (library-managed)
 
-Single active flow at a time (flow mutex). Set on `startsFlow` ok; cleared on `endsFlow` ok or `lifecycle.abortFlow`:
+Single active flow at a time (flow mutex). Set on `startsFlow` ok; cleared on `endsFlow` ok or an `abort_flow` effect:
 
 ```ts
 interface CurrentFlow {
   name: string;
-  data: Record<string, unknown>;   // scratch bag; executors merge via ExecutorResult.flowData
+  data: Record<string, unknown>;   // scratch bag; executors merge via the merge_flow_data effect
 }
 ```
 
-Starting a different flow while another is active fails with `error: "flow_already_active"`. Re-entering the SAME flow is idempotent — the executor runs (e.g. to re-issue an OTP), and `flowData` shallow-merges into the existing `currentFlow.data` (no reset).
+Starting a different flow while another is active fails with `error: "flow_already_active"`. Re-entering the SAME flow is idempotent — the executor runs (e.g. to re-issue an OTP), and its `merge_flow_data` effect shallow-merges into the existing `currentFlow.data` (no reset).
+
+## BoundedChoice (library-managed)
+
+The one-shot conversational-choice overlay's slot (see `<bounded_choice>`). `null` until a configured choice is offered; the runner is the only writer. Unlike `awaitingInput`, this does NOT replace or unlock a pending confirmation/OTP/match gate — a caller-facing meta-choice may temporarily suspend the spoken question while the original gate remains authoritative underneath.
+
+```ts
+interface BoundedChoice {
+  name: string;                        // which configured choice
+  status: "pending" | "resolved";      // pending = the caller still owes a selection
+  selection?: string;                  // the recorded nonterminal selection
+  requested_on_caller_turn_id?: string;// turn the choice was OFFERED on — while current,
+                                       // it cannot be resolved/consumed (same-turn lock)
+  resolved_on_caller_turn_id?: string; // turn a nonterminal selection resolved on — domain
+                                       // actions stay locked while that turn is current
+}
+```
+
+`resolved` deliberately persists until the surrounding flow ends or a terminal handoff clears it, so the same one-shot choice cannot be offered again later in the conversation.
 
 ## PagedCache (library-managed)
 
@@ -235,13 +280,13 @@ interface PagedCache<Row> {
 }
 ```
 
-The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `handoff` / `errorCount`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.)
+The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `boundedChoice` / `handoff` / `errorCount`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.) Since 2.0.0 `buildAgentStepTool` **verifies channel completeness at construction**: a state schema missing a channel for any library slot the configuration writes throws (the message names the missing slots and the spreadable fragments).
 
-`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the five library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
+`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the six library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
 
 ## HandoffRequest (library-managed)
 
-The pending channel-handoff request, written by the built-in `request_handoff` action (only available when the tool opted in via `BuildAgentStepToolOptions.handoff`) and resolved — then cleared — by the host graph's `createHandoffNode(spec)` node. `null` otherwise; rides `agentStepZodShape` like the other slots. See `<handoff>`.
+The pending channel-handoff request, written by the built-in `request_handoff` action (only available when the tool opted in via `BuildAgentStepToolOptions.handoff`) or by an executor's `request_handoff` **effect** — never through `stateUpdate` — and resolved — then cleared — by the host graph's `createHandoffNode(spec)` node. `null` otherwise; rides `agentStepZodShape` like the other slots. Once set, handoff is **monotonic**: the step's remaining interaction lifecycle is skipped and the batch ends after the current step. See `<handoff>`.
 
 ```ts
 interface HandoffRequest {
@@ -292,7 +337,7 @@ agent-step: action "verify_card" lists prereq "customerVerified" but verifiers["
 
 ## 3. Reserved action names
 
-`abort_pending_input` is ALWAYS reserved — the library auto-injects it into the tool schema whenever ANY action declares one of: `requiresConfirmation`, `requiresOtp`, `issuesOtp`, `startsFlow`, `endsFlow`, `requiresFlow`, `requiresMatch`, `startsMatchFor`. `request_handoff` is reserved ONLY when `BuildAgentStepToolOptions.handoff` is provided (see `<handoff>`) — a tool that does NOT opt in may define its own action under that name (the orchestrator/scaffold handoff mechanism does exactly that). Declaring a reserved name throws:
+`abort_pending_input` is ALWAYS reserved — the library auto-injects it into the tool schema whenever ANY action declares one of: `requiresConfirmation`, `requiresOtp`, `issuesOtp`, `startsFlow`, `endsFlow`, `requiresFlow`, `requiresMatch`, `startsMatchFor`. `request_handoff` is reserved ONLY when `BuildAgentStepToolOptions.handoff` is provided (see `<handoff>`) — a tool that does NOT opt in may define its own action under that name (the orchestrator/scaffold handoff mechanism does exactly that). `request_bounded_choice` / `resolve_bounded_choice` are reserved ONLY when `boundedChoices` is provided (see `<bounded_choice>`). These library-owned actions are **controls** (`controls/` in the library): each carries its own activation, schema variant, description line, lockdown allowances, and execution — the run pipeline dispatches them instead of an executor. Declaring a reserved name throws:
 
 ```
 agent-step: "<name>" is a reserved action name auto-injected by the library; remove it from config.actions.
@@ -319,19 +364,24 @@ Lifecycle opts are declared inline as `ActionDef.controller`, so there is no sep
 When the LLM calls the tool with `[step1, step2, step3]`:
 
 1. Runner reads the FULL state via `getCurrentTaskInput<T>()` — this is the snapshot at batch start (NOT a live view, important for same-batch-bypass safety).
-2. Merger is built from the state schema passed as `stateSchema` (a Zod object whose fields carry reducer metadata via `withLangGraph`, OR a LangGraph `Annotation.Root`). Each field's reducer is extracted from its channel's `BinaryOperatorAggregate.operator`; a Zod schema's channels are resolved through the langgraph zod registry to the same channel classes. The `messages` field is explicitly skipped (the runner emits its own `ToolMessage` at the end).
-3. Pre-flight checks fire in this order, each able to short-circuit the batch:
-   a. **Input lockdown** — `awaitingInput` set → first step must satisfy it (see lockdown table above).
-   b. **Flow mutex** — first step `startsFlow=X` while `currentFlow.name=Y` (≠X) → refuse `flow_already_active`.
-   c. **soleStep / soleOnExecute** — batch-shape refusal (computed off batch-start pending so the LLM-natural `[verify, mutate]` batch can propose).
-4. **Plan expansion** — tag each user step with its confirmation mode (`propose` | `rePropose` | `execute` | `exhausted`) based on pending state at batch-start. Frozen before any executor runs (same-batch-bypass safety).
-5. For each planned step:
-   a. Library-managed prereqs (`requiresFlow`, then `requiresOtp` / `requiresMatch`) → refuse if not gated.
-   b. User-declared prereqs (verifiers) → refuse with denial body.
-   c. Validate params via `paramsSchema.parse`.
-   d. Run the action's selector against the running `view` to build the slice, then call the executor: `executors[action](params, selectors[action](view))`. If the executor throws, the runner catches it, marks the step `ok:false` (`error: "executor_error"`), and short-circuits — earlier steps' commits are preserved.
-   e. Apply executor outputs in this order: `stateUpdate` → `startsFlow`+`flowData` → `lifecycle.issuesOtp` → auto-clear of `requiresOtp`/`requiresMatch` on ok → `startsMatchFor` → `endsFlow` → `lifecycle.clearAwaitingInput` / `lifecycle.abortFlow`. On ok:false + `verdict:"match_mismatch"`, decrement match attempts (or abort flow on exhaustion).
-6. Emit a single `ToolMessage` whose content is the JSON-stringified `RunnerResultBody = { summary, results, failed_at? }`.
+2. Merger is built from the state schema passed as `stateSchema` (a Zod object whose fields carry reducer metadata via `withLangGraph`, OR a LangGraph `Annotation.Root`). Each field's reducer is extracted from its channel's `BinaryOperatorAggregate.operator`; a Zod schema's channels are resolved through the langgraph zod registry to the same channel classes. The `messages` field is explicitly skipped (the runner emits its own `ToolMessage` at the end). When any confirm gate or bounded choice is configured, the runner also resolves the **caller-turn identity** here (`getCallerTurnId`, defaulting to the latest human message id — see `<caller_turn_identity>`).
+3. **Admission** (`run/admission.ts`) — every whole-batch precondition, in a FIXED order, each able to refuse the batch (a single result entry, `failed_at: 0`, nothing committed):
+   a. **Unknown action** — hallucinated/typo'd names get a structured refusal.
+   b. **Choice same-turn lock** — a bounded choice resolved on THIS caller turn keeps domain work locked until the caller speaks again.
+   c. **Choice pending lockdown** — a pending bounded choice admits only its controls / abort / handoff / configured direct inputs.
+   d. **Gate lockdown** — a pending confirmation/OTP/match admits only its target action / abort / handoff / choice controls (+ the capturer, for match; see lockdown table above).
+   e. **Flow mutex** — first step `startsFlow=X` while `currentFlow.name=Y` (≠X) → refuse `flow_already_active`.
+   f. **Control exclusivity** — sole-step control families (handoff, bounded-choice) refuse to share a batch.
+   g. **soleStep / soleOnExecute** — per-action batch-shape refusal (computed off batch-start pending so the LLM-natural `[verify, mutate]` batch can propose).
+4. **Plan expansion** (`run/planning.ts`) — tag each user step with its confirmation mode (`propose` | `rePropose` | `execute` | `sameTurnLocked` | `exhausted`) based on pending state at batch-start. Frozen before any executor runs (same-batch-bypass safety). Planning is **abort-aware**: confirm steps AFTER an `abort_pending_input` in the same batch plan against NO pending — they propose fresh instead of executing against the gate the batch just cleared.
+5. For each planned step (`run/execution.ts`):
+   a. Control steps (`abort_pending_input`, `request_handoff`, the bounded-choice controls) dispatch to their `ControlAction` implementation, not an executor.
+   b. Library-managed prereqs (`requiresFlow`, then `requiresOtp` / `requiresMatch`) → refuse if not gated.
+   c. User-declared prereqs (verifiers) → refuse with denial body.
+   d. Validate params via `paramsSchema.parse`.
+   e. Run the action's selector against the running `view` to build the slice, then call the executor: `executors[action](params, selectors[action](view))`. If the executor throws, the runner catches it, marks the step `ok:false` (`error: "executor_error"`), and short-circuits — earlier steps' commits are preserved.
+   f. Apply executor outputs in this order: `stateUpdate` (host slots only — library slots throw) → `request_handoff` effect (terminal; skips the rest) → `startsFlow` + `merge_flow_data` → `otp_issued` → auto-clear of `requiresOtp`/`requiresMatch` on ok → `startsMatchFor` → `endsFlow` → `clear_awaiting_input` / `abort_flow`. On ok:false + `verdict:"match_mismatch"`, decrement match attempts (or abort flow on exhaustion). **Handoff monotonicity:** once the `handoff` slot is set (control or effect), the remaining interaction lifecycle is skipped and the batch ends after the current step, whatever `ok` was.
+6. **Finalize** (`run/finalize.ts`) — build the result body, apply the error-counter/auto-handoff policy, and emit a single `ToolMessage` whose content is the JSON-stringified `RunnerResultBody = { summary, results, failed_at? }`.
 
 **Cumulative commit on partial failure:** state patches from successful earlier steps DO commit even if a later step fails. Example: `[verify_customer (ok), verify_card (fail)]` → `verifiedCustomer` persists for the next turn.
 
@@ -341,21 +391,25 @@ When the LLM calls the tool with `[step1, step2, step3]`:
 <confirmation_lifecycle>
 ## Mutation propose → execute lifecycle (when `requiresConfirmation` is set)
 
-The runner switches the mutation action into a four-mode state machine. Detected by reading `awaitingInput.kind === "confirmation"`:
+The runner switches the mutation action into a five-mode state machine. Detected by reading `awaitingInput.kind === "confirmation"`:
 
-**Ordering with prereqs (non-obvious, but guaranteed).** A step's library prereqs (`requiresFlow`) and user verifiers run BEFORE its confirmation mode is acted on (`<state_threading>` step 5a/5b, ahead of the propose in 5e). So a confirm-gated mutation whose `requiresFlow`/prereqs are unmet is **refused, not proposed** — `awaitingInput` is never set into a doomed state. Compose `requiresConfirmation` with `requiresFlow` freely; the gate order is correct.
+**Ordering with prereqs (non-obvious, but guaranteed).** A step's library prereqs (`requiresFlow`) and user verifiers run BEFORE its confirmation mode is acted on (`<state_threading>` step 5b/5c, ahead of the propose in 5f). So a confirm-gated mutation whose `requiresFlow`/prereqs are unmet is **refused, not proposed** — `awaitingInput` is never set into a doomed state. Compose `requiresConfirmation` with `requiresFlow` freely; the gate order is correct.
 
 ### First call (no pending, or pending action ≠ this action) → **propose mode**
-- Parse params with the action's **effective schema** (the declared `paramsSchema`, page-extended for `pageable` actions) and store them **PARSED** — schema normalization (`z.preprocess`, coercion) is applied before storage: `awaitingInput = { kind: "confirmation", for_action, params, attempts_left: maxAttempts, max_attempts }`.
+- Parse params with the action's **effective schema** (the declared `paramsSchema`, page-extended for `pageable` actions) and store them **PARSED** — schema normalization (`z.preprocess`, coercion) is applied before storage: `awaitingInput = { kind: "confirmation", for_action, params, attempts_left: maxAttempts, max_attempts, proposed_on_caller_turn_id? }`. The proposal is stamped with the current caller-turn identity when one exists (see `<caller_turn_identity>`).
 - A failed parse returns `{ ok: false, error: "invalid_params" }` with the overridable `invalid_params` system-message summary and the raw Zod detail in `_debug` (nothing is stored).
 - Return `{ ok: true, summary, needs_confirmation: true, proposed_params, attempts_left }`.
 - **Executor is NOT invoked.**
 
-### Re-call whose params **parse to the pending proposal** → **execute mode**
+### Re-call whose params **parse to the pending proposal**, on a LATER caller turn → **execute mode**
 - The incoming RAW params are parsed with the same effective schema, then compared (deep value equality) against the stored parsed proposal — value normalization never reads as drift (e.g. a `z.preprocess` stripping STT separators: `"70,76"` ≡ `"7076"`). A failed parse counts as drift (→ rePropose).
 - Clear `awaitingInput` atomically BEFORE invoking the executor.
 - Invoke the executor with the parsed params + view.
 - Whatever the executor returns is the result (the executor performs its own pre-read + write + post-read).
+
+### Matching re-call on the SAME caller turn → **sameTurnLocked** (2.0.0)
+- The proposal carries `proposed_on_caller_turn_id`; a matching re-call while that turn is still current means the caller has NOT actually answered the read-back — the model is confirming with itself. Refused with `error: "confirmation_same_turn_locked"`: no attempt is spent, the gate stays untouched, and execution requires a re-call on a later caller turn.
+- Enforced only when both turn identities exist. Identity-less direct `runSteps` consumers (state fixtures without message ids) keep the pre-2.0 params-only behavior. **Test-harness implication:** manual propose → execute sequences must simulate the caller's answering turn — append a fresh human message id between the two calls (the bootstrap harness ships `answeredTurn` / `runConfirmed` helpers for exactly this).
 
 ### Re-call with **genuinely different params** (or params that fail to parse) → **rePropose mode**
 - Update `awaitingInput.params` to the newly parsed params, decrement `attempts_left`.
@@ -406,7 +460,7 @@ Two actions cooperate: the **issuer** mints an SCA challenge; the **consumer** v
 
 ### Issuer (`controller.issuesOtp = { consumer_action }`)
 - Executor calls the SCA backend to mint a challenge.
-- On `ok: true`, the executor returns `lifecycle: { issuesOtp: { challengeId, mobile_masked } }` and (typically) writes `flowData: { challengeId, customerId, ... }` so the consumer can read them.
+- On `ok: true`, the executor returns `effects: [{ type: "otp_issued" }, { type: "merge_flow_data", data: { challengeId, customerId, ... } }]` — the merge carries the challenge details so the consumer can read them from `currentFlow.data`; surface caller-facing bits (e.g. a masked mobile) in `resultBody`.
 - Library sets `awaitingInput = { kind: "otp", for_action: consumer_action, flow_ref: currentFlow.name }`.
 
 Issuer typically also declares `startsFlow: { name: "X" }` so the OTP gate is tied to a flow.
@@ -418,9 +472,9 @@ Issuer typically also declares `startsFlow: { name: "X" }` so the OTP gate is ti
 - Executor reads `challengeId` (etc.) from `state.currentFlow.data`, calls SCA validate.
 - Library **does not count OTP attempts**. The backend is authoritative for lock / timeout / wrong:
   - **valid** → executor returns `ok: true`; library auto-clears `awaitingInput`. Flow continues.
-  - **wrong, retry allowed** → executor returns `ok: false` (no `lifecycle`). Library leaves state alone; customer re-reads the same code.
-  - **timeout** → executor returns `ok: false, lifecycle: { clearAwaitingInput: true }`. The gate dies; the LLM offers to resend (re-call the issuer to mint a fresh challenge).
-  - **lockout** → executor returns `ok: false, lifecycle: { abortFlow: true }`. The flow is dead; library clears `awaitingInput` AND `currentFlow`.
+  - **wrong, retry allowed** → executor returns `ok: false` (no effects). Library leaves state alone; customer re-reads the same code.
+  - **timeout** → executor returns `ok: false, effects: [{ type: "clear_awaiting_input" }]`. The gate dies; the LLM offers to resend (re-call the issuer to mint a fresh challenge).
+  - **lockout** → executor returns `ok: false, effects: [{ type: "abort_flow" }]`. The flow is dead; library clears `awaitingInput` AND `currentFlow`.
 
 ### Single consumer, multiple issuers
 A single `confirm_otp` action can serve every OTP-protected flow in the tool. Each issuer points its `issuesOtp.consumer_action` at that one consumer, and the consumer reads `currentFlow.data` to know which challenge is in play.
@@ -432,7 +486,7 @@ A single `confirm_otp` action can serve every OTP-protected flow in the tool. Ea
 The customer provides a value once, then again; the system verifies they match. Used for PIN setup, password change, secret-answer confirmation. Library coordinates `awaitingInput.kind === "match"`.
 
 ### Capturer (`controller.startsMatchFor = { consumer_action }`)
-- Executor validates/encodes/persists the first entry (typically into `flowData`).
+- Executor validates/encodes/persists the first entry (typically into flow data, via a `merge_flow_data` effect).
 - On `ok: true`, library sets `awaitingInput = { kind: "match", for_action: consumer_action, attempts_left: maxAttempts, max_attempts: maxAttempts, flow_ref? }`.
 - Re-running the capturer while a match is awaiting **resets** `attempts_left` (lets the customer change their first entry).
 
@@ -448,6 +502,51 @@ The customer provides a value once, then again; the system verifies they match. 
 ### Lockdown
 While `awaitingInput.kind === "match"`, only three actions are allowed as the first step: the consumer, the capturer (re-capture), or `abort_pending_input`.
 </match_lifecycle>
+
+<caller_turn_identity>
+## Caller-turn identity (`BuildAgentStepToolOptions.getCallerTurnId`)
+
+Three protections key on a **stable identity for the latest caller turn**: the confirmation gate's same-turn lock (`<confirmation_lifecycle>`), the bounded choice's offered-this-turn lock, and the bounded choice's resolved-this-turn lock (`<bounded_choice>`). By default the runner resolves it as the **latest human/user message id** in `state.messages` — LangGraph's messages reducer assigns missing ids before a node sees state, so this is stable across every ReAct loop within one caller turn and independent of history length.
+
+- Hosts that **compact or replace messages** must provide `getCallerTurnId: (state) => string | null | undefined` returning a stable, non-compacted turn token.
+- When no identity exists (e.g. direct `runSteps` calls with message-less fixtures), the confirmation same-turn guard is **deliberately unavailable** (params-only behavior) — the runner never guesses. Bounded-choice **resolution**, by contrast, **fails closed** (`bounded_choice_turn_identity_unavailable`): recording a selection requires knowing which turn it happened on.
+- The hook (and the message scan) is only consulted when a confirm gate or bounded choice is actually configured — hosts using neither never pay for it.
+</caller_turn_identity>
+
+<bounded_choice>
+## Bounded-choice overlay (`BuildAgentStepToolOptions.boundedChoices`)
+
+An opt-in, **engine-owned, one-shot conversational choice** layered OVER whatever domain gate is pending. Use it when the conversation must fork on a meta-question ("do you want to continue with X, or stop?") without clearing or unlocking a suspended confirmation/OTP/match — the original gate stays authoritative underneath. The host prompt decides WHEN the configured choice applies; the runner owns its persisted pending/resolved state, locks, and repeat fallback.
+
+```ts
+// BuildAgentStepToolOptions.boundedChoices: BoundedChoiceRegistry
+type BoundedChoiceRegistry = Record<string, BoundedChoiceDef>;
+
+interface BoundedChoiceDef {
+  description: string;                     // model-facing: when/why to offer this choice
+  selections: readonly string[];           // the nonterminal resolutions the runner may record
+                                           // (e.g. ["continue"]). Terminal alternative = the
+                                           // built-in request_handoff action.
+  directInputActions?: readonly string[];  // domain actions allowed to CONSUME a pending choice
+                                           // because the caller supplied the exact detail the
+                                           // suspended question asked for. Everything else stays
+                                           // locked until resolve_bounded_choice runs.
+  onRepeatHandoff?: HandoffRequest;        // atomic handoff fallback when the model re-requests
+                                           // an already-used choice (requires the handoff opt).
+}
+```
+
+Providing a non-empty registry injects two library-owned **controls** into the tool schema (both exported as constants): **`request_bounded_choice`** (`REQUEST_BOUNDED_CHOICE_ACTION`) and **`resolve_bounded_choice`** (`RESOLVE_BOUNDED_CHOICE_ACTION`). Both names become reserved. The policy, stated once:
+
+- **One-shot.** Once a choice has been requested it can never be offered again (`bounded_choice_already_used`). With `onRepeatHandoff` configured, a repeat request atomically emits that handoff instead of refusing. A `resolved` choice persists in the slot until the surrounding flow ends or a terminal handoff clears it.
+- **Lockdown while pending.** Only the choice controls, `abort_pending_input`, `request_handoff`, and the configured `directInputActions` may run (`bounded_choice_pending_locked` otherwise). This is what prevents a meta-level "continue" from becoming consent for a suspended permanent mutation if the model emits the wrong action.
+- **Offered-this-turn lock.** The request control stamps `requested_on_caller_turn_id`; while that turn is current, `resolve_bounded_choice` and direct-input consumption are refused (`bounded_choice_same_turn_locked`) — the caller must actually hear the fork and reply before anything counts as their selection. Abort / handoff / repeat-request stay available.
+- **Resolved-this-turn lock.** A nonterminal resolution records `resolved_on_caller_turn_id`; domain work stays locked while that turn is current (`bounded_choice_resume_turn_locked`), so a second ReAct loop in the SAME turn cannot execute suspended work. Resolution **fails closed** without a stable turn identity (`bounded_choice_turn_identity_unavailable`) — see `<caller_turn_identity>`.
+- **Consume-on-acceptance.** A pending choice is consumed as `domain_input` only when a direct-input step is ACCEPTED (flow gate + prereqs + params all passed; a confirm propose counts). `invalid_params` / prereq denials do NOT burn the one-shot.
+- `resolve_bounded_choice` with nothing pending → `bounded_choice_not_pending`; an unknown selection is an `invalid_params` refusal.
+
+The registry is validated at construction: non-empty names/descriptions/selections, no duplicate selections, `directInputActions` must name real actions, `onRepeatHandoff` requires the `handoff` opt (see `<construction_time_checks>`).
+</bounded_choice>
 
 <pagination>
 ## Read pagination (`pageable`)
@@ -478,8 +577,8 @@ Opt-in machinery for a SPECIALIZED agent's off-topic plays (see `streaming-and-c
 
 Pass `handoff: HandoffSpec<T>` to `buildAgentStepTool`. The runner then:
 
-- Auto-injects the reserved **`request_handoff`** action into the tool schema (with the opt provided, declaring it in `config.actions` throws; WITHOUT the opt the name is free — the orchestrator/scaffold mechanism uses it for its own action). Params = `HandoffRequestSchema`: `{ reason: "off_topic" | "completed" | "abandon", context }` — `context` is the customer's request for `off_topic`, the LLM-composed closing line for `completed` / `abandon`.
-- Handles the action internally in `runSteps` as a **pure slot write** — validates params, patches the `handoff` slot into view + committed state, returns an ok result telling the model the turn ends here. No I/O in the runner.
+- Auto-injects the reserved **`request_handoff`** control into the tool schema (with the opt provided, declaring it in `config.actions` throws; WITHOUT the opt the name is free — the orchestrator/scaffold mechanism uses it for its own action). Params = `HandoffRequestSchema`: `{ reason: "off_topic" | "completed" | "abandon", context }` — `context` is the customer's request for `off_topic`, the LLM-composed closing line for `completed` / `abandon`.
+- Handles the action internally as an **atomic slot transition** — validates params, clears every transient runner slot (`awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`), writes the `handoff` slot into view + committed state, and returns an ok result telling the model the turn ends here. No I/O in the runner. An **executor** requests the same terminal transition (identical atomic cleanup) via the `request_handoff` effect — never by writing the slot through `stateUpdate`, which throws.
 - Enforces **exclusivity**: batched with anything else ⇒ the whole batch is refused with `error: "handoff_must_be_sole_step"`, nothing executes.
 - **No prereqs**, and allowed as the first step under input lockdown (pending confirmation / OTP / match) — "transfer me" must work before any data is loaded and cannot be blocked by a pending gate.
 
@@ -616,6 +715,8 @@ Library-injected fields on specific step kinds:
 - exhausted results carry `error: "confirmation_attempts_exhausted"`.
 - lockdown refusals carry `error: "pending_confirmation_locked" | "otp_pending_locked" | "match_pending_locked"` and `awaiting: { kind, for_action }`.
 - match-mismatch results gain `attempts_left` (decremented) or `verdict: "match_attempts_exhausted"` on the last try.
+- a matching confirm re-call on the proposal's own caller turn carries `error: "confirmation_same_turn_locked"` (no attempt spent; gate untouched).
+- bounded-choice refusals carry `error: "bounded_choice_pending_locked" | "bounded_choice_same_turn_locked" | "bounded_choice_resume_turn_locked" | "bounded_choice_already_used" | "bounded_choice_not_pending" | "bounded_choice_turn_identity_unavailable"` per the policy in `<bounded_choice>`.
 </result_envelope>
 
 <construction_time_checks>
@@ -623,35 +724,46 @@ The runner validates the config + registries at construction. These all throw at
 
 | Error message contains | Cause |
 |------------------------|-------|
-| `is a reserved action name` | You declared `abort_pending_input` in config.actions (or `request_handoff` while the `handoff` opt is provided) |
+| `requires \`stateSchema\`` | `stateSchema` not provided (the pre-2.0 `stateAnnotation` alias no longer exists) |
+| `is a reserved action name` | You declared `abort_pending_input` in config.actions (or `request_handoff` while the `handoff` opt is provided, or a bounded-choice control name while `boundedChoices` is provided) |
 | `expects a state selector at selectors["xxx"]` | `selectors` registry missing the action-name key for an action |
 | `expects an executor at executors["xxx"]` | `executors` registry missing the action-name key for an action |
 | `is missing a non-empty description` | An action lacks `description` |
 | `verifiers["xxx"] was not provided` | A prereq referenced by some action has no verifier |
 | `pageable action's paramsSchema must be a z.object` | A `pageable` action's `paramsSchema` isn't a `z.object` (the runner can't merge `page`/`pageSize` in) |
 | `at least one action must be defined` | Empty `config.actions` |
+| `declares startsMatchFor "X" but that consumer doesn't declare requiresMatch` | Capturer names a consumer that exists but lacks the `requiresMatch` hook (2.0.0: checked at construction, not mid-conversation) |
+| `declares issuesOtp for "X" but no such action exists` | `issuesOtp.consumer_action` names a non-existent action (2.0.0) |
+| `declares requiresMatch with capturer "X" but no such action exists` | `requiresMatch.capturer` names a non-existent action (2.0.0) |
+| `the state schema is missing channel(s)` | Channel-completeness check (2.0.0): a library slot this configuration writes has no channel in the host schema — spread `agentStepZodShape` / `agentStepStateSpec` |
+| `bounded choice "X" …` | Bounded-choice registry validation (2.0.0): empty name/description/selections, duplicate selections, unknown `directInputActions`, or `onRepeatHandoff` without the `handoff` opt |
 
 Runtime errors raised by the runner (not construction-time, but loud):
 
 | Error message contains | Cause |
 |------------------------|-------|
-| `returned flowData but no flow is active` | Executor wrote `flowData` without `startsFlow` and no flow is open |
-| `reported lifecycle.issuesOtp but no flow is active` | Issuer didn't pair with `startsFlow` |
-| `reported lifecycle.issuesOtp but config lacks issuesOtp opt` | Executor returned the lifecycle signal but mutation config didn't declare `issuesOtp` |
-| `declares startsMatchFor "X" but that consumer doesn't declare requiresMatch` | Capturer / consumer mismatch |
+| `wrote library-managed slot(s) … through stateUpdate` | Executor patched `awaitingInput` / `currentFlow` / `boundedChoice` / `pagedRead` / `handoff` / `errorCount` via `stateUpdate` — request the transition as a typed effect instead |
+| `requested merge_flow_data but no flow is active` | Executor emitted `merge_flow_data` without `startsFlow` and no flow is open |
+| `reported otp_issued but no flow is active` | Issuer didn't pair with `startsFlow` |
+| `reported otp_issued but config lacks issuesOtp opt` | Executor returned the effect but the action's config didn't declare `issuesOtp` |
 | `otp_blocked_match_pending` (step error) | An `issuesOtp` step ran while a double-entry match gate was still pending — consume the match before issuing the OTP (see `<otp_lifecycle>`) |
 
-The runner does NOT validate at runtime that you declared `awaitingInput` / `currentFlow` / `pagedRead` / `handoff` / `errorCount` in state when using the lifecycle / pagination / handoff / auto-handoff opts. If you forget, the runner will write a patch to a non-existent slot and the library-managed gates will silently misbehave. Always add all five slots — spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings them in together with their reducers.
+Slot declaration is enforced at construction since 2.0.0 (the channel-completeness row above) — a state schema missing a required library slot fails at startup instead of silently dropping writes. Spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings all six slots in together with their reducers.
 </construction_time_checks>
 
 <key_files_to_inspect>
 For ground truth, read these files in the project (don't paraphrase — they ARE the contract):
 
-- `src/agent-step/types.ts` — every type listed above
-- `src/agent-step/runner.ts` — the runtime; especially `validateConfig`, `runSteps`, the selector→executor dispatch (`selectors[action](view)` → `executors[action]`), `buildMergerFromAnnotation`, lockdown handling, lifecycle ordering
+- `src/agent-step/index.ts` — the public surface (only what's re-exported here is part of the API; the module layout below is internal)
+- `src/agent-step/types.ts` — the authoring contracts: `ExecutorResult`, `ExecutorEffect`, `Executor`, registries, `ActionDef`, `ControllerHooks`, `Verifier`
+- `src/agent-step/state.ts` — the library-managed slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) + the spreadable fragments (`agentStepZodShape`, `agentStepStateSpec`, `agentStepInternalSlotMask`)
+- `src/agent-step/runner.ts` — the thin public entry points (`buildAgentStepTool`, `runSteps`); the machinery lives in the phase modules:
+  - `compile/` — `validate.ts` (every construction-time check), `plan.ts` (`BuildAgentStepToolOptions` + the compiled plan), `schema.ts` / `describe.ts` (the model-facing schema + description)
+  - `run/` — `admission.ts` (the fixed-order whole-batch preconditions), `planning.ts` (confirm-mode freeze), `execution.ts` (per-step loop, effects ordering, handoff monotonicity), `finalize.ts` (result body + error-counter policy), `batch-state.ts` (the single write path into view/committed)
+  - `interaction/` — one policy module per gate kind: `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (each states its lockdown, attempts, freshness, and clearing rules in one place)
+  - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`) in an ordered `registry.ts`
+  - `handoff/` — `contract.ts` (action + signals + `HandoffSpec`), `node.ts` (`createHandoffNode` — the frozen channel contract), `delegate-client.ts` (SSE/Platform-API transport)
 - `src/agent-step/paginate.ts` — the read-pagination primitives + the `pageable` orchestration the runner uses (self / delegate, the cache, the envelope)
-- `src/agent-step/handoff.ts` — the handoff spec/types, `createHandoffNode` (terminate / delegate resolution, custom events, the kwargs contract, `resolveClosingMessage`), `handoffRequested`, `HANDBACK_SIGNALS`
 - `src/agent-step/messages.ts` — the runner's overridable system `summary` strings: `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages`
-- `src/agent-step/index.ts` — what's exported (only what's here is part of the API)
-- `src/agent-step/runner.test.ts` + `src/agent-step/paginate.test.ts` + `src/agent-step/handoff.test.ts` — worked examples covering every runner branch, the pagination primitives, and the handoff machinery; all pass on `npm test`
+- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the handoff machinery, the bounded-choice policy, and the hardening guards; all pass on `npm test`
 </key_files_to_inspect>

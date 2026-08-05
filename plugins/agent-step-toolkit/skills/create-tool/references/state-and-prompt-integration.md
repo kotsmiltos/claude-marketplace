@@ -57,9 +57,9 @@ sessionUserKey: withLangGraph(z.string().nullable(), {
 
 And remember: a default — even one reading an env var — does **not** fill state. The **caller must pass these fields in the invoke input on every run**; the launcher (CLI, server handler, scheduler) owns reading the environment/request and threading them in. A `sessionReady` verifier then just checks presence. If the field is caller-supplied and you want it coerced/validated at the invoke boundary (e.g. an unquoted JSON number → string), use `z.coerce.string().nullable()` and wire `AgentInputSchema` (below) into a hand-built `StateGraph`.
 
-## Library-managed slots (awaitingInput + currentFlow + pagedRead + handoff + errorCount)
+## Library-managed slots (awaitingInput + currentFlow + boundedChoice + pagedRead + handoff + errorCount)
 
-`awaitingInput` / `currentFlow` are required whenever the new tool declares any lifecycle opt on a mutation (`requiresConfirmation`, `requiresOtp`, `issuesOtp`, `requiresMatch`, `startsMatchFor`, `startsFlow`, `endsFlow`, `requiresFlow`); `pagedRead` whenever an action declares `pageable`; `handoff` / `errorCount` for the library handoff + auto-handoff guard. All arrive by **spreading the library's exported `agentStepZodShape` fragment** — never hand-declare them (the library's `state.ts` doc-comment forbids it; hand-rolled copies drift). Each slot in the fragment is already wrapped with `withLangGraph` carrying the runner's expected reducer/default:
+`awaitingInput` / `currentFlow` are required whenever the new tool declares any lifecycle opt on a mutation (`requiresConfirmation`, `requiresOtp`, `issuesOtp`, `requiresMatch`, `startsMatchFor`, `startsFlow`, `endsFlow`, `requiresFlow`); `boundedChoice` whenever `boundedChoices` is configured; `pagedRead` whenever an action declares `pageable`; `handoff` / `errorCount` for the library handoff + auto-handoff guard. (Since library 2.0.0 `buildAgentStepTool` enforces this at construction: a state schema missing a channel for any slot the configuration writes throws.) All arrive by **spreading the library's exported `agentStepZodShape` fragment** — never hand-declare them (the library's `state.ts` doc-comment forbids it; hand-rolled copies drift). Each slot in the fragment is already wrapped with `withLangGraph` carrying the runner's expected reducer/default:
 
 ```ts
 import { MessagesZodState, type ExtractStateType } from "@langchain/langgraph";
@@ -67,7 +67,7 @@ import { withLangGraph } from "@langchain/langgraph/zod";
 import { agentStepZodShape, agentStepInternalSlotMask } from "./agent-step/index.js";
 
 export const AgentStateSchema = MessagesZodState.extend({
-  ...agentStepZodShape,    // awaitingInput + currentFlow + pagedRead + handoff + errorCount, correct reducers
+  ...agentStepZodShape,    // awaitingInput + currentFlow + boundedChoice + pagedRead + handoff + errorCount, correct reducers
   // … per-tool slots (withLangGraph) …
 });
 

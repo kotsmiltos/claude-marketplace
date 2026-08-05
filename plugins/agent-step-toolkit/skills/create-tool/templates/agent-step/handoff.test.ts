@@ -6,14 +6,23 @@ import type { AIMessage } from "@langchain/core/messages";
 
 import { defineConfig } from "./define-config.js";
 import { buildAgentStepTool, runSteps, type BuildAgentStepToolOptions } from "./runner.js";
-import { createHandoffNode, HANDOFF_ACTION, handoffRequested, type HandoffSpec } from "./handoff.js";
+import { HANDOFF_ACTION, handoffRequested, type HandoffSpec } from "./handoff/contract.js";
+import { createHandoffNode } from "./handoff/node.js";
 import type { ExecutorRegistry, VerifierRegistry } from "./types.js";
-import type { AwaitingInput, CurrentFlow, HandoffRequest } from "./state.js";
+import type {
+  AwaitingInput,
+  BoundedChoice,
+  CurrentFlow,
+  HandoffRequest,
+} from "./state.js";
+import type { PagedCache } from "./paginate.js";
 
 interface S {
   thing?: string | null;
   awaitingInput?: AwaitingInput | null;
   currentFlow?: CurrentFlow | null;
+  boundedChoice?: BoundedChoice | null;
+  pagedRead?: PagedCache<unknown> | null;
   handoff?: HandoffRequest | null;
 }
 
@@ -26,7 +35,10 @@ const testStateAnnotation = Annotation.Root({
   thing: Annotation<string | null>(replaceNull<string>()),
   awaitingInput: Annotation<AwaitingInput | null>(replaceNull<AwaitingInput>()),
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
+  boundedChoice: Annotation<BoundedChoice | null>(replaceNull<BoundedChoice>()),
+  pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
+  errorCount: Annotation<number | null>(replaceNull<number>()),
 });
 
 type ActionName = "read_thing" | "change_thing";
@@ -55,7 +67,7 @@ const selectors = {
   change_thing: (s: S) => s,
 };
 
-function makeOpts(withHandoff: boolean): {
+function makeOpts(withHandoff: boolean, withBoundedChoices = false): {
   opts: BuildAgentStepToolOptions<S, string, string, typeof selectors>;
   calls: { read: number; change: number };
 } {
@@ -78,11 +90,21 @@ function makeOpts(withHandoff: boolean): {
   return {
     opts: {
       config: makeConfig(),
-      stateAnnotation: testStateAnnotation,
+      stateSchema: testStateAnnotation,
       selectors,
       executors,
       verifiers,
       ...(withHandoff ? { handoff } : {}),
+      ...(withBoundedChoices
+        ? {
+            boundedChoices: {
+              unsupported_information: {
+                description: "unsupported factual clarification",
+                selections: ["continue"],
+              },
+            },
+          }
+        : {}),
     },
     calls,
   };
@@ -91,6 +113,10 @@ function makeOpts(withHandoff: boolean): {
 const HANDOFF_STEP = {
   action: HANDOFF_ACTION,
   params: { reason: "off_topic", context: "wants a transfer" },
+};
+const ABANDON_STEP = {
+  action: HANDOFF_ACTION,
+  params: { reason: "abandon", context: "status_change:human_requested" },
 };
 
 // ─── runner: built-in request_handoff action ──────────────────────────────── //
@@ -129,7 +155,91 @@ test("request_handoff with an invalid reason fails param validation", async () =
   assert.equal(committed.handoff, undefined);
 });
 
-test("request_handoff is allowed while a confirmation is pending (lockdown bypass)", async () => {
+test("request_handoff atomically abandons pending interaction, flow, and page state", async () => {
+  const { opts } = makeOpts(true, true);
+  const initial: S = {
+    awaitingInput: {
+      kind: "confirmation",
+      for_action: "change_thing",
+      params: { v: "y" },
+      attempts_left: 2,
+      max_attempts: 3,
+      flow_ref: "change_flow",
+    },
+    currentFlow: { name: "change_flow", data: { proposed: "y" } },
+    boundedChoice: { name: "unsupported_information", status: "pending" },
+    pagedRead: {
+      key: "read_thing",
+      signature: "{}",
+      rows: ["stale"],
+      extras: { summary: "old page" },
+    },
+  };
+  const { body, committed } = await runSteps(opts, [HANDOFF_STEP], initial);
+  assert.equal(body.failed_at, undefined);
+  assert.equal(body.results[0].ok, true);
+  assert.deepEqual(committed.handoff, { reason: "off_topic", context: "wants a transfer" });
+  assert.equal(committed.awaitingInput, null);
+  assert.equal(committed.currentFlow, null);
+  assert.equal(committed.boundedChoice, null);
+  assert.equal(committed.pagedRead, null);
+});
+
+test("feature-disabled handoff leaves an unrelated boundedChoice-shaped host slot untouched", async () => {
+  const { opts } = makeOpts(true);
+  const initial: S = {
+    boundedChoice: { name: "host_domain_choice", status: "pending" },
+  };
+  const { body, committed } = await runSteps(opts, [HANDOFF_STEP], initial);
+  assert.equal(body.results[0].ok, true);
+  assert.equal(committed.boundedChoice, undefined);
+});
+
+test("feature-disabled domain execution neither reads nor rewrites a boundedChoice-shaped host slot", async () => {
+  const { opts, calls } = makeOpts(true);
+  // getCallerTurnId MAY be consulted here (the config carries a confirm-gated
+  // action, whose same-turn protection keys on the turn identity) — but the
+  // bounded-choice machinery itself must stay fully inert: the pending-shaped
+  // host slot is neither read (no lockdown fires) nor rewritten.
+  const withoutFeature = {
+    ...opts,
+    getCallerTurnId: () => "turn-1",
+  };
+  const initial: S = {
+    boundedChoice: { name: "host_domain_choice", status: "pending" },
+  };
+  const { body, committed } = await runSteps(
+    withoutFeature,
+    [{ action: "read_thing", params: {} }],
+    initial,
+  );
+  assert.equal(body.results[0].ok, true);
+  assert.equal(calls.read, 1);
+  assert.equal(committed.boundedChoice, undefined);
+});
+
+test("caller-turn hook is never consulted when no feature needs it", async () => {
+  const { opts } = makeOpts(true);
+  // Strip the confirm gate so neither bounded choices nor confirmation exist.
+  // (Shallow clone — the config holds zod schemas, which structuredClone
+  // cannot copy.)
+  const { controller: _dropped, ...bareChangeThing } = opts.config.actions.change_thing;
+  const cfg = {
+    ...opts.config,
+    actions: { ...opts.config.actions, change_thing: bareChangeThing },
+  } as typeof opts.config;
+  const tripwired = {
+    ...opts,
+    config: cfg,
+    getCallerTurnId: () => {
+      throw new Error("must not be consulted when no feature needs turn identity");
+    },
+  };
+  const { body } = await runSteps(tripwired, [{ action: "read_thing", params: {} }], {} as S);
+  assert.equal(body.results[0].ok, true);
+});
+
+test("request_handoff from a pending confirmation resolves exactly once", async () => {
   const { opts } = makeOpts(true);
   const initial: S = {
     awaitingInput: {
@@ -139,10 +249,31 @@ test("request_handoff is allowed while a confirmation is pending (lockdown bypas
       attempts_left: 2,
       max_attempts: 3,
     },
+    currentFlow: { name: "change_flow", data: {} },
+    pagedRead: { key: "read_thing", signature: "{}", rows: [], extras: {} },
   };
-  const { body, committed } = await runSteps(opts, [HANDOFF_STEP], initial);
-  assert.equal(body.results[0].ok, true);
-  assert.deepEqual(committed.handoff, { reason: "off_topic", context: "wants a transfer" });
+  const { committed } = await runSteps(opts, [ABANDON_STEP], initial);
+  const pending = { ...initial, ...committed };
+  const node = createHandoffNode<S>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+  });
+  const events: unknown[] = [];
+
+  const first = await node(pending, nodeConfig(events));
+  const messages = first.messages as AIMessage[];
+  assert.equal(first.handoff, null);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].additional_kwargs.is_handoff, true);
+  assert.equal(messages[0].additional_kwargs.handoff_type, "abandon");
+  assert.deepEqual(
+    (events as { type: string }[]).map((event) => event.type),
+    ["handoff", "handoff_complete"],
+  );
+
+  const second = await node({ ...pending, handoff: first.handoff as null }, nodeConfig(events));
+  assert.deepEqual(second, {});
+  assert.equal(events.length, 2, "a consumed handoff emits no second control-plane signal");
 });
 
 test("request_handoff without the handoff opt is an unknown action", async () => {
@@ -218,11 +349,15 @@ test("HandoffSpec.actionDescription overrides the request_handoff schema variant
   // A host whose resolveClosingMessage overrides every closing must be able
   // to describe `context` truthfully — the built-in text promises the model
   // its context is what gets spoken.
+  // The tool is bound with the JSON-schema rendering — read the variant
+  // descriptions from the wire shape (what the provider actually receives).
   const variantDescriptions = (tool: { schema: unknown }): (string | undefined)[] => {
     const s = tool.schema as {
-      shape: { steps: { element: { options: Array<{ description?: string }> } } };
+      properties: { steps: { items: { anyOf?: Array<{ description?: string }> } } };
     };
-    return s.shape.steps.element.options.map((o) => o.description);
+    return (s.properties.steps.items.anyOf ?? [s.properties.steps.items]).map(
+      (o) => (o as { description?: string }).description,
+    );
   };
 
   const { opts: defaults } = makeOpts(true);

@@ -11,6 +11,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.19.0] — 2026-08-05
+
+Ships **agent-step library 2.0.0** — a major library release; `/pull-library` is **required** for
+downstream projects and applies 7 transforms (see
+[migrations/1.8.1-to-2.0.0.md](migrations/1.8.1-to-2.0.0.md)). The runner is restructured into
+phase modules, the executor contract moves to typed effects, and the library gains the
+bounded-choice overlay plus turn-provenance hardening. Model-facing tool surface and runtime
+semantics for existing flows are unchanged (golden-verified upstream); suite grows 105 → 144.
+
+### Added
+- Library **2.0.0**: the **bounded-choice overlay** (`boundedChoices` option injecting the
+  `request_bounded_choice` / `resolve_bounded_choice` controls, the `boundedChoice` state slot,
+  one-shot + lockdown + offered/resolved same-turn locks, `onRepeatHandoff` fallback) and the
+  **`getCallerTurnId`** option (stable caller-turn identity behind the turn-keyed guards). New
+  `ExecutorEffect` export. Full details: [CHANGELOG.md](CHANGELOG.md).
+- `agent-step-api.md`: new `<bounded_choice>` and `<caller_turn_identity>` sections; the v2
+  admission → planning → execution pipeline documented step by step; error tables extended with
+  the same-turn and bounded-choice refusal codes, verified against the source throw strings.
+- Test-harness template: `runConfirmed` / `answeredTurn` / `callerTurn` helpers — confirm-gated
+  propose → execute tests must now cross two caller turns (the 2.0.0 same-turn lock);
+  `test-agent-step` documents the pattern.
+
+### Changed
+- Library **2.0.0 breaking** (tool-authoring contract; the migration's transforms cover all of
+  these): `ExecutorResult.lifecycle`/`flowData` → typed `effects[]`; `stateUpdate` is domain-only
+  (library-slot writes throw; terminal handoffs via the `request_handoff` effect);
+  `stateAnnotation` option removed (use `stateSchema`); `ConfirmationOpts.ttlMs` and `OtpOpts`
+  deleted; cross-action config pairs + state-schema channel completeness validated at
+  construction; confirmation same-turn lock (`confirmation_same_turn_locked`).
+- The library is now a **tree** (`compile/`, `run/`, `interaction/`, `controls/`, `handoff/` —
+  flat `handoff.ts` split into `handoff/{contract,node,delegate-client}.ts`); the bootstrap and
+  pull-library workflows copy it recursively. Hosts import only from `index.js`.
+- References/templates reconciled to the effects vocabulary end to end: `executor-patterns.md`
+  recipes, `config.ts.template` / `plan.md.template` comments, `project-bootstrap-structure.md`
+  library inventory, `state-and-prompt-integration.md` + SKILL slot lists (now six slots incl.
+  `boundedChoice`), project `package.json` test scripts gain `rm -rf dist` (stale-dist guard).
+
+### Fixed
+- `pull-library` workflow: the vendored-library replacement enumerated the pre-2.0 flat file list —
+  on 2.0.0 it would have produced a broken copy (missing the five module directories). Now a
+  recursive wipe-and-copy with a sanity check.
+- Stale claims: `create-tool` workflow test count 105 → 144; the create-tool acceptance check now
+  runs the whole `dist/agent-step/*.test.js` suite instead of `runner.test.js` only.
+
 ## [0.18.1] — 2026-07-23
 
 Ships **agent-step library 1.8.1** (`/pull-library` recommended for downstream projects — note the

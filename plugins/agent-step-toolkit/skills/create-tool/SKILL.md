@@ -16,7 +16,7 @@ This skill builds a new domain tool that plugs into the **existing** `src/agent-
 
 **3. Mutations carry their own pre-check and post-read.** The library does not wrap reads around mutations. A mutation executor (e.g. `change_status`) reads card/account state before writing, decides whether to refuse based on that pre-state, performs the write, then re-reads after the write — and returns `preState` and `postState` fields in its result body. The library enforces only the batch-shape opts (`soleStep` / `soleOnExecute`) and the lifecycle gates (`requiresConfirmation`, `requiresOtp`, `requiresMatch`, `requiresFlow`).
 
-**4. Library-managed state slots are off-limits to executors.** `awaitingInput`, `currentFlow`, `pagedRead`, `handoff`, and `errorCount` are written by the runner in response to per-action opts (`requiresConfirmation` / `issuesOtp` / `requiresOtp` / `startsMatchFor` / `requiresMatch` / `startsFlow` / `endsFlow` / `requiresFlow`), to the executor's return-value hooks (`flowData`, `lifecycle.issuesOtp`, `lifecycle.clearAwaitingInput`, `lifecycle.abortFlow`), and — for `errorCount` — to the auto-handoff guard (`backendFailureCodes` / `errorHandoffThreshold` / `onErrorThreshold`; see `agent-step-api.md` `<auto_handoff>`). Executors must never put these slots in `stateUpdate`.
+**4. Library-managed state slots are off-limits to executors.** `awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `handoff`, and `errorCount` are written by the runner in response to per-action opts (`requiresConfirmation` / `issuesOtp` / `requiresOtp` / `startsMatchFor` / `requiresMatch` / `startsFlow` / `endsFlow` / `requiresFlow`), to the executor's typed `effects` (`request_handoff`, `merge_flow_data`, `otp_issued`, `clear_awaiting_input`, `abort_flow`), and — for `errorCount` — to the auto-handoff guard (`backendFailureCodes` / `errorHandoffThreshold` / `onErrorThreshold`; see `agent-step-api.md` `<auto_handoff>`). Executors must never put these slots in `stateUpdate` — since library 2.0.0 the runner throws if they do.
 
 **5. Plan before writing.** Always produce a written plan first: action list, params schemas, prereqs per action, mutation opts (confirmation / OTP / match / flow), new state slots needed, new prompt fragments needed. Get user confirmation. THEN write files. Never start with file writes — the plan is the cheap review surface.
 
@@ -151,8 +151,9 @@ All in `templates/`:
 **Shared test harness** (verbatim copy by bootstrap; no substitution; generic + tool-agnostic):
 - `project/test-harness-sandbox.ts.template`, `project/test-harness-prompt-input.ts.template`, `project/test-harness-index.ts.template`
 
-**Agent-step library** (verbatim copy by bootstrap; no substitution):
-- `agent-step/types.ts`, `agent-step/state.ts`, `agent-step/runner.ts`, `agent-step/runner.test.ts`, `agent-step/zod-state.test.ts`, `agent-step/paginate.ts`, `agent-step/paginate.test.ts`, `agent-step/handoff.ts`, `agent-step/handoff.test.ts`, `agent-step/messages.ts`, `agent-step/define-config.ts`, `agent-step/index.ts`
+**Agent-step library** (verbatim copy by bootstrap — the ENTIRE `agent-step/` tree, recursively; no substitution):
+- Top level: `agent-step/types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `index.ts` + the test suites (`runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `zod-state.test.ts`)
+- Phase modules (internal layout; hosts import only from `index.ts`): `agent-step/compile/`, `agent-step/run/`, `agent-step/interaction/`, `agent-step/controls/`, `agent-step/handoff/` — see `references/project-bootstrap-structure.md` for the per-file inventory
 - `agent-step/VERSION` — the library version marker. Bumped by `/bump-version` when the embedded copy is refreshed; read by `/pull-library` to upgrade a downstream project's vendored copy. Travels into every bootstrapped project at `src/agent-step/VERSION`.
 
 **Tool scaffold** (used by create-tool.md):
@@ -180,7 +181,7 @@ All in `templates/`:
 - [ ] All files in the plan exist at the target directory (config, library, scaffold, CLI, shared test harness)
 - [ ] `npm install` completes
 - [ ] `npx tsc --noEmit` passes with zero errors (empty tools array; shared test harness typechecks against zero tools)
-- [ ] All runner unit tests pass (`npx tsc && node --test dist/agent-step/runner.test.js`)
+- [ ] All library unit tests pass (`npx tsc && node --test dist/agent-step/*.test.js`)
 - [ ] `npm run dev` boots cleanly (and is killed after confirmation)
 - [ ] User is reminded to `cp .env.example .env`, of the `test` / `test:sandbox` / `test:prompt` scripts, and to run `/create-tool` next
 
