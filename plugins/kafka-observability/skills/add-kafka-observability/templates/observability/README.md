@@ -8,9 +8,9 @@ Do not hand-edit library files; project-specific behavior belongs at the project
 ## What it captures
 
 Everything the application would send to LangSmith. `KafkaRunTracer` extends the same
-`BaseTracer` base class as LangSmith's own tracer and is attached globally via
-`registerConfigureHook` — every run (graph invocation, LangGraph node, LLM call with
-full rendered messages + outputs + token usage, tool run) produces:
+`BaseTracer` base class as LangSmith's own tracer and is attached globally through two
+redundant paths (see **Attachment** below) — every run (graph invocation, LangGraph
+node, LLM call with full rendered messages + outputs + token usage, tool run) produces:
 
 - one `direction: "request"` event at run start (inputs, serialized constructor info),
 - one `direction: "response"` event at run end (inputs + outputs/error, status, latency,
@@ -58,6 +58,7 @@ KafkaEventProducer (kafka-producer.ts)
 | `KAFKA_QUEUE_MAXSIZE` | In-memory queue capacity (default: 1000) |
 | `KAFKA_PRODUCER_RETRIES` | Producer retry count (default: 5) |
 | `KAFKA_DELIVERY_TIMEOUT_MS` | Per-message delivery timeout in ms (default: 30000) |
+| `KAFKA_ATTACH_MODE` | Tracer attachment path: `hook` \| `patch` \| `both` (default: `both` — see **Attachment**). Invalid values throw at startup. |
 
 ## Event schema
 
@@ -83,6 +84,40 @@ KafkaEventProducer (kafka-producer.ts)
   }
 }
 ```
+
+## Attachment (and why there are two paths)
+
+`@langchain/core`'s `registerConfigureHook` — the mechanism offered for globally
+attaching tracers — stores its registry **inside AsyncLocalStorage** (`enterWith` at
+registration; `getStore()` at configure time). A hook registered at graph-module load is
+therefore visible only to runs whose async context descends from that `startup()` call.
+Platform harnesses that create their run-dispatch channel *before* importing the graph
+(observed on LangGraph Platform under Azure App Service — INC-2026-0045) sever that
+ancestry: the hook registers cleanly at boot and then never fires, silently.
+
+So the library attaches through two redundant, name-deduped paths (`KAFKA_ATTACH_MODE`):
+
+1. **`hook`** — `registerConfigureHook`. The upstream mechanism; works whenever run
+   contexts descend from startup().
+2. **`patch`** — the *configure slot*: a wrap of this package's own
+   `CallbackManager._configureSync`, the exact attachment point LangSmith's tracer
+   occupies. Independent of async ancestry. Only this copy of `@langchain/core` is
+   touched, at runtime; nothing on disk is patched.
+3. **`both`** (default) — register the hook AND install the slot. Dedupe by handler name
+   makes them cooperative; the slot then doubles as a failure detector for the hook.
+
+Diagnostics (all one-line, greppable):
+
+- At startup: `[observability] attachment diagnostics: mode=… pid=… core=<resolved
+  @langchain/core URL> als=present|MISSING hooks_visible_at_boot=N node_options=…
+  exec_argv=…` — answers which core copy registered, whether the shared ALS exists,
+  whether the registration is boot-visible, and whether the runtime injected
+  loader/agent flags.
+- First time the slot must attach although the hook was registered:
+  `[observability] ALS context break detected: … (store-undefined | store clobbered |
+  foreign core copy …)` — events still flow (the slot attached), but the runtime severs
+  async-context ancestry; the classification is the evidence to escalate with.
+- A second `startup()` from a different core copy logs a duplicate-library warning.
 
 ## Reliability
 

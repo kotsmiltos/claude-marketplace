@@ -44,7 +44,7 @@ Present:
 # Kafka observability — <install|upgrade to> <version>: <repo name>
 
 ## Vendored (replaced wholesale, safe)
-- src/observability/  (20 files: library + tests + README + VERSION)
+- src/observability/  (22 files: library + tests + README + VERSION)
 
 ## Project edits (need your OK)
 - package.json         + "@confluentinc/kafka-javascript", + "test:observability" script
@@ -81,7 +81,8 @@ them to the user before overwriting).
    ```
 
    Do NOT wrap the graph export and do NOT add per-node/tool instrumentation — the global
-   hook covers every run.
+   attachment (configure hook + configure-slot wrap, both installed by `startup()`)
+   covers every run.
 3. If the repo has a CLI with a quit path, add a best-effort
    `await shutdown()` there (import from the same module). Do NOT install process signal
    handlers — an added SIGTERM handler would suppress the default terminate in processes
@@ -105,6 +106,8 @@ them to the user before overwriting).
    # KAFKA_SASL_MECHANISM=PLAIN
    # KAFKA_SASL_USERNAME=
    # KAFKA_SASL_PASSWORD=
+   # Tracer attachment path: hook | patch | both (default both; see src/observability/README.md "Attachment")
+   # KAFKA_ATTACH_MODE=both
    ```
 
 2. Each approved `configuration/**/settings.<ENV>.json` — add the same keys with that

@@ -10,7 +10,13 @@ import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { startup, shutdown, __resetForTests } from "./index.js";
 
-const ENV_KEYS = ["KAFKA_ENABLED", "APPLICATION_NAME", "KAFKA_BOOTSTRAP_SERVERS", "KAFKA_OBSERVABILITY_TOPIC"];
+const ENV_KEYS = [
+  "KAFKA_ENABLED",
+  "APPLICATION_NAME",
+  "KAFKA_BOOTSTRAP_SERVERS",
+  "KAFKA_OBSERVABILITY_TOPIC",
+  "KAFKA_ATTACH_MODE",
+];
 
 function clearKafkaEnv(): void {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -90,5 +96,31 @@ describe("startup() — enabled with complete config", () => {
 
     startup();
     assert.doesNotThrow(() => startup());
+  });
+});
+
+describe("startup() — KAFKA_ATTACH_MODE", () => {
+  function setCompleteEnv(): void {
+    clearKafkaEnv();
+    process.env.KAFKA_ENABLED = "true";
+    process.env.APPLICATION_NAME = "test";
+    process.env.KAFKA_BOOTSTRAP_SERVERS = "localhost:19999";
+    process.env.KAFKA_OBSERVABILITY_TOPIC = "observability-events";
+  }
+
+  test("invalid value fails fast (no-config-fallback rule)", () => {
+    setCompleteEnv();
+    process.env.KAFKA_ATTACH_MODE = "global";
+    assert.throws(() => startup(), /KAFKA_ATTACH_MODE/);
+  });
+
+  test('each supported mode ("hook" | "patch" | "both") starts cleanly', async () => {
+    for (const mode of ["hook", "patch", "both"]) {
+      setCompleteEnv();
+      process.env.KAFKA_ATTACH_MODE = mode;
+      assert.doesNotThrow(() => startup(), `mode=${mode}`);
+      await shutdown();
+      __resetForTests();
+    }
   });
 });

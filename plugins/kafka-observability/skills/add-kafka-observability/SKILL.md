@@ -1,6 +1,6 @@
 ---
 name: add-kafka-observability
-description: Install or upgrade LangSmith-parity Kafka observability in a LangGraph.js / LangChain.js agent repo. Vendors the src/observability/ library (a BaseTracer subclass publishing EVERY traced run — graph, nodes, LLM calls with full prompts/outputs/usage, tool runs — as start/end events to a Kafka topic), adds the @confluentinc/kafka-javascript dependency, wires ONE startup() call at the graph entrypoint via a global callback hook, updates .env.example and deployment settings (Key Vault refs for secrets), adds a test script, and verifies with typecheck + unit tests. Use when a repo must stream its LangSmith telemetry to Kafka, replace/unplug LangSmith, add Kafka observability, or upgrade an already-vendored src/observability/ library.
+description: Install or upgrade LangSmith-parity Kafka observability in a LangGraph.js / LangChain.js agent repo. Vendors the src/observability/ library (a BaseTracer subclass publishing EVERY traced run — graph, nodes, LLM calls with full prompts/outputs/usage, tool runs — as start/end events to a Kafka topic), adds the @confluentinc/kafka-javascript dependency, wires ONE startup() call at the graph entrypoint (dual global attachment: configure hook + configure-slot wrap, robust to platform harnesses that sever async-context ancestry), updates .env.example and deployment settings (Key Vault refs for secrets), adds a test script, and verifies with typecheck + unit tests. Use when a repo must stream its LangSmith telemetry to Kafka, replace/unplug LangSmith, add Kafka observability, or upgrade an already-vendored src/observability/ library.
 ---
 
 <objective>
@@ -19,8 +19,11 @@ from the plugin's `templates/observability/`; project-specific behavior lives at
 project level (wiring, env values, deployment settings). Fixing a project problem by
 patching the vendored library is always wrong.
 
-**2. One wiring point.** The tracer attaches through `registerConfigureHook` — the same
-global mechanism LangSmith's own tracer uses. The ONLY project edit that touches code is a
+**2. One wiring point.** The tracer attaches through two redundant, name-deduped global
+paths — `registerConfigureHook` plus a configure-slot wrap of the repo's own
+`CallbackManager._configureSync` (the attachment point LangSmith's tracer occupies; the
+hook alone is AsyncLocalStorage-scoped and platform harnesses can sever its ancestry —
+see the library README "Attachment"). The ONLY project edit that touches code is a
 single `startup()` call at the graph entry module. Never instrument nodes, tools, or the
 shared agent-step library, and never wrap the compiled graph (`withConfig`) — the export
 shape consumed by `langgraph.json` must stay a `CompiledStateGraph`.
@@ -92,5 +95,6 @@ vendor → wire → configure → verify → report.
   `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`,
   `KAFKA_SASL_PASSWORD`, `KAFKA_CLIENT_ID`, `KAFKA_PRODUCER_LINGER_MS`,
   `KAFKA_PRODUCER_BATCH_SIZE`, `KAFKA_QUEUE_MAXSIZE`, `KAFKA_PRODUCER_RETRIES`,
-  `KAFKA_DELIVERY_TIMEOUT_MS`.
+  `KAFKA_DELIVERY_TIMEOUT_MS`, `KAFKA_ATTACH_MODE` (`hook`|`patch`|`both`,
+  default `both`).
 </quick_reference>

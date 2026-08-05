@@ -20,8 +20,8 @@ const NO_THREAD = "no-thread"; // envelope thread_id is required non-empty; dire
 
 export interface KafkaRunTracerFields extends BaseCallbackHandlerInput {
   /** TEST SEAM: inject an emitter directly. Production instances (constructed
-   *  by the global callback hook with no args) resolve the shared emitter from
-   *  registry.ts at emit time. */
+   *  with no args by the configure hook or the configure-slot wrap) resolve
+   *  the shared emitter from registry.ts at emit time. */
   emitter?: RunEventEmitter;
 }
 

@@ -34,6 +34,23 @@ export function isKafkaEnabled(): boolean {
   return boolEnv("KAFKA_ENABLED");
 }
 
+export type KafkaAttachMode = "hook" | "patch" | "both";
+
+/** How the tracer attaches to runs (`KAFKA_ATTACH_MODE`, default "both"):
+ *  - "hook"  — registerConfigureHook only. The upstream mechanism; its registry
+ *    lives in AsyncLocalStorage, so it is invisible to run contexts that don't
+ *    descend from startup() (the INC-2026-0045 failure).
+ *  - "patch" — the configure-slot wrap only (see configure-slot.ts).
+ *  - "both"  — register the hook AND install the slot (deduped by handler
+ *    name; the slot then doubles as the hook-failure detector). Default.
+ *  Invalid values throw at startup — no-config-fallback rule. */
+export function readAttachMode(): KafkaAttachMode {
+  const raw = process.env.KAFKA_ATTACH_MODE;
+  if (raw === undefined || raw.length === 0) return "both";
+  if (raw === "hook" || raw === "patch" || raw === "both") return raw;
+  throw new Error(`KAFKA_ATTACH_MODE must be one of "hook" | "patch" | "both". Got: "${raw}"`);
+}
+
 export function readKafkaSettings(): KafkaSettings {
   return {
     applicationName: requiredEnv("APPLICATION_NAME"),

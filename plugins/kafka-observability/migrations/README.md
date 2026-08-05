@@ -20,3 +20,4 @@ the current library directly.
 | Step | Summary |
 |------|---------|
 | `1.0.0-to-1.1.0.md` | Connection diagnostics (connected log, never-connected watchdog, startup reword). Pure file refresh — no project-level transforms. |
+| `1.1.0-to-1.2.0.md` | Attachment robustness (INC-2026-0045): configure-slot wrap alongside the ALS-scoped configure hook, `KAFKA_ATTACH_MODE`, attachment/break diagnostics. One transform: `.env.example` gains the commented `KAFKA_ATTACH_MODE` line. |

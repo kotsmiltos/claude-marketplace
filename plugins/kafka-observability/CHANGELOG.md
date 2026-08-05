@@ -6,6 +6,51 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.2.0 (2026-08-05)
+
+Attachment-robustness release, closing the INC-2026-0045 root cause: in QA App Service
+(LangGraph Platform image) the tracer **never attached** — `registerConfigureHook` stores
+its registry in AsyncLocalStorage (`enterWith` at registration, `getStore()` at configure
+time), so a hook registered at graph-module load is invisible to any run whose async
+context does not descend from `startup()`. Platform harnesses that create their
+run-dispatch channel before importing the graph sever exactly that ancestry; the hook
+registers cleanly at boot, then silently never fires (`_getConfigureHooks()` returns `[]`).
+The identical image worked in local docker-compose because there the graph import
+preceded the server — reproduced mechanically on Node 22 (a server created before the
+import never sees the `enterWith` store, even for later connections).
+
+Additive: no event-schema, transport, or wiring change; existing deployments upgrade by
+file refresh (see `migrations/1.1.0-to-1.2.0.md`).
+
+- **`configure-slot.ts`** (new) — `installConfigureSlot()` wraps this package's own
+  `CallbackManager._configureSync` (the exact attachment point LangSmith's tracer
+  occupies — the only ancestry-independent slot) and appends a `KafkaRunTracer` with the
+  hook path's exact semantics: `KAFKA_ENABLED === "true"` gate checked at configure time,
+  fresh instance per configure, deduped by handler name, inheritable. Idempotent
+  (Symbol.for marker), reversible, runtime-only (nothing on disk is patched), confined to
+  the library's own `@langchain/core` copy. Falls back to wrapping `configure()` with a
+  warning if the underscored static ever disappears.
+- **ALS-break detector** — when the hook was registered too (`both` mode) and the slot
+  still had to attach, one loud `[observability] ALS context break detected: … (store
+  classification)` line fires, distinguishing severed ancestry (`store-undefined`) from a
+  clobbered store and from a foreign-core-copy registration — the discriminating evidence
+  for the upstream escalation.
+- **Boot attachment diagnostics** — startup now logs one greppable line: attach mode,
+  pid, resolved `@langchain/core/context` URL (which physical copy), shared-ALS presence,
+  hooks visible at boot (registration readback), `NODE_OPTIONS` + `execArgv` (injected
+  agent/loader detection); plus a duplicate-library warning when a second `startup()`
+  sees a different core URL.
+- **`KAFKA_ATTACH_MODE`** (`settings.ts`, new optional env var) — `hook` | `patch` |
+  `both` (default `both`: hook + slot, deduped; the slot doubles as the hook's failure
+  detector). Invalid values throw at startup (no-config-fallback rule).
+- **`index.ts`** — `startup()` wires the chosen attachment path(s) and the diagnostics;
+  exports `getAttachDiagnostics()`; `__resetForTests()` also restores the configure slot
+  (the hook remains un-unregisterable — unchanged upstream limitation).
+- **`configure-slot.test.ts`** (new) — documents the upstream failure (a registered hook
+  firing in a descendant context but NOT under `als.run(undefined, …)`), and proves the
+  slot attaches under that break, dedupes by name, installs idempotently, stays inert
+  unless `KAFKA_ENABLED` is exactly `"true"`, and uninstalls cleanly.
+
 ## 1.1.0 (2026-08-04)
 
 Connection-diagnostics release, motivated by a real QA incident: an agent's events never
