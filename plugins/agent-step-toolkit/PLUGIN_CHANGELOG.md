@@ -11,10 +11,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.21.0] — 2026-08-06
+
+Ships **agent-step library 2.1.0** (from 2.0.0): the caller-digit capture primitives. Additive —
+downstream projects catch up with `/pull-library`, and no project-side change is required (existing
+hand-rolled digit params keep working; adoption is an optional migration transform).
+
+### Added
+- **Library `capture.ts`** (+ `capture.test.ts`, exported from `index.ts`): `digitsOnly`,
+  `digitsOnlyDeep`, `callerDigits`, `digitGroupsParam`, `digitCandidatesParam` and their opts types
+  — schema helpers for params that carry caller-dictated digits (a tax number, a card-number tail).
+  The module is **authoring-only**: nothing in the runner calls it (unlike `paginate.ts`, whose
+  primitives the runner uses). It lives in the library because each rule it encodes is a consequence
+  of a runner contract — shape rules as refinements so no `pattern` reaches the model-facing JSON
+  Schema, refinement messages that carry no digit count because issue text rides `_debug` back to
+  the model, separator strip + singleton-array collapse in the preprocess so the confirmation gate's
+  parsed-params compare never reads a representation flip as drift, and the honest wire union for
+  group-array fields. Omission is the one spelling of "absent" on both builders.
+- The model-facing `describe` is a **required** option with no default: field text is live prompt
+  surface, tuned and QA-gated per host, so the library ships no wording of its own.
+- `agent-step-api.md` `<caller_digit_capture>`: the capture doctrine plus description-authoring
+  guidance (transcription framing, semantic neutrality, concrete renderings, omission semantics).
+- `migrations/2.0.0-to-2.1.0.md`: additive migration whose single transform is OPTIONAL adoption,
+  gated on a byte-identical model-facing-schema check so no host's prompt surface shifts.
+
+### Changed
+- Vendored library `VERSION` 2.0.0 → **2.1.0**; library suite 144 → **168**.
+- Library inventories gained `capture.ts` + `capture.test.ts`: `create-tool` SKILL `templates_index`,
+  `references/project-bootstrap-structure.md`, and the `bootstrap-project.md` copy list.
+- Plugin + marketplace descriptions name the capture primitives and the 2.1.0 library.
+
+### Fixed
+- `workflows/create-tool.md`'s library-test expectation was stale (144, and omitted capture from the
+  suite list) — now the verified 168.
+- `agent-step-api.md`'s count-free rule now scopes the ban to the VALUE's digit count, matching
+  `capture.ts` header rule 2: a count of alternative readings (`maxCandidates`) says nothing about
+  the digits and is fine. The two statements of the same rule had drifted apart in precision.
+
 ## [0.20.0] — 2026-08-05
 
 Library unchanged (**2.0.0**). The toolkit's workflows now integrate with the new
-`kafka-observability` plugin so every generated agent gets the bank's Kafka observability
+`kafka-observability` plugin so every generated agent gets the Kafka observability
 layer — and existing agents get pointed at it at the natural moments.
 
 ### Added
