@@ -53,7 +53,7 @@ Target: /absolute/path/to/<project_name>/
 - build_and_push.sh
 
 ### Agent-step library source (verbatim from skill templates)
-The ENTIRE `templates/agent-step/` tree, copied recursively — top-level files (`types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `index.ts`, the six `*.test.ts` files) plus the five phase-module directories (`compile/`, `run/`, `interaction/`, `controls/`, `handoff/`):
+The ENTIRE `templates/agent-step/` tree, copied recursively — top-level files (`types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `capture.ts`, `index.ts`, the seven `*.test.ts` files) plus the five phase-module directories (`compile/`, `run/`, `interaction/`, `controls/`, `handoff/`):
 - src/agent-step/**  (see `references/project-bootstrap-structure.md` for the per-file inventory)
 - src/agent-step/VERSION  (library version marker; lets `/pull-library` know what the project currently vendors)
 
@@ -207,7 +207,7 @@ npx tsc --noEmit
 Expected: zero errors. (The empty `tools: []`, stub prompt, and the shared test harness all typecheck fine against zero tools — intentional empty start. The prompt-input harness lazy-imports the model/tools, so it needs no Azure creds to typecheck.)
 
 ```bash
-# 2. Library tests (runner + paginate) — all should pass; count grows as the library evolves
+# 2. Library tests (runner + paginate + capture) — all should pass; count grows as the library evolves
 npx tsc && node --test dist/agent-step/*.test.js
 ```
 Expected: zero failures. This validates the library copy is intact.

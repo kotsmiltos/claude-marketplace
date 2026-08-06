@@ -12,6 +12,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.1.0] — 2026-08-06
+
+Minor: adds the **caller-digit capture primitives** (`capture.ts`) — pure schema helpers for
+params carrying caller-dictated digits (tax numbers, card-number tails). Promoted from a
+downstream voice agent where the pattern was developed against live STT failures; the helpers
+encode invariants the runner already imposes (shape rules as refinements so no `pattern` reaches
+the model-facing JSON Schema; count-free refinement messages because issue text rides `_debug`
+back to the model; separator strip + singleton-array collapse in the preprocess so the
+confirmation gate's parsed-params compare never reads a representation flip as drift; the honest
+wire union for group-array fields). The model-facing `describe` is a REQUIRED option with no
+default — field wording stays owned and QA-gated per host; the authoring doctrine and a proven
+description template live in `agent-step-api.md` `<caller_digit_capture>`.
+No existing export changes. Suite grows 144 → 168 (24 capture tests).
+Migration: [migrations/2.0.0-to-2.1.0.md](migrations/2.0.0-to-2.1.0.md).
+
+### Added
+- `capture.ts` + `capture.test.ts`: `digitsOnly`, `digitsOnlyDeep`, `callerDigits`,
+  `digitGroupsParam`, `digitCandidatesParam` (+ `DigitGroupsParamOpts`,
+  `DigitCandidatesParamOpts`), exported from `index.ts`.
+- `agent-step-api.md` `<caller_digit_capture>`: the capture doctrine (refinement-not-regex,
+  count-free messages, representation-flip normalization, honest wire union) and the
+  description-authoring guidance (transcription framing, semantic neutrality, concrete
+  renderings, omission semantics).
+
 ## [2.0.0] — 2026-08-05
 
 Major: the executor contract is reshaped around **typed effects**, the runner is restructured into

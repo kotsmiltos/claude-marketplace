@@ -568,6 +568,28 @@ The executor's other `resultBody` fields (e.g. `summary`) are preserved on every
 **Primitives** (exported from `index.ts`, for hand-rolled cases — the runner uses them internally): `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`, `clampPageSize`, `querySignature`, `pageRows`, `buildPageEnvelope`, and types `PageEnvelope`, `PagedCache`, `PageableSpec`. Prefer the `pageable` opt over hand-rolling.
 </pagination>
 
+<caller_digit_capture>
+## Caller-digit capture (`digitsOnly` / `callerDigits` / `digitGroupsParam` / `digitCandidatesParam`)
+
+Schema helpers for params that carry **caller-dictated digits** (a tax number, a card-number tail, an OTP-adjacent code). Unlike `paginate.ts` — whose primitives the runner itself uses — this module is **authoring-only**: nothing in the runner calls it. It lives in the library because each rule below is a consequence of a runner contract, so a host that hand-rolls the field re-derives (or misses) them one live failure at a time:
+
+- **Shape rules are refinements, never `.regex()`.** A `.regex()` becomes a `pattern` keyword in the model-facing JSON Schema, turning the tool's validation into a precondition the model must satisfy before it may call. The model then counts digits itself — unreliable on grouped STT captures — and either **withholds the call** (answers the caller instead; a valid capture never reaches the tool) or **pads an invented digit** to satisfy the pattern. `callerDigits(shape, message)` keeps the wire type a plain `string`; the runner's propose-path parse bounces a bad shape as recoverable `invalid_params` — before any read-back, without spending a confirmation attempt.
+- **Refinement messages are count-free.** Issue text rides the StepResult's `_debug` back to the model; "must be exactly 9 digits" re-introduces through the error path the very constraint the refinement keeps out of the schema, precisely on the turn where the model is about to re-ask. Say WHAT failed ("not a usable capture"), never HOW MANY.
+- **Representation flips must not read as drift.** The confirmation gate compares schema-PARSED params, so `["7070"]` ≡ `"7070"` and separator variants must normalize identically — the separator strip and the singleton-array collapse live in the preprocess, before the compare.
+- **The declared type is the honest wire union.** A field that accepts digit GROUPS carries the array branch in its TYPE — a preprocess is invisible to the model's schema and to shape-only wrapper validation, and with a bare string type a group-array call bounces as a raw schema error instead of the runner's voice-safe `invalid_params`.
+
+Two field builders (both take a **required** `describe` — the library ships NO model-facing wording; field text is live prompt surface, owned and QA-gated per host):
+
+- **`digitGroupsParam({ shape, message, describe })`** — the "transcription field": the model transcribes one array entry per **spoken digit group** («δεκαεπτά, είκοσι ένα, πενήντα δύο, δύο, ογδόντα δύο» → `["17","21","52","2","82"]`) or a single string; the JOIN happens in the preprocess, never in the model (models regroup, drop repeated groups, and lose the zero of round tens). `shape` validates the JOINED value. Omission stays `undefined` — the host's channel for "consume a carried/collected value".
+- **`digitCandidatesParam({ shape, message, candidateMessage?, maxCandidates?, describe })`** — the ambiguous-reading field: a single digit string, or an array of EVERY plausible reading of one utterance («χίλια τρία» → `["1003","10003"]`) for the executor to try — the model never picks a reading itself.
+
+**Description authoring (the part the host owns).** The proven register for `describe` — adapt, don't invent:
+- Frame the field as **pure transcription** ("you are a stenographer here"): write down the digit groups exactly as heard, in spoken order; never concatenate, merge, regroup, shorten, extend, count, or judge; a group is never dropped because it repeats its neighbour; the SYSTEM sanitizes, joins, and does ALL validation, answering `invalid_params` on an unusable capture.
+- Keep the field **semantically neutral**: naming the domain entity ("the AFM") or its length ("nine digits") re-activates the model's world knowledge — the measured source of withheld calls and reshaped captures no prompt scrub fully suppresses.
+- Give 2–3 concrete renderings in the caller's language(s), e.g. `«10, 2, 22. 8078» → ["10","2","22","8078"]`.
+- If omission consumes a carried value, say exactly that ("Omit the field entirely to consume …") — omission semantics belong in the field text, not only the prompt.
+</caller_digit_capture>
+
 <handoff>
 ## Library-coordinated channel handoff (`BuildAgentStepToolOptions.handoff`)
 
@@ -764,6 +786,7 @@ For ground truth, read these files in the project (don't paraphrase — they ARE
   - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`) in an ordered `registry.ts`
   - `handoff/` — `contract.ts` (action + signals + `HandoffSpec`), `node.ts` (`createHandoffNode` — the frozen channel contract), `delegate-client.ts` (SSE/Platform-API transport)
 - `src/agent-step/paginate.ts` — the read-pagination primitives + the `pageable` orchestration the runner uses (self / delegate, the cache, the envelope)
+- `src/agent-step/capture.ts` — the caller-digit capture primitives (refinement-not-regex, count-free messages, group join, candidate arrays; see `<caller_digit_capture>`)
 - `src/agent-step/messages.ts` — the runner's overridable system `summary` strings: `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages`
-- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the handoff machinery, the bounded-choice policy, and the hardening guards; all pass on `npm test`
+- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, and the hardening guards; all pass on `npm test`
 </key_files_to_inspect>

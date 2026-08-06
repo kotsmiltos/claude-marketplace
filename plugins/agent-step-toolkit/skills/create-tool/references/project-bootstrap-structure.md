@@ -26,6 +26,8 @@ The shape produced by the `bootstrap-project` workflow. This is a complete LangG
     │   ├── runner.test.ts        # unit tests; should pass out of the box
     │   ├── paginate.ts
     │   ├── paginate.test.ts
+    │   ├── capture.ts            # caller-digit capture primitives (see agent-step-api.md)
+    │   ├── capture.test.ts
     │   ├── define-config.ts
     │   ├── index.ts
     │   └── VERSION               # library version marker — never edit by hand; read by /pull-library
@@ -90,7 +92,8 @@ Verbatim copy of the runner library. The skill treats these as templates-by-copy
 - **messages.ts** — the runner's overridable system `summary` strings (neutral English defaults).
 - **define-config.ts** — identity helper for typed `defineConfig({...})` calls.
 - **index.ts** — the public surface (re-exports; only what's here is API). Includes `StateSchemaLike` (the `stateSchema` option's type: an Annotation OR a Zod object), the bounded-choice types, and `agentStepInternalSlotMask`.
-- **runner.test.ts**, **handoff.test.ts**, **bounded-choice.test.ts**, **hardening.test.ts**, **paginate.test.ts**, **zod-state.test.ts** — unit tests covering every runner branch, the handoff machinery, the bounded-choice policy, the hardening guards, the pagination primitives, and the Zod-schema merger derivation. Run via `npm test`.
+- **capture.ts** — caller-digit capture primitives for tool param authoring (`digitsOnly`, `callerDigits`, `digitGroupsParam`, `digitCandidatesParam`); see `agent-step-api.md` `<caller_digit_capture>`.
+- **runner.test.ts**, **handoff.test.ts**, **bounded-choice.test.ts**, **hardening.test.ts**, **paginate.test.ts**, **capture.test.ts**, **zod-state.test.ts** — unit tests covering every runner branch, the handoff machinery, the bounded-choice policy, the hardening guards, the pagination primitives, the digit-capture primitives, and the Zod-schema merger derivation. Run via `npm test`.
 
 **Never modify the library in a generated project.** The source of truth for the runner library is this skill's own `templates/agent-step/` directory. If you find a real bug in the runner, fix it there (and update `templates/agent-step/runner.test.ts` to cover it), then regenerate — never hand-patch a copy inside a generated project, or it will drift from the templates and the next bootstrap will reintroduce the bug.
 
