@@ -102,3 +102,22 @@ export {
   buildPageEnvelope,
 } from "./paginate.js";
 export type { PageEnvelope, PagedCache, PageableSpec } from "./paginate.js";
+
+// Caller-digit capture primitives. Pure schema helpers for tool param
+// authoring — the runner does not call them, but they encode invariants the
+// runner imposes: shape rules as refinements (never `.regex()` — a JSON-Schema
+// `pattern` makes the model count digits and withhold or pad the call),
+// count-free refinement messages (issue text rides `_debug` back to the
+// model), and separator-strip + singleton-collapse in the preprocess so the
+// confirmation gate's parsed-params compare never reads a representation flip
+// as drift. The model-facing `describe` is a REQUIRED option with no default —
+// field wording is live prompt surface, owned and QA-gated per host. See
+// agent-step-api.md <caller_digit_capture> for the authoring doctrine.
+export {
+  digitsOnly,
+  digitsOnlyDeep,
+  callerDigits,
+  digitGroupsParam,
+  digitCandidatesParam,
+} from "./capture.js";
+export type { DigitGroupsParamOpts, DigitCandidatesParamOpts } from "./capture.js";
