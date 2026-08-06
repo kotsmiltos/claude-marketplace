@@ -78,12 +78,16 @@ test("digitGroupsParam: doctrine vector — «10, 2, 22. 8078» keeps EVERY grou
 test("digitGroupsParam: separator-carrying groups are cleaned before the join", () => {
   assert.equal(groups.parse(["102", "228,", " 078"]), "102228078");
 });
+test("digitGroupsParam: a NUMERIC entry is coerced, never dropped to an empty group", () => {
+  // Dropping it to "" would silently SHORTEN the capture (["17", 21] → "17")
+  // and could pass the shape rule as a wrong value.
+  assert.equal(groups.parse(["17", 21, "52", "2", "82"]), "172152282");
+});
 test("digitGroupsParam: a single string with separators parses too", () => {
   assert.equal(groups.parse("012,345,678"), "012345678");
 });
 test("digitGroupsParam: omission stays undefined (the carried-value channel)", () => {
   assert.equal(groups.parse(undefined), undefined);
-  assert.equal(groups.parse(null), undefined);
 });
 test("digitGroupsParam: an unusable JOINED capture fails with the count-free message", () => {
   const r = groups.safeParse(["10", "2", "22"]); // joins to 6 digits
@@ -130,6 +134,19 @@ test("digitCandidatesParam: a bad candidate fails with the per-candidate message
 test("digitCandidatesParam: omission stays undefined", () => {
   assert.equal(candidates.parse(undefined), undefined);
 });
+// ─── Cross-builder symmetry ──────────────────────────────────────────────────
+// Both builders are optional and both reject `null`: omission is the ONE
+// spelling of "absent" (header rule 5). A host driving `runSteps` directly must
+// not hit a builder-dependent trap, so these are asserted side by side.
+test("both builders treat omission identically — undefined passes through", () => {
+  assert.equal(groups.parse(undefined), undefined);
+  assert.equal(candidates.parse(undefined), undefined);
+});
+test("both builders reject null identically — it is not a second spelling of absent", () => {
+  assert.equal(groups.safeParse(null).success, false);
+  assert.equal(candidates.safeParse(null).success, false);
+});
+
 test("digitCandidatesParam: maxCandidates is honored when overridden", () => {
   const wide = digitCandidatesParam({
     shape: /^\d{4}$/u,

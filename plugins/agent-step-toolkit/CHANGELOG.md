@@ -24,7 +24,7 @@ confirmation gate's parsed-params compare never reads a representation flip as d
 wire union for group-array fields). The model-facing `describe` is a REQUIRED option with no
 default — field wording stays owned and QA-gated per host; the authoring doctrine and a proven
 description template live in `agent-step-api.md` `<caller_digit_capture>`.
-No existing export changes. Suite grows 144 → 165 (21 capture tests).
+No existing export changes. Suite grows 144 → 168 (24 capture tests).
 Migration: [migrations/2.0.0-to-2.1.0.md](migrations/2.0.0-to-2.1.0.md).
 
 ### Added

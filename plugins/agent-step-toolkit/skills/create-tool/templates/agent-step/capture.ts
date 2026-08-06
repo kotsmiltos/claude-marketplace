@@ -15,12 +15,14 @@
 //      `type: "string"` and sends what it extracted; the runner's propose-path
 //      parse bounces a bad shape as recoverable `invalid_params` — before any
 //      read-back and without spending a confirmation attempt.
-//   2. REFINEMENT MESSAGES ARE COUNT-FREE. The runner surfaces zod issue
+//   2. REFINEMENT MESSAGES CARRY NO DIGIT COUNT. The runner surfaces zod issue
 //      messages through the StepResult's `_debug`, and `_debug` rides the body
 //      handed BACK to the model. "must be exactly 9 digits" re-introduces,
 //      through the error path, the very constraint the refinement keeps out of
 //      the schema — precisely on the turn where the model is about to re-ask.
-//      Say WHAT failed, never HOW MANY.
+//      Say WHAT failed, never HOW MANY DIGITS. The rule is about the VALUE's
+//      length; a count of something else (e.g. how many alternative readings
+//      `maxCandidates` allows) says nothing about the digits and is fine.
 //   3. REPRESENTATION FLIPS MUST NOT READ AS DRIFT. The confirmation gate
 //      compares schema-PARSED params, so `["7070"]` and `"7070"` (or a value
 //      re-sent with STT separators stripped differently) must normalize
@@ -34,6 +36,15 @@
 //      invisible to both — with a bare string type a group-array call bounces
 //      at the wrapper as a raw schema error instead of reaching the runner's
 //      voice-safe `invalid_params`.
+//   5. OMISSION IS THE ONLY SPELLING OF "ABSENT". Both builders are optional,
+//      and an omitted field is the host's channel for "consume the carried /
+//      collected value". `null` is deliberately NOT a second spelling: it is
+//      not in the declared union, so a shape-only wrapper rejects it before the
+//      preprocess ever runs (rule 4 cuts both ways — what the preprocess
+//      tolerates but the type does not declare is unreachable anyway). Both
+//      builders therefore reject it identically; do not "helpfully" special-
+//      case it in one of them, which is exactly the asymmetry this rule exists
+//      to prevent.
 //
 // The model-facing `describe` text is deliberately REQUIRED and has NO
 // default: field wording is live prompt surface, tuned and QA-gated per host —
@@ -100,9 +111,14 @@ export const digitGroupsParam = (opts: DigitGroupsParamOpts) =>
   z
     .preprocess(
       (v) => {
-        if (v === undefined || v === null) return undefined;
-        if (Array.isArray(v))
-          return v.map((x) => (typeof x === "string" ? x.replace(/\D/g, "") : "")).join("");
+        if (v === undefined) return undefined;
+        // Entries are COERCED, not type-checked: they get joined, so a
+        // non-string entry dropped to "" would silently SHORTEN the capture
+        // (["17", 21] → "17") and could pass the shape rule as a wrong value.
+        // Coercing keeps every spoken group in the result. (Contrast the
+        // candidates builder, where each entry stays a separate value and a
+        // non-string fails loudly instead — nothing can be silently lost.)
+        if (Array.isArray(v)) return v.map((x) => String(x).replace(/\D/g, "")).join("");
         return digitsOnly(v);
       },
       z
@@ -144,19 +160,25 @@ export const digitCandidatesParam = (opts: DigitCandidatesParamOpts) => {
   return z
     .preprocess(
       digitsOnlyDeep,
-      z.union([
-        callerDigits(opts.shape, opts.message),
-        z
-          .array(callerDigits(opts.shape, opts.candidateMessage ?? opts.message))
-          .superRefine((values, ctx) => {
-            if (values.length < 1) {
-              ctx.addIssue({ code: z.ZodIssueCode.custom, message: "at least one candidate" });
-            } else if (values.length > max) {
-              ctx.addIssue({ code: z.ZodIssueCode.custom, message: `at most ${max} candidates` });
-            }
-          }),
-      ]),
+      z
+        .union([
+          callerDigits(opts.shape, opts.message),
+          z
+            .array(callerDigits(opts.shape, opts.candidateMessage ?? opts.message))
+            .superRefine((values, ctx) => {
+              if (values.length < 1) {
+                ctx.addIssue({ code: z.ZodIssueCode.custom, message: "at least one candidate" });
+              } else if (values.length > max) {
+                // A count of READINGS, not of digits — see header rule 2.
+                ctx.addIssue({ code: z.ZodIssueCode.custom, message: `at most ${max} candidates` });
+              }
+            }),
+        ])
+        // Optional INSIDE the preprocess, matching `digitGroupsParam`: with it
+        // outside, `undefined` short-circuits before the preprocess but `null`
+        // does not, so the two builders answered `null` differently (header
+        // rule 5). Same wire schema either way — `required` is unaffected.
+        .optional(),
     )
-    .describe(opts.describe)
-    .optional();
+    .describe(opts.describe);
 };
