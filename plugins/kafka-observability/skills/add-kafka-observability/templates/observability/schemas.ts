@@ -1,7 +1,7 @@
 // FILE: src/observability/schemas.ts
 //
-// Zod schemas for observability Kafka messages. One envelope (the
-// bank-standard shape the shared Elasticsearch sink consumes) and one `data`
+// Zod schemas for observability Kafka messages. One envelope (the shape the
+// shared Elasticsearch sink consumes) and one `data`
 // shape for all run events: every traced run — graph invocation, LangGraph
 // node, LLM call, tool run — is a "request/response pair", so a single shape
 // with `direction` covers both the start (inputs) and end (outputs) event.

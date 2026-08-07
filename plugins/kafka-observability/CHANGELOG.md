@@ -8,9 +8,9 @@ version-keyed guides in `migrations/`.
 
 ## 1.4.0 (2026-08-07)
 
-Redaction-precision release, closing a real information-loss bug found by the downstream
-timeline-UI team during the 1.3.0 QA verification (thread 019fdaef…, 400+ over-redacted
-fields across 20 events): the sensitive-key pattern's `token` substring also matched every
+Redaction-precision release, closing a real information-loss bug found by a downstream
+consumer of the event stream during 1.3.0 QA verification (400+ over-redacted fields
+across 20 events): the sensitive-key pattern's `token` substring also matched every
 LLM usage counter LangChain emits — `tokenUsage`, `prompt_tokens`, `completion_tokens`,
 `input/output_tokens`, the `*_token(s)_details` objects — masking them all to
 `***REDACTED***` and making cost/usage analytics impossible from the pipeline.
@@ -49,11 +49,11 @@ a separate, deliberate behavior change this release does not make.
 
 Event-volume release: **opt-in run filtering**. By default the tracer emits a
 request/response pair for every traced run (full LangSmith parity — unchanged). Payload
-verification in ib-password-reset-agent-ts showed ~73% of a real turn's events carry zero
+verification on one downstream agent showed ~73% of a real turn's events carry zero
 unique content: LangGraph's `__start__` pseudo-node echoes the root inputs, auto-generated
 conditional-edge `RunnableLambda` wrappers carry only the routing decision, and thin
 wrapper nodes (`agent`, `tools`) rewrap their single nested llm/tool run's output
-byte-identically. A survey of the sibling agents (set-pin, ivr-router, rag-handoff base)
+byte-identically. A survey of several other agents
 confirmed the wrapper≈child duplication does **not** generalize — several of their nodes
 transform outputs or have no nested run at all — so name-based filtering is strictly a
 per-app, payload-verified opt-in, never a default.
@@ -90,11 +90,11 @@ With filtering off (default) emitted bytes are identical to 1.2.0.
   root guarantee in both modes, pair-atomic dropping through the real BaseTracer
   entrypoints, and thread inheritance across a filtered parent.
 - **`configure-slot.ts`** — housekeeping that rode into `main` via the PR #5 merge
-  without a version and ships here: the idempotency/startup `Symbol.for` keys were
-  de-branded (`nbg.kafkaObservability.*` → `kafkaObservability.*`). Runtime-internal,
-  no contract change; only relevant if two library copies of different versions ever
-  share one process (their markers no longer collide — each copy would install its own
-  slot wrap, which the name-dedupe still keeps to one tracer per run).
+  without a version and ships here: the idempotency/startup `Symbol.for` keys are now
+  `kafkaObservability.*`. Runtime-internal, no contract change; only relevant if two
+  library copies of different versions ever share one process (their markers no longer
+  collide — each copy would install its own slot wrap, which the name-dedupe still keeps
+  to one tracer per run).
 
 ## 1.2.0 (2026-08-05)
 
@@ -182,17 +182,16 @@ Initial release.
   full LangSmith-style run tree is reconstructable downstream. `thread_id` is resolved
   from run metadata (LangGraph injects `configurable.thread_id` there), with a
   per-trace fallback map for child runs that carry no metadata.
-- **Event envelope** (`schemas.ts`, zod-validated) — the bank-standard
+- **Event envelope** (`schemas.ts`, zod-validated) — the
   `{ id, thread_id, application_name, timestamp, data }` shape already consumed by the
-  shared Elasticsearch sink. Kafka message key is the event's own `id` (per the
-  ivr-router design-027 rev.2 finding: the sink upserts by key, so keying by thread
-  collapses a thread's events into one document).
+  shared Elasticsearch sink. Kafka message key is the event's own `id` (a sink that
+  upserts by key would otherwise collapse a thread's events into one document).
 - **Transport** (`kafka-producer.ts`, `bounded-queue.ts`) — `@confluentinc/kafka-javascript`
   (librdkafka) behind a bounded in-memory queue (default 1000) with a 10 ms background
   drain loop. `produce()` never blocks; a full queue drops the event and logs a running
   count. `acks=all`, idempotent producer, bounded `shutdown()` (drain → flush → disconnect,
   every phase raced against a timer — librdkafka's own timeouts do not reliably bound a
-  never-connected broker). Ported verbatim from ivr-router-ts design-027 (live-verified).
+  never-connected broker). Ported verbatim from a live-verified implementation.
 - **Redaction** (`redaction.ts`) — recursive masking of `authorization` / `api_key` /
   `password` / `token` / `secret` / `credential` / `connection_string` keys and
   `password=` fragments in string values, applied to every payload before serialization.

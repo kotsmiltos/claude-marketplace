@@ -109,7 +109,7 @@ export class RunEventEmitter {
     // Keyed by the event's own id, not thread_id: the shared QA/PROD
     // Elasticsearch sink upserts by Kafka message key, so a shared thread_id
     // key would collapse every event for a thread into a single overwritten
-    // document (ivr-router design-027 rev.2, found live in QA).
+    // document (found live in QA).
     this.producer.produce(this.topic, event.id, payload);
   }
 

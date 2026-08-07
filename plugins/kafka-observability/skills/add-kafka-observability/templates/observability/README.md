@@ -32,7 +32,8 @@ RunEventEmitter (event-emitter.ts)
        ├── project Run → event data (child_runs dropped; each run emits its own)
        ├── validate (zod), redact sensitive fields
        ├── serialize, truncate if >512 KB ({original_bytes, sha256} marker)
-       └── produce (key = event.id — the ES sink upserts by key; design-027 rev.2)
+       └── produce (key = event.id — a sink that upserts by key would otherwise
+           collapse a thread's events into one document)
        ▼
 KafkaEventProducer (kafka-producer.ts)
        └── bounded queue → 10ms background drain loop → librdkafka
@@ -97,7 +98,7 @@ LangSmith parity, and the contract every downstream consumer was built against. 
 traces show much of that volume is duplicated content: a LangGraph `agent` node's output
 is often byte-identical to its nested `llm` run's, a `tools` node's to its nested `tool`
 run's, and the `__start__` pseudo-node echoes the root run's inputs (verified
-field-by-field against raw payloads in ib-password-reset-agent-ts — 16 of a turn's 22
+field-by-field against raw payloads on one downstream agent — 16 of a turn's 22
 events carried zero unique content there).
 
 An app team that has **verified this against its own payloads** can opt in:

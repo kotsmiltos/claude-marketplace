@@ -76,8 +76,8 @@ emitting liveness heartbeats, business/audit events, or billing triggers consume
 alerting and downstream automations the tracer does not replace):
 
 1. **Agent-flow observability** — a predecessor/equivalent of what the tracer emits
-   (e.g. the design-027 manual `agent`/`tool_call` emitter this library descends from,
-   live in ivr-router-ts). Only for this classification, ask the follow-up: **keep the
+   (e.g. a hand-rolled `agent`/`tool_call` emitter of the kind this library descends
+   from). Only for this classification, ask the follow-up: **keep the
    existing events alongside the tracer (coexistence — suggest this default; the events
    are a live downstream contract), or replace them?** Replace requires the user to
    explicitly confirm downstream consumers signed off on losing the legacy event

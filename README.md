@@ -109,7 +109,7 @@ Ships one skill:
   instrumentation) — and publishes **every** traced run — graph
   invocation, each LangGraph node, each LLM call (full rendered prompts, outputs, token
   usage), each tool run, errors — as start/end events to a Kafka topic:
-  bank-standard envelope (`id` as Kafka key, `thread_id` correlation), zod-validated,
+  standard envelope (`id` as Kafka key, `thread_id` correlation), zod-validated,
   secret-redacted, 512 KB-truncated, over a bounded non-blocking fire-and-forget producer
   (librdkafka, `acks=all`, idempotent, bounded shutdown). Disabled by default
   (`KAFKA_ENABLED`); runs alongside LangSmith for parallel validation. Apps that have

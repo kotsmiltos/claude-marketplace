@@ -19,7 +19,7 @@ release: the install flow can no longer destroy pre-existing Kafka functionality
 ### Added
 - **Existing-Kafka intake guard** (`/add-kafka-observability`): before touching
   anything, the skill detects a foreign module on `src/observability/` (non-empty, no
-  `VERSION` — e.g. ivr-router-ts's design-027 manual `agent`/`tool_call` emitter, which
+  `VERSION` — e.g. a hand-rolled `agent`/`tool_call` emitter, which
   the old flow would have classified as "first install" and vendored over: 14/17
   same-named files overwritten, every `emit*` call site broken) AND any Kafka producer
   usage elsewhere in `src/`. It then STOPS and asks the user to **classify** the
@@ -46,9 +46,9 @@ no wiring/env change).
 ### Fixed
 - **Library 1.4.0 — LLM usage counters survive redaction**: the sensitive-key pattern's
   `token` substring masked every usage field (`tokenUsage`,
-  `prompt/completion/input/output/total_tokens`, `*_token(s)_details`) — found by the
-  downstream timeline-UI team during the 1.3.0 QA verification (400+ over-redacted
-  fields in one verified thread), making cost/usage analytics impossible from the
+  `prompt/completion/input/output/total_tokens`, `*_token(s)_details`) — found by a
+  downstream consumer of the event stream during 1.3.0 QA verification (400+
+  over-redacted fields in one verified thread), making cost/usage analytics impossible from the
   pipeline. Fixed with a scalar type guard (numbers/booleans/null pass verbatim — only
   strings can be credentials, only objects/arrays can contain one) plus an anchored
   usage-container exemption that recurses instead of masking whole (contents still fully
@@ -71,15 +71,15 @@ bytes are identical to 1.2.0).
   from dropping the nested llm run). The root run always survives filtering, in both
   modes — it carries the full invocation input/final state and is the only event without
   `langgraph_node` (the turn-boundary marker for timeline consumers). Motivated by
-  payload verification in ib-password-reset-agent-ts (~73% of a real turn's events were
-  byte-duplicates of root/llm/tool content); a cross-repo survey of sibling agents
+  payload verification on one downstream agent (~73% of a real turn's events were
+  byte-duplicates of root/llm/tool content); a survey of several other agents
   confirmed the duplication does NOT generalize, so filtering is a per-app,
   payload-verified opt-in — never a default. Fail-fast validation of every inconsistent
   env combination; one greppable startup line when active.
 
 ### Changed
-- Library 1.3.0 also carries the configure-slot `Symbol.for` de-branding
-  (`nbg.kafkaObservability.*` → `kafkaObservability.*`) that rode into `main` via the
+- Library 1.3.0 also carries the configure-slot `Symbol.for` key rename
+  (now `kafkaObservability.*`) that rode into `main` via the
   PR #5 merge without a version (runtime-internal, no contract change).
 - Skill workflow `.env.example` block gains the commented `KAFKA_RUN_FILTER_*` lines;
   vendored-file count corrected 22 → 24; plugin/marketplace/root-README descriptions now
@@ -149,7 +149,7 @@ Initial release. Ships observability library **1.0.0**.
   globally via `registerConfigureHook` (the same mechanism LangSmith's tracer uses) that
   publishes every traced run — graph invocation, LangGraph nodes, LLM calls with full
   prompts/outputs/token usage, tool runs, errors, trace hierarchy — as start/end events
-  to a Kafka topic. Bank-standard envelope keyed by event id with `thread_id`
+  to a Kafka topic. Standard envelope keyed by event id with `thread_id`
   correlation, zod-validated, secret-redacted, 512KB-truncated, over a bounded
   non-blocking fire-and-forget producer (librdkafka, `acks=all`, idempotent, bounded
   shutdown). Disabled by default (`KAFKA_ENABLED`); runs alongside LangSmith for

@@ -2,8 +2,8 @@
 // No live broker required: "localhost:19999" refuses the connection immediately
 // (nothing listens there), which is exactly what exercises the bounded-queue /
 // drop-on-full / closed-state edge cases without ever reaching "ready". The
-// happy (delivered-to-a-real-broker) path is covered by the live verification
-// in docs/design/design-027-kafka-observability.md, not here.
+// happy (delivered-to-a-real-broker) path is covered by live verification
+// against a real broker, not here.
 //
 // Run after build: node --test dist/observability/kafka-producer.test.js
 
@@ -49,8 +49,8 @@ describe("buildConfig", () => {
   });
 
   test("includes an optional key only when its setting is set", () => {
-    const config = buildConfig(settings({ clientId: "ivr-router", saslUsername: "u" }));
-    assert.equal(config["client.id"], "ivr-router");
+    const config = buildConfig(settings({ clientId: "sample-agent", saslUsername: "u" }));
+    assert.equal(config["client.id"], "sample-agent");
     assert.equal(config["sasl.username"], "u");
     assert.equal("sasl.password" in config, false);
   });
