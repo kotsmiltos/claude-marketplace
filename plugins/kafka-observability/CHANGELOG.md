@@ -6,6 +6,96 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.4.0 (2026-08-07)
+
+Redaction-precision release, closing a real information-loss bug found by the downstream
+timeline-UI team during the 1.3.0 QA verification (thread 019fdaef…, 400+ over-redacted
+fields across 20 events): the sensitive-key pattern's `token` substring also matched every
+LLM usage counter LangChain emits — `tokenUsage`, `prompt_tokens`, `completion_tokens`,
+`input/output_tokens`, the `*_token(s)_details` objects — masking them all to
+`***REDACTED***` and making cost/usage analytics impossible from the pipeline.
+
+Two surgical carve-outs in `redaction.ts`; the credential key pattern itself is untouched
+(deliberately NOT tightened — an under-match there would leak a real credential):
+
+- **Scalar type guard** — a number, boolean, or null value is never masked, whatever its
+  key: only strings can BE a credential and only objects/arrays can contain one. This
+  alone un-redacts every numeric counter, including provider-specific ones inside details
+  objects (`cached_tokens`, `reasoning_tokens`, `audio_tokens`, camelCase `promptTokens`)
+  and future counters not yet on any list. Consequence: `password: null` now passes as
+  null (was masked — carried no information either way).
+- **Usage-container exemption** — an anchored allowlist
+  (`(prompt|completion|input|output|total)_tokens?(_details)?`, `(estimated_)?token_?usage`
+  / `tokenUsage`, `usage(_metadata)?`) recurses into these objects instead of masking them
+  whole. Deliberately NOT a generic `_tokens?$` suffix rule, which would also exempt
+  `access_token`-style credentials. Contents still pass through full redaction — a string
+  secret inside a usage object stays masked.
+
+Unchanged, fail-safe: sensitive-keyed strings stay masked; any other sensitive-keyed
+object/array is still masked whole (`credentials: {…}` never leaks unmatched inner keys);
+`password=` fragment masking in string values unchanged. Streaming `new_token`
+`kwargs.token` chunks stay masked (string under key `token`) — redundant rather than
+harmful, the full content survives in `outputs`; dropping those entries outright would be
+a separate, deliberate behavior change this release does not make.
+
+- **`redaction.test.ts`** — pins both directions: OpenAI/LangChain/Anthropic-shaped usage
+  payloads survive verbatim (incl. details objects and camelCase counters) while
+  `api_key`, `Authorization`, `access_token`, `refresh_token`, `client_secret`, `token`
+  (string), `connection_string`, and whole credential objects stay masked; a string
+  secret inside `tokenUsage` is still caught; two pre-1.4.0 pins updated as documented
+  behavior changes (numeric under sensitive-substring key, `password: null`).
+
+## 1.3.0 (2026-08-06)
+
+Event-volume release: **opt-in run filtering**. By default the tracer emits a
+request/response pair for every traced run (full LangSmith parity — unchanged). Payload
+verification in ib-password-reset-agent-ts showed ~73% of a real turn's events carry zero
+unique content: LangGraph's `__start__` pseudo-node echoes the root inputs, auto-generated
+conditional-edge `RunnableLambda` wrappers carry only the routing decision, and thin
+wrapper nodes (`agent`, `tools`) rewrap their single nested llm/tool run's output
+byte-identically. A survey of the sibling agents (set-pin, ivr-router, rag-handoff base)
+confirmed the wrapper≈child duplication does **not** generalize — several of their nodes
+transform outputs or have no nested run at all — so name-based filtering is strictly a
+per-app, payload-verified opt-in, never a default.
+
+Additive: no event-schema, transport, or wiring change; two new **optional** env vars.
+With filtering off (default) emitted bytes are identical to 1.2.0.
+
+- **`run-filter.ts`** (new) — `RunFilter`: allowlist/denylist over `run_type:name`
+  `*`-glob patterns, where the name side matches the run name OR
+  `metadata.langgraph_node` (the run_type side prevents `chain:agent` from also dropping
+  the nested llm run, which inherits the wrapper's langgraph_node). **The root run always
+  survives, in both modes** — it is the sole carrier of the full invocation input/final
+  state and the only event without `langgraph_node`, the turn-boundary marker for
+  timeline consumers. Filtering drops a run's request+response pair atomically (the
+  predicate reads only fields stable across the run's lifetime) and never re-parents:
+  surviving events' `parent_run_id`/`dotted_order` may reference dropped runs.
+- **`KAFKA_RUN_FILTER_MODE`** / **`KAFKA_RUN_FILTER_PATTERNS`** (new optional env vars) —
+  `off` (default) | `allow` | `deny`, plus comma-separated patterns. Fail-fast at startup
+  on an invalid mode, a mode without patterns, or patterns while the mode is off
+  (no-config-fallback rule). When active, startup logs one greppable line:
+  `[observability] run filter active: mode=… patterns=… (root run always emitted)`.
+- **`run-tracer.ts`** — `safeEmit` consults the filter (registry-resolved, like the
+  emitter; `filter` test seam on `KafkaRunTracerFields`) before `emitter.emitRun`.
+  Filtered runs are still traced — children are matched independently, and the thread map
+  keeps learning `thread_id` from the always-kept root.
+- **`registry.ts`** — holds the once-validated `RunFilter` alongside the emitter (the
+  hook/slot construct fresh tracer instances per configure; the filter must be one per
+  process).
+- **`index.ts`** — reads and validates ALL config (settings, attach mode, filter) before
+  any side effect; exports `RunFilter` / `readRunFilterFromEnv`; `__resetForTests()`
+  clears the filter.
+- **`run-filter.test.ts`** (new) + run-tracer/index test additions — parsing fail-fast
+  combinations, glob anchoring/escaping, run_type-guarded langgraph_node matching, the
+  root guarantee in both modes, pair-atomic dropping through the real BaseTracer
+  entrypoints, and thread inheritance across a filtered parent.
+- **`configure-slot.ts`** — housekeeping that rode into `main` via the PR #5 merge
+  without a version and ships here: the idempotency/startup `Symbol.for` keys were
+  de-branded (`nbg.kafkaObservability.*` → `kafkaObservability.*`). Runtime-internal,
+  no contract change; only relevant if two library copies of different versions ever
+  share one process (their markers no longer collide — each copy would install its own
+  slot wrap, which the name-dedupe still keeps to one tracer per run).
+
 ## 1.2.0 (2026-08-05)
 
 Attachment-robustness release, closing the INC-2026-0045 root cause: in QA App Service
