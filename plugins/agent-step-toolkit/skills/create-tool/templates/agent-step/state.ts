@@ -251,3 +251,22 @@ export const agentStepInternalSlotMask = {
   handoff: true,
   errorCount: true,
 } as const;
+
+/** The library-managed slots that are TASK-SCOPED: every one of them describes
+ *  work in progress (a pending gate, an open flow, a reslice cache, the
+ *  auto-handoff error counter), so a task-ENDING handback makes all of them
+ *  stale by definition. `createHandoffNode` nulls these whenever it resolves a
+ *  `completed`/`abandon` handback, because channel middlewares reuse ONE thread
+ *  per call and never reset it — the next task on that thread would otherwise
+ *  inherit the finished one's pending gates. `handoff` is absent on purpose:
+ *  the node always returns it as null, resolved or not.
+ *
+ *  Domain slots are the host's own; it declares them via
+ *  `HandoffSpec.clearsOnHandback`. */
+export const agentStepTaskScopedSlots = [
+  "awaitingInput",
+  "currentFlow",
+  "boundedChoice",
+  "pagedRead",
+  "errorCount",
+] as const satisfies readonly (keyof typeof agentStepInternalSlotMask)[];

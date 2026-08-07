@@ -24,6 +24,7 @@ interface S {
   boundedChoice?: BoundedChoice | null;
   pagedRead?: PagedCache<unknown> | null;
   handoff?: HandoffRequest | null;
+  errorCount?: number | null;
 }
 
 const replaceNull = <T>() => ({
@@ -584,4 +585,111 @@ test("handoff node (delegate) stream timer starts after connect, not at delegate
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ── clearsOnHandback ────────────────────────────────────────────────────────
+// The thread OUTLIVES the task (channel middlewares reuse one thread id per
+// call and never reset it), so a task-ending handback must not leave the
+// finished task's state behind for the next one to inherit.
+
+const BUSY_STATE: S & { outcome?: string | null; pointer?: string | null } = {
+  awaitingInput: {
+    kind: "confirmation",
+    for_action: "change_thing",
+    params: { v: "y" },
+    attempts_left: 2,
+    max_attempts: 3,
+  },
+  currentFlow: { name: "change_flow", data: { proposed: "y" } },
+  boundedChoice: { name: "unsupported_information", status: "pending" },
+  pagedRead: { key: "read_thing", signature: "{}", rows: ["stale"], extras: {} },
+  errorCount: 2,
+  outcome: "already_active",
+  pointer: "card-1",
+};
+
+test("handoff node clears library task-scoped slots + declared domain slots on completed", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    clearsOnHandback: ["outcome", "pointer"],
+  });
+  const events: unknown[] = [];
+  const update = await node(
+    { ...BUSY_STATE, handoff: { reason: "completed", context: "done" } },
+    nodeConfig(events),
+  );
+  for (const slot of ["awaitingInput", "currentFlow", "boundedChoice", "pagedRead", "errorCount"]) {
+    assert.equal(update[slot], null, `${slot} must be cleared`);
+  }
+  assert.equal(update.outcome, null, "declared domain slot must be cleared");
+  assert.equal(update.pointer, null, "declared domain slot must be cleared");
+  assert.equal(update.handoff, null);
+  // The reply itself is unaffected — the closing is composed before the clear.
+  const [message] = update.messages as AIMessage[];
+  assert.equal(message.content, "done");
+  assert.equal(message.additional_kwargs.handoff_type, "completed");
+});
+
+test("handoff node clears on abandon too (a failed task ends the task)", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    clearsOnHandback: ["outcome"],
+  });
+  const update = await node(
+    { ...BUSY_STATE, handoff: { reason: "abandon", context: "gave up" } },
+    nodeConfig([]),
+  );
+  assert.equal(update.outcome, null);
+  assert.equal(update.currentFlow, null);
+});
+
+test("handoff node clears NOTHING on off_topic — a mid-task aside stays resumable", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    clearsOnHandback: ["outcome", "pointer"],
+  });
+  const update = await node(
+    { ...BUSY_STATE, handoff: { reason: "off_topic", context: "wants something else" } },
+    nodeConfig([]),
+  );
+  // Only the handoff slot is consumed; the in-progress task survives the aside
+  // so the caller can be routed back into it.
+  assert.deepEqual(Object.keys(update).sort(), ["handoff", "messages"]);
+});
+
+test("resolveClosingMessage still sees the pre-clear state", async () => {
+  const seen: (string | null | undefined)[] = [];
+  const node = createHandoffNode<typeof BUSY_STATE>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    clearsOnHandback: ["outcome"],
+    resolveClosingMessage: (state) => {
+      seen.push(state.outcome);
+      return state.outcome === "already_active" ? "No activation needed." : undefined;
+    },
+  });
+  const update = await node(
+    { ...BUSY_STATE, handoff: { reason: "completed", context: "internal" } },
+    nodeConfig([]),
+  );
+  assert.deepEqual(seen, ["already_active"], "the closing is chosen BEFORE the clear");
+  const [message] = update.messages as AIMessage[];
+  assert.equal(message.content, "No activation needed.");
+  assert.equal(update.outcome, null);
+});
+
+test("a spec without clearsOnHandback clears only the library's own slots", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+  });
+  const update = await node(
+    { ...BUSY_STATE, handoff: { reason: "completed", context: "done" } },
+    nodeConfig([]),
+  );
+  assert.equal(update.awaitingInput, null);
+  assert.equal(update.outcome, undefined, "an undeclared domain slot is never touched");
 });

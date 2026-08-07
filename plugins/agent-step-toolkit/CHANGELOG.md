@@ -12,6 +12,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.2.0] — 2026-08-07
+
+Minor: **task-scoped state no longer outlives the task**. A channel middleware reuses ONE thread id
+for a whole call and never resets it on re-dispatch, so the thread outlives the task — whatever sits
+in state when a handback resolves is what the NEXT task on that thread starts from. A host whose
+graph derives a forced handback or escalation from a terminal domain slot re-fired it on every later
+turn, with no way out. `createHandoffNode` now nulls task-scoped state as it resolves a task-ENDING
+handback. Public surface is additive only; no existing export or signature changes.
+Suite 168 → 173. Migration: [migrations/2.1.0-to-2.2.0.md](migrations/2.1.0-to-2.2.0.md).
+
+### Added
+- `agentStepTaskScopedSlots` (`state.ts`, re-exported from `index.ts`): the library slots that
+  describe work in progress — `awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`,
+  `errorCount`. `handoff` is deliberately absent (the node returns it as null either way).
+- `HandoffSpec.clearsOnHandback?: readonly (keyof T & string)[]` — host DOMAIN slots to null on a
+  task-ending handback. Optional; the library's own task-scoped slots clear automatically.
+
+### Changed
+- `createHandoffNode` clears the task-scoped slots plus the host's declared domain slots when a
+  `completed` / `abandon` handback resolves in terminate mode. **`off_topic` clears nothing** (a
+  mid-task aside must stay resumable) and **a successful delegate clears nothing** (the conversation
+  never left this agent) — both are correctness invariants, not configurable. The closing line, the
+  signal, and any `resolveClosingMessage` reading state are computed BEFORE the clear, so the reply
+  is unaffected.
+- Cleared slots are written as plain `null`, so a declared domain slot must be nullable with a
+  replace-style reducer; slots whose reducer merges cannot be cleared this way.
+
 ## [2.1.0] — 2026-08-06
 
 Minor: adds the **caller-digit capture primitives** (`capture.ts`) — pure schema helpers for

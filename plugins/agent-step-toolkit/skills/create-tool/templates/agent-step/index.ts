@@ -59,6 +59,7 @@ export {
   agentStepStateSpec,
   agentStepZodShape,
   agentStepInternalSlotMask,
+  agentStepTaskScopedSlots,
 } from "./state.js";
 export type {
   AwaitingInput,

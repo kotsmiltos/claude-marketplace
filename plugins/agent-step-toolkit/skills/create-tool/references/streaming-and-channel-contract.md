@@ -164,7 +164,12 @@ service catalog and the prompt policy differ.
   (`success_message: ""`), because a topic change is an agent-to-agent re-route the destination
   agent narrates, not this one (`terminateMessage` is now only the delegate-FAILURE fallback);
   `completed` / `abandon` (agent-step ≥ 1.4.0) speak the LLM-composed closing carried in the
-  request's `context` — while delegate mode (off_topic only) calls the delegate deployment directly and keeps the
+  request's `context`, and — since agent-step 2.2.0 — also CLEAR the task's state as they resolve:
+  a middleware reuses ONE thread id for a whole call and never resets it on re-dispatch, so the
+  thread outlives the task and the next task on it would otherwise inherit the finished one's
+  pending gates and terminal outcome slots (`off_topic` clears nothing — a mid-task aside must
+  stay resumable). Middlewares need no change for this; it is stated here because thread reuse is
+  the middleware-side fact the behavior depends on — while delegate mode (off_topic only) calls the delegate deployment directly and keeps the
   conversation — its final message is NOT a handoff (no `is_handoff`; informational
   `delegated_to` only). Requires a hand-rolled graph (conditional edge — `createReactAgent`
   can't express it) and clients/middleware streaming `["messages-tuple", "custom"]` for the

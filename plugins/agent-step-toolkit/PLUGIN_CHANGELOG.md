@@ -11,6 +11,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.22.0] — 2026-08-07
+
+Ships **agent-step library 2.2.0** (from 2.1.0): a task-ending handback now clears task-scoped
+state. Downstream projects catch up with `/pull-library`; the library half needs no project change,
+and the migration's single transform is an optional (recommended) declaration of the host's own
+terminal domain slots.
+
+### Added
+- **Library `agentStepTaskScopedSlots`** (`state.ts`, re-exported from `index.ts`): the library
+  slots that describe work in progress — `awaitingInput`, `currentFlow`, `boundedChoice`,
+  `pagedRead`, `errorCount`. `handoff` is deliberately absent; the handoff node returns it as null
+  either way.
+- **Library `HandoffSpec.clearsOnHandback`** (optional): host DOMAIN slots to null when a
+  task-ending handback resolves. The library's own task-scoped slots clear automatically.
+- `agent-step-api.md`: `clearsOnHandback` in the `HandoffSpec` block, the task-scoped-clearing rules
+  with both carve-outs, and `agentStepTaskScopedSlots` alongside `agentStepInternalSlotMask`.
+- `streaming-and-channel-contract.md`: the middleware-side fact the behavior rests on — one thread id
+  is reused for a whole call and never reset, so the thread outlives the task. Middlewares need no
+  change; the note exists because that is where the reasoning belongs.
+- `migrations/2.1.0-to-2.2.0.md`: prose plus one optional transform (declare terminal domain slots),
+  with guidance on what NOT to list — cross-task identity/session slots, and slots whose reducer
+  merges rather than replaces.
+
+### Changed
+- Vendored library `VERSION` 2.1.0 → **2.2.0**; library suite 168 → **173**.
+- Plugin + marketplace descriptions name the clean-task-ending behavior and the 2.2.0 library.
+
+### Fixed
+- `workflows/create-tool.md`'s library-test expectation was stale (168) — now the verified 173.
+- `test-agent-step/SKILL.md`'s library test-file list omitted `capture`; stale since the 2.1.0
+  release, corrected here.
+
 ## [0.21.0] — 2026-08-06
 
 Ships **agent-step library 2.1.0** (from 2.0.0): the caller-digit capture primitives. Additive —

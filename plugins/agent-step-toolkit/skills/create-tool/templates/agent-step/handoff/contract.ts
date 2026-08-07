@@ -104,6 +104,30 @@ export interface HandoffSpec<T> {
    *  those signals. Return `undefined` to fall through to `request.context`.
    *  Never called for `off_topic` (that always uses `terminateMessage`). */
   resolveClosingMessage?: (state: T, request: HandoffRequest) => string | undefined;
+  /** Host DOMAIN slots to null when a task-ENDING handback resolves — i.e.
+   *  `completed` / `abandon` in terminate mode. Never applied to `off_topic`
+   *  (a topic-change aside must stay resumable: the caller can come straight
+   *  back mid-task) nor to a successful delegate (the conversation never left
+   *  this agent). That gating is a correctness invariant, not a preference, so
+   *  it is not configurable.
+   *
+   *  Why this exists: channel middlewares reuse ONE thread id for a whole call
+   *  and never reset it on re-dispatch, so a terminal outcome slot survives
+   *  into the NEXT task on the same thread. A host whose graph derives forced
+   *  handbacks/escalations from such a slot then re-fires them on every later
+   *  turn — the reply carries a stale closing and the caller is bounced,
+   *  turn after turn, with no way out (observed on QA 2026-08-07: an
+   *  already-active card activation, then a second activation request in the
+   *  same call).
+   *
+   *  The library-managed task-scoped slots (`agentStepTaskScopedSlots`) are
+   *  cleared automatically — list only your OWN slots here.
+   *
+   *  Each listed slot is written as `null`, so it must be nullable with a
+   *  replace-style reducer. A slot whose reducer MERGES (e.g. a record that
+   *  accumulates) cannot be cleared this way — leave those out and let the
+   *  pointer slot that selects from them carry the reset instead. */
+  clearsOnHandback?: readonly Exclude<keyof T & string, "messages">[];
   /** Build the delegate run's input from host state + the handoff request.
    *  Default: `{ messages: [{ role: "user", content: request.context }] }`.
    *  Use this to forward identity/context the delegate needs (the shared

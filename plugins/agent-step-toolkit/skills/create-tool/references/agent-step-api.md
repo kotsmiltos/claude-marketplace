@@ -282,6 +282,8 @@ interface PagedCache<Row> {
 
 The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `boundedChoice` / `handoff` / `errorCount`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.) Since 2.0.0 `buildAgentStepTool` **verifies channel completeness at construction**: a state schema missing a channel for any library slot the configuration writes throws (the message names the missing slots and the spreadable fragments).
 
+`index.ts` also exports **`agentStepTaskScopedSlots`** (2.2.0) — the subset of library slots that describe work IN PROGRESS (`awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `errorCount`), which `createHandoffNode` nulls when a task-ENDING handback resolves. `handoff` is deliberately absent: the node returns it as null either way. See `<handoff>` for the clearing rules and the host-slot counterpart (`HandoffSpec.clearsOnHandback`).
+
 `index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the six library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
 
 ## HandoffRequest (library-managed)
@@ -625,6 +627,13 @@ interface HandoffSpec<T> {
                                      // fall through to it. NEVER called for off_topic (a silent hand-back
                                      // since 1.6.0; terminateMessage only backs delegate failures).
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
+  clearsOnHandback?: readonly (keyof T & string)[];
+                                     // OPTIONAL (2.2.0) — host DOMAIN slots to null when a
+                                     // task-ENDING handback resolves (completed / abandon in
+                                     // terminate mode). The library's own task-scoped slots are
+                                     // cleared automatically; list only your own. Each is written
+                                     // as `null`, so it must be nullable with a replace-style
+                                     // reducer.
 }
 ```
 
@@ -634,9 +643,26 @@ neutral/failed phrasing. It runs in `createHandoffNode` for `completed` / `aband
 string becomes the final message `content` (and `handoff_metadata.success_message`), `undefined` falls
 through to `request.context`.
 
+**Task-scoped state is cleared when the task ends (2.2.0).** The THREAD outlives the TASK: a channel
+middleware reuses one thread id for a whole call and never resets it on re-dispatch, so whatever sits
+in state when a handback resolves is what the NEXT task on that thread starts from. On `completed` /
+`abandon` in terminate mode, `createHandoffNode` therefore nulls the library's own
+`agentStepTaskScopedSlots` (`awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `errorCount`)
+plus every domain slot the host named in **`clearsOnHandback`**. Two carve-outs, both correctness
+invariants rather than preferences, so neither is configurable: **`off_topic` clears nothing** (a
+mid-task aside must stay resumable — the caller can come straight back), and **a successful delegate
+clears nothing** (the conversation never left this agent). The closing line, the signal, and any
+`resolveClosingMessage` reading state are all computed before the clear, so the reply is unaffected.
+
+Declare `clearsOnHandback` when the host graph derives anything from a terminal domain slot — a forced
+handback, an escalation, a "this task already finished" branch. Left undeclared, such a slot survives
+into the next task and re-fires its branch on every later turn of the same call. Slots whose reducer
+MERGES cannot be cleared this way (the write is a plain `null`); reset those through the pointer slot
+that selects from them.
+
 Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `createHandoffNode(spec)`.
 
-Wire a conditional edge after the tool node — `createReactAgent` cannot express it, so the graph is hand-rolled: `addConditionalEdges("tools", s => handoffRequested(s) ? HANDOFF_NODE : "agent")`, `addNode(HANDOFF_NODE, createHandoffNode(spec))`, `addEdge(HANDOFF_NODE, END)`. The node emits a `handoff` custom event FIRST (streaming clients abort TTS / reroute before any content), resolves the response (terminate envelope, or a delegate run over the Platform API with live `delegated_token` pass-through and a behavioral fallback to the envelope on failure), emits `handoff_complete`, and returns `{ handoff: null, messages: [AIMessage] }` — the model never paraphrases the result.
+Wire a conditional edge after the tool node — `createReactAgent` cannot express it, so the graph is hand-rolled: `addConditionalEdges("tools", s => handoffRequested(s) ? HANDOFF_NODE : "agent")`, `addNode(HANDOFF_NODE, createHandoffNode(spec))`, `addEdge(HANDOFF_NODE, END)`. The node emits a `handoff` custom event FIRST (streaming clients abort TTS / reroute before any content), resolves the response (terminate envelope, or a delegate run over the Platform API with live `delegated_token` pass-through and a behavioral fallback to the envelope on failure), emits `handoff_complete`, and returns `{ handoff: null, ...clears, messages: [AIMessage] }` (the clears are empty unless a task-ending handback resolved — see above) — the model never paraphrases the result.
 
 **Final-message kwargs** (the channel contract): every non-delegate resolution is a handback — `is_handoff: true`, `handoff_type` = the reason's signal (`off_topic` / `completed` / `abandon`), `handoff_reason` = `context`, `handoff_metadata: { service_type, success_message }`. Spoken content: the `off_topic` envelope (`terminateMessage`, also the delegate-failure fallback) or the LLM-composed closing in `context` for `completed` / `abandon` (the middleware delivers it and flips routing for the NEXT request). Delegate success → NOT a handoff (conversation kept) — informational `{ delegated_to }` only. Streaming clients must request `stream_mode: ["messages-tuple", "custom"]` — the node-built final message never appears in the token stream; `handoff_complete` carries its text. Full wire details + the middleware checklist: `streaming-and-channel-contract.md`.
 </handoff>

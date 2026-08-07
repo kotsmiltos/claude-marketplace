@@ -17,7 +17,12 @@
 //   - emits a `handoff_complete` custom event carrying the final text
 //     (node-constructed AIMessages never appear in the `messages` token
 //     stream, so streaming clients need this to render/speak the reply);
-//   - returns `{ handoff: null, messages: [AIMessage] }` — the final AIMessage
+//   - clears task-scoped state on a task-ENDING handback (`completed` /
+//     `abandon`): the library's own `agentStepTaskScopedSlots` plus the host's
+//     `HandoffSpec.clearsOnHandback` domain slots, because the thread outlives
+//     the task (middlewares reuse one thread id per call). `off_topic` and a
+//     successful delegate clear nothing — both stay resumable;
+//   - returns `{ handoff: null, ...clears, messages: [AIMessage] }` — the final AIMessage
 //     carries the channel-contract `additional_kwargs`: terminate (and
 //     delegate-failure fallback) is the HANDBACK (`is_handoff: true`,
 //     `handoff_type`, `handoff_reason` = the request's context,
@@ -31,7 +36,7 @@
 
 import { AIMessage } from "@langchain/core/messages";
 import type { LangGraphRunnableConfig } from "@langchain/langgraph";
-import type { LibraryManagedSlots } from "../state.js";
+import { agentStepTaskScopedSlots, type LibraryManagedSlots } from "../state.js";
 import { HANDBACK_SIGNALS, type HandoffSpec } from "./contract.js";
 import { delegateThreadId, runDelegate } from "./delegate-client.js";
 
@@ -128,8 +133,24 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
           ...(delegateError !== null ? { delegate_error: delegateError } : {}),
         };
 
+    // Task-scoped state must not outlive the task. `completed`/`abandon` END
+    // the task, but the thread does NOT end with it: channel middlewares reuse
+    // one thread id per call and never reset it, so whatever stays in state
+    // here is what the NEXT task on this thread starts from. Cleared: the
+    // library's own task-scoped slots plus whatever domain slots the host
+    // declared. Deliberately NOT cleared on `off_topic` (a mid-task aside must
+    // stay resumable) nor after a successful delegate (the conversation never
+    // left this agent). Everything the reply needs — the closing line, the
+    // signal, any host override reading state — is already computed above.
+    const clears: Record<string, null> = {};
+    if (!delegated && request.reason !== "off_topic") {
+      for (const slot of agentStepTaskScopedSlots) clears[slot] = null;
+      for (const slot of spec.clearsOnHandback ?? []) clears[slot] = null;
+    }
+
     return {
       handoff: null,
+      ...clears,
       messages: [new AIMessage({ content, additional_kwargs: kwargs })],
     };
   };
