@@ -6,6 +6,24 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.4.1 (2026-08-09)
+
+Documentation-only. No behaviour, no exports, no env keys, no event-shape change — a project
+on 1.4.0 gains nothing functional by upgrading, and nothing breaks if it does.
+
+The version moves anyway because the marker's only job is identity: comments, a test fixture
+and the in-library README had been reworded in place while `VERSION` stayed at 1.4.0, so the
+shipped 1.4.0 and a downstream 1.4.0 were no longer the same bytes. This restores that.
+
+- `event-emitter.ts`, `schemas.ts` — comment wording generalized (no code touched).
+- `kafka-producer.test.ts` — client-id fixture is a generic sample name.
+- `redaction.test.ts` — one `describe` label states the finding without the QA thread id.
+- `README.md` — `APPLICATION_NAME` example and the event-envelope example use a generic
+  service name.
+
+Suite unchanged at 109.
+Migration: [migrations/1.4.0-to-1.4.1.md](migrations/1.4.0-to-1.4.1.md) (no action required).
+
 ## 1.4.0 (2026-08-07)
 
 Redaction-precision release, closing a real information-loss bug found by a downstream

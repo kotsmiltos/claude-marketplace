@@ -87,9 +87,12 @@ The same fact stated in two places must agree. Known multi-source facts in this 
   `agent-step-api.md` vs runner defaults.
 - The semver rules — PLUGIN_CHANGELOG header vs CHANGELOG header vs any SKILL prose quoting them.
 - Which copy of the library is canonical — bump-version SKILL prose vs root README.
-- **kafka-observability:** the `KAFKA_*` env-var list — `settings.ts`/`env.ts` (source of truth)
-  vs the skill SKILL.md `<quick_reference>` vs the workflow's `.env.example` block vs the
-  library `README.md` tables.
+- **kafka-observability:** the `KAFKA_*` env-var list — `settings.ts`/`env.ts` **plus
+  `run-filter.ts`** (source of truth; `KAFKA_RUN_FILTER_MODE` / `KAFKA_RUN_FILTER_PATTERNS` are
+  read there, so grepping only `settings.ts`/`env.ts` reports false findings) vs the skill
+  SKILL.md `<quick_reference>` vs the workflow's `.env.example` block vs the library `README.md`
+  tables. Note the workflow's block is a starter that defers to the README for the producer-tuning
+  keys — it is not claiming to be the complete list.
 - **kafka-observability:** the event envelope/data fields — `schemas.ts` (source of truth) vs the
   library `README.md` event-schema example vs the plugin `CHANGELOG.md` prose.
 

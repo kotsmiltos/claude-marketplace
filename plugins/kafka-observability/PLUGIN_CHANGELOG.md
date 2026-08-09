@@ -11,6 +11,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.5.1] — 2026-08-09
+
+Ships **observability library 1.4.1** (from 1.4.0) — documentation-only. No skill capability,
+public API, env key, or event-shape change anywhere in this release.
+
+### Changed
+- Vendored library `VERSION` 1.4.0 → **1.4.1**. The library's comments, one test fixture, one test
+  label, and the in-library `README.md` examples had been reworded in place while `VERSION` held at
+  1.4.0, so the shipped 1.4.0 and a downstream 1.4.0 were no longer the same bytes. The bump restores
+  the marker's only job — identifying which copy a project holds. Suite unchanged at 109.
+- `migrations/1.4.0-to-1.4.1.md`: no transforms, and says so plainly — the upgrade is the file copy
+  plus the `VERSION` write. Worth taking when convenient so the next real upgrade starts from a known
+  copy.
+
+### Fixed
+- `/bump-version`'s observability target table omitted `run-filter.ts` and `configure-slot.ts` from
+  the core-file sanity check, and named `settings.ts`/`env.ts` as the whole env-key public surface —
+  but `run-filter.ts` owns `KAFKA_RUN_FILTER_MODE` / `KAFKA_RUN_FILTER_PATTERNS`, so a future bump
+  would have classified semver against an incomplete surface and an env-key check would have reported
+  those two as phantom findings. Both rows corrected, and the matching note in
+  `publish-release`'s staleness checks.
+
 ## [0.5.0] — 2026-08-07
 
 No library change (still ships observability library **1.4.0**). Skill-capability

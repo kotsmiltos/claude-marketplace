@@ -46,7 +46,7 @@ KafkaEventProducer (kafka-producer.ts)
 | Variable | Description |
 |----------|-------------|
 | `KAFKA_ENABLED` | Exactly `true` to activate (strict — the global hook compares `=== "true"`). Defaults off; every other var below is ignored when disabled. |
-| `APPLICATION_NAME` | Service identifier (e.g. `ib_password_reset_agent`). |
+| `APPLICATION_NAME` | Service identifier (e.g. `password_reset_agent`). |
 | `KAFKA_BOOTSTRAP_SERVERS` | Broker address(es) (e.g. `kafka:29092`). |
 | `KAFKA_OBSERVABILITY_TOPIC` | Topic name (e.g. `observability-events`). |
 
@@ -72,7 +72,7 @@ KafkaEventProducer (kafka-producer.ts)
 {
   "id": "uuid-v4 (Kafka message key)",
   "thread_id": "conversation-correlation-id",
-  "application_name": "ib_password_reset_agent",
+  "application_name": "password_reset_agent",
   "timestamp": "2026-01-01T00:00:00.000Z",
   "data": {
     "type": "run",

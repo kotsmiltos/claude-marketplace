@@ -93,7 +93,7 @@ describe("redact — nested structures", () => {
   });
 });
 
-describe("redact — LLM usage counters survive (1.4.0, QA thread 019fdaef: 400+ over-redacted fields)", () => {
+describe("redact — LLM usage counters survive (1.4.0: 400+ over-redacted fields in QA)", () => {
   test("OpenAI-shaped usage: prompt/completion/total_tokens and *_tokens_details survive verbatim", () => {
     const usage = {
       prompt_tokens: 1450,

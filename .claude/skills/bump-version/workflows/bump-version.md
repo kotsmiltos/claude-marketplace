@@ -11,8 +11,8 @@ with a hard approval gate after Phase 3. This is a repo-maintainer skill living 
 | Plugin root | `plugins/agent-step-toolkit/` | `plugins/kafka-observability/` |
 | Embedded copy | `skills/create-tool/templates/agent-step/` | `skills/add-kafka-observability/templates/observability/` |
 | Source dir in a downstream repo | `src/agent-step/` | `src/observability/` |
-| Core files (Phase 1 sanity check) | `types.ts`, `state.ts`, `runner.ts`, `runner.test.ts`, `paginate.ts`, `paginate.test.ts`, `capture.ts`, `capture.test.ts`, `define-config.ts`, `index.ts` + the module dirs `compile/`, `run/`, `interaction/`, `controls/`, `handoff/` (tree since 2.0.0) | `index.ts`, `run-tracer.ts`, `event-emitter.ts`, `schemas.ts`, `kafka-producer.ts`, `bounded-queue.ts`, `redaction.ts`, `settings.ts`, `env.ts`, `registry.ts`, `event-producer.ts` (+ their `.test.ts` files, `README.md`) |
-| Public surface (Phase 2 semver) | `index.ts` exports, `types.ts` signatures, `buildAgentStepTool` options | `index.ts` exports (`startup`/`shutdown`/re-exports), `schemas.ts` event envelope/data shape, `settings.ts` env-var keys |
+| Core files (Phase 1 sanity check) | `types.ts`, `state.ts`, `runner.ts`, `runner.test.ts`, `paginate.ts`, `paginate.test.ts`, `capture.ts`, `capture.test.ts`, `define-config.ts`, `index.ts` + the module dirs `compile/`, `run/`, `interaction/`, `controls/`, `handoff/` (tree since 2.0.0) | `index.ts`, `run-tracer.ts`, `run-filter.ts`, `configure-slot.ts`, `event-emitter.ts`, `schemas.ts`, `kafka-producer.ts`, `bounded-queue.ts`, `redaction.ts`, `settings.ts`, `env.ts`, `registry.ts`, `event-producer.ts` (+ their `.test.ts` files, `README.md`) |
+| Public surface (Phase 2 semver) | `index.ts` exports, `types.ts` signatures, `buildAgentStepTool` options | `index.ts` exports (`startup`/`shutdown`/re-exports), `schemas.ts` event envelope/data shape, env-var keys in `settings.ts` AND `run-filter.ts` (`KAFKA_RUN_FILTER_MODE` / `_PATTERNS` live there) |
 | Blast-radius map | `references/tracked-assets.md` | `references/tracked-assets-observability.md` |
 | Downstream upgrade skill (consumes the migration) | `/pull-library` | `/add-kafka-observability` (upgrade mode) |
 | Phase 5 verification | bootstrap a throwaway project from templates | compile + run the library suite in a scratch dir (see Phase 5) |
@@ -63,7 +63,8 @@ Then:
      options type in `runner.ts`.
    - `observability`: `index.ts` exports (`startup`/`shutdown`/re-exports), the event
      envelope/data shape in `schemas.ts` (downstream sinks consume it — a removed/renamed field
-     is breaking), and the env-var keys in `settings.ts`/`env.ts` (deployment configs depend on
+     is breaking), and the env-var keys in `settings.ts`/`env.ts` — plus `run-filter.ts`, which
+     owns `KAFKA_RUN_FILTER_MODE` / `KAFKA_RUN_FILTER_PATTERNS` (deployment configs depend on
      them).
    - **major** — an export/field/env key was removed or renamed, a signature changed, or a new
      required arg/config appeared.
