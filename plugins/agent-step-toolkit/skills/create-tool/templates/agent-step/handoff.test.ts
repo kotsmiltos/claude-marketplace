@@ -6,7 +6,12 @@ import type { AIMessage } from "@langchain/core/messages";
 
 import { defineConfig } from "./define-config.js";
 import { buildAgentStepTool, runSteps, type BuildAgentStepToolOptions } from "./runner.js";
-import { HANDOFF_ACTION, handoffRequested, type HandoffSpec } from "./handoff/contract.js";
+import {
+  HANDOFF_ACTION,
+  handoffRequested,
+  forcedHandoffRequested,
+  type HandoffSpec,
+} from "./handoff/contract.js";
 import { createHandoffNode } from "./handoff/node.js";
 import type { ExecutorRegistry, VerifierRegistry } from "./types.js";
 import type {
@@ -692,4 +697,190 @@ test("a spec without clearsOnHandback clears only the library's own slots", asyn
   );
   assert.equal(update.awaitingInput, null);
   assert.equal(update.outcome, undefined, "an undeclared domain slot is never touched");
+});
+
+// ─── forced handoff (2.3.0) ───────────────────────────────────────────────── //
+//
+// The "don't dead-end the caller" guard: the model ended its turn in plain text
+// while state already says the task is over. The RESOLVER derives the request
+// itself, so a host wires `forcedHandoffRequested` straight at HANDOFF_NODE and
+// keeps a three-node graph. Before 2.3.0 this needed a fourth node whose only
+// job was to write the slot the resolver would read back one superstep later.
+
+const FORCED_SPEC: HandoffSpec<typeof BUSY_STATE> = {
+  offTopic: { mode: "terminate" },
+  terminateMessage: "Transferring you now.",
+  clearsOnHandback: ["outcome", "pointer"],
+  forcedHandoff: (state) =>
+    state.outcome === "already_active"
+      ? { reason: "completed", context: "internal — never spoken" }
+      : undefined,
+  resolveClosingMessage: () => "No activation needed.",
+};
+
+test("forced: the resolver derives the request when no slot is pending", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
+  const events: unknown[] = [];
+  const update = await node({ ...BUSY_STATE, handoff: null }, nodeConfig(events));
+
+  // Indistinguishable from a model-requested handback — same envelope, same
+  // events, same clears. That equivalence is the whole point: the forced path
+  // must not be a second, subtly different resolution.
+  const [message] = update.messages as AIMessage[];
+  assert.equal(message.content, "No activation needed.");
+  assert.deepEqual(message.additional_kwargs, {
+    is_handoff: true,
+    handoff_type: "completed",
+    handoff_reason: "internal — never spoken",
+    handoff_metadata: {
+      service_type: "completed",
+      success_message: "No activation needed.",
+    },
+  });
+  assert.deepEqual(
+    (events as { type: string }[]).map((e) => e.type),
+    ["handoff", "handoff_complete"],
+  );
+  assert.equal(update.outcome, null, "a forced handback still ends the task");
+  assert.equal(update.pointer, null);
+  assert.equal(update.handoff, null);
+});
+
+test("forced: a PENDING slot always wins — the guard never overrides the model", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
+  const update = await node(
+    // State would force `completed`, but the model explicitly asked to abandon.
+    { ...BUSY_STATE, handoff: { reason: "abandon", context: "caller gave up" } },
+    nodeConfig([]),
+  );
+  const [message] = update.messages as AIMessage[];
+  assert.equal(message.additional_kwargs.handoff_type, "abandon");
+  assert.equal(message.additional_kwargs.handoff_reason, "caller gave up");
+});
+
+test("forced: nothing pending and nothing derivable → the node is inert", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
+  const events: unknown[] = [];
+  const update = await node(
+    { ...BUSY_STATE, outcome: null, handoff: null },
+    nodeConfig(events),
+  );
+  // No message, no clears, and — critically — NO control-plane event: a client
+  // must not see a `handoff` signal on a turn that was not a handoff.
+  assert.deepEqual(update, {});
+  assert.deepEqual(events, []);
+});
+
+test("forced: resolveHandoffType still decides the signal on the derived request", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>({
+    ...FORCED_SPEC,
+    // The hook derives `completed`; state says this one escalates.
+    resolveHandoffType: () => "abandon",
+  });
+  const events: unknown[] = [];
+  const update = await node({ ...BUSY_STATE, handoff: null }, nodeConfig(events));
+  const [message] = update.messages as AIMessage[];
+  assert.equal(message.additional_kwargs.handoff_type, "abandon");
+  assert.equal(
+    (message.additional_kwargs.handoff_metadata as { service_type: string }).service_type,
+    "abandon",
+  );
+  // The control-plane event agrees — it is emitted after the override, which is
+  // the invariant the old host-side wrapper broke.
+  assert.equal((events[0] as { reason: string }).reason, "abandon");
+});
+
+test("forced: the edge predicate and the resolver cannot disagree", async () => {
+  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
+  for (const state of [
+    { ...BUSY_STATE, handoff: null },
+    { ...BUSY_STATE, outcome: null, handoff: null },
+  ]) {
+    const routes = forcedHandoffRequested(state, FORCED_SPEC);
+    const update = await node(state, nodeConfig([]));
+    assert.equal(
+      routes,
+      "messages" in update,
+      "the predicate routes to the node exactly when the node resolves something",
+    );
+  }
+  // A pending slot is the OTHER predicate's business — the forced one declines
+  // it, so a host cannot double-route the same handoff.
+  const pending = { ...BUSY_STATE, handoff: { reason: "completed" as const, context: "c" } };
+  assert.equal(forcedHandoffRequested(pending, FORCED_SPEC), false);
+  assert.equal(handoffRequested(pending), true);
+});
+
+// ─── resolveHandoffMetadata ───────────────────────────────────────────────── //
+// The hook's whole safety argument is "host fields first, LIBRARY keys applied
+// LAST so a host cannot clobber the channel contract". Nothing asserted that
+// until now — and a host CAN legitimately return a key named `service_type`.
+
+test("metadata: host fields ride the envelope on every handback type", async () => {
+  const seen: string[] = [];
+  const node = createHandoffNode<S>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    resolveHandoffMetadata: (_state, request) => {
+      seen.push(request.reason);
+      return { collected_identity: { afm: "012345678" } };
+    },
+  });
+  for (const reason of ["completed", "abandon", "off_topic"] as const) {
+    const update = await node(
+      { handoff: { reason, context: "ctx" } },
+      nodeConfig([]),
+    );
+    const [message] = update.messages as AIMessage[];
+    const md = message.additional_kwargs.handoff_metadata as Record<string, unknown>;
+    assert.deepEqual(
+      md.collected_identity,
+      { afm: "012345678" },
+      `${reason} must carry the host metadata`,
+    );
+  }
+  // off_topic included on purpose: identity forwarded to a call-scoped store
+  // must survive a re-route, not only a task ending.
+  assert.deepEqual(seen, ["completed", "abandon", "off_topic"]);
+});
+
+test("metadata: the LIBRARY's own keys win — a host cannot clobber the contract", async () => {
+  const node = createHandoffNode<S>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    // A host returning these exact keys must NOT be able to rewrite the wire
+    // contract the middleware routes on.
+    resolveHandoffMetadata: () => ({
+      service_type: "HOSTILE",
+      success_message: "HOSTILE",
+      collected_identity: { afm: "1" },
+    }),
+  });
+  const update = await node(
+    { handoff: { reason: "completed", context: "the closing line" } },
+    nodeConfig([]),
+  );
+  const [message] = update.messages as AIMessage[];
+  const md = message.additional_kwargs.handoff_metadata as Record<string, unknown>;
+  assert.equal(md.service_type, "completed", "library service_type must survive");
+  assert.equal(md.success_message, "the closing line", "library success_message must survive");
+  assert.deepEqual(md.collected_identity, { afm: "1" }, "non-contract host keys still ride");
+});
+
+test("metadata: returning undefined adds no fields at all", async () => {
+  const node = createHandoffNode<S>({
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    resolveHandoffMetadata: () => undefined,
+  });
+  const update = await node(
+    { handoff: { reason: "completed", context: "ctx" } },
+    nodeConfig([]),
+  );
+  const [message] = update.messages as AIMessage[];
+  assert.deepEqual(
+    Object.keys(message.additional_kwargs.handoff_metadata as object).sort(),
+    ["service_type", "success_message"],
+    "no empty object, no stray keys",
+  );
 });

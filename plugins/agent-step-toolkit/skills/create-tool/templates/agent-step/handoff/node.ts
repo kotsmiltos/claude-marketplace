@@ -36,7 +36,7 @@
 
 import { AIMessage } from "@langchain/core/messages";
 import type { LangGraphRunnableConfig } from "@langchain/langgraph";
-import { agentStepTaskScopedSlots, type LibraryManagedSlots } from "../state.js";
+import { agentStepTaskScopedSlots, type HandoffRequest, type LibraryManagedSlots } from "../state.js";
 import { HANDBACK_SIGNALS, type HandoffSpec } from "./contract.js";
 import { delegateThreadId, runDelegate } from "./delegate-client.js";
 
@@ -48,7 +48,17 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     state: T,
     config: LangGraphRunnableConfig,
   ): Promise<Record<string, unknown>> => {
-    const request = state.handoff;
+    // The pending slot is the normal path (the model called `request_handoff`).
+    // When it is empty the FORCED guard applies: state already says the task is
+    // over but the model answered in plain text (`spec.forcedHandoff`). It is
+    // resolved HERE rather than by a node that writes the slot first, so the
+    // graph stays three nodes (model → tools → handoff) and the forced request
+    // is never written to state at all — no host graph code goes near the
+    // library-managed `handoff` slot, which is the rule 2.0.0 set for executors
+    // and hosts were dodging with a hand-rolled node. `forcedHandoffRequested`
+    // is the matching edge predicate calling the SAME pure function of state,
+    // so predicate and node cannot disagree.
+    const request = state.handoff ?? spec.forcedHandoff?.(state) ?? null;
     if (!request) return {};
     const writer = config.writer as ((chunk: unknown) => void) | undefined;
     const delegate =
@@ -56,11 +66,29 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
         ? spec.offTopic
         : null;
 
+    // The host may decide the SIGNAL from state rather than take the model's
+    // word for it (`resolveHandoffType`). Resolve it HERE — before the first
+    // control-plane event — so the event, the closing line, `handoff_type` and
+    // `handoff_metadata.service_type` all carry one value. Hosts used to do
+    // this by mutating the resolved message's kwargs afterwards, which left
+    // this event carrying the pre-override reason. Terminate-mode task endings
+    // only: an override can swap completed↔abandon, never produce or erase an
+    // `off_topic`, so delegate detection and the clearing gate below are
+    // unaffected by construction.
+    const overridden =
+      !delegate && request.reason !== "off_topic"
+        ? spec.resolveHandoffType?.(state, request)
+        : undefined;
+    const effective: HandoffRequest =
+      overridden !== undefined && overridden !== request.reason
+        ? { ...request, reason: overridden }
+        : request;
+
     // Control-plane signal FIRST — before any response content exists — so a
     // streaming client can abort TTS / reroute immediately.
     writer?.({
       type: "handoff",
-      reason: request.reason,
+      reason: effective.reason,
       mode: delegate ? "delegate" : "terminate",
       ...(delegate ? { delegated_to: delegate.assistantId } : {}),
     });
@@ -77,9 +105,9 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     // completed / abandon are genuine endings, NOT redirects — they keep their
     // closing line (resolveClosingMessage override, else the LLM `context`).
     let content =
-      request.reason === "off_topic"
+      effective.reason === "off_topic"
         ? ""
-        : (spec.resolveClosingMessage?.(state, request) ?? request.context);
+        : (spec.resolveClosingMessage?.(state, effective) ?? effective.context);
     let delegated = false;
     let delegateError: string | null = null;
 
@@ -122,14 +150,20 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     //   completed / abandon deliver this reply and flip routing for the NEXT
     //   request), `context` in `handoff_reason`, the spoken text in
     //   `handoff_metadata.success_message`.
-    const signal = HANDBACK_SIGNALS[request.reason];
+    const signal = HANDBACK_SIGNALS[effective.reason];
     const kwargs: Record<string, unknown> = delegated
       ? { delegated_to: delegate!.assistantId }
       : {
           is_handoff: true,
           handoff_type: signal,
-          handoff_reason: request.context,
-          handoff_metadata: { service_type: signal, success_message: content },
+          handoff_reason: effective.context,
+          handoff_metadata: {
+            // Host-derived fields first; the library's own keys are applied
+            // LAST so a host cannot clobber the contract (`resolveHandoffMetadata`).
+            ...(spec.resolveHandoffMetadata?.(state, effective) ?? {}),
+            service_type: signal,
+            success_message: content,
+          },
           ...(delegateError !== null ? { delegate_error: delegateError } : {}),
         };
 
@@ -143,7 +177,7 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     // left this agent). Everything the reply needs — the closing line, the
     // signal, any host override reading state — is already computed above.
     const clears: Record<string, null> = {};
-    if (!delegated && request.reason !== "off_topic") {
+    if (!delegated && effective.reason !== "off_topic") {
       for (const slot of agentStepTaskScopedSlots) clears[slot] = null;
       for (const slot of spec.clearsOnHandback ?? []) clears[slot] = null;
     }

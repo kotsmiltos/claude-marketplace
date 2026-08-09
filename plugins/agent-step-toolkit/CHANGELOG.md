@@ -12,6 +12,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.3.0] — 2026-08-09
+
+Minor: **mechanisms move into the engine.** A survey of the voice-agent family found three mechanisms
+being hand-rolled per host and two re-derivations of things the library already owned — each one
+reaching around a library boundary. Hosts overrode the handback signal and metadata by mutating the
+resolved message's `additional_kwargs` from OUTSIDE (a shape the library documents as a frozen channel
+contract), which also left the `handoff` control-plane event carrying the pre-override reason; hosts
+forced a handback from their own graph node, writing the library-managed `handoff` slot that 2.0.0 put
+off-limits; hosts re-derived "the current caller turn" by scanning the transcript because the library's
+own resolver was unreachable; and the model was left to paraphrase captured digits back to the caller
+even though the library owns the capture. Nothing is removed or reshaped. Suite 173 → 193.
+Migration: [migrations/2.2.0-to-2.3.0.md](migrations/2.2.0-to-2.3.0.md).
+
+### Added
+- **`HandoffSpec.forcedHandoff?(state)`** + **`forcedHandoffRequested(state, spec)`** — derive a handoff
+  when the MODEL ended a turn in plain text but state says the task is over. Resolved inside
+  `createHandoffNode` (`state.handoff ?? spec.forcedHandoff?.(state)`), so the graph stays three nodes,
+  the forced request is never written to state, and predicate and resolver call the same pure function
+  and cannot disagree. A pending slot always wins.
+- **`HandoffSpec.resolveHandoffType?(state, request)`** — decide the handback SIGNAL from state,
+  resolved BEFORE the first control-plane event so the event, the closing line, `handoff_type` and
+  `service_type` agree. Terminate-mode `completed`/`abandon` only; it can never produce or erase an
+  `off_topic`, so delegate detection and the task-ending clear are unaffected by construction.
+- **`HandoffSpec.resolveHandoffMetadata?(state, request)`** — host fields merged into
+  `handoff_metadata` for every handback INCLUDING `off_topic` (identity forwarded to a call-scoped
+  store must survive a re-route), never for a successful delegate. The library's own keys are applied
+  LAST and cannot be clobbered.
+- **`guardTurn` slot + `guardFiredOnTurn` / `markGuardFired`** (`interaction/guard-latch.ts`) — fire a
+  HOST model-input guard at most once per caller turn despite the ReAct loop re-entering the model
+  within that turn. Entries expire when the turn id changes, so it is deliberately turn-scoped, not
+  task-scoped. With no turn identity it stays UNLATCHED rather than locking a consumer out.
+- **`resolveCallerTurnId`** is now exported — the library's own definition of the current caller turn
+  (host hook, else the latest human message id), the same identity the confirmation gate and the
+  bounded-choice control use.
+- **`ConfirmationOpts.readBack?(params, state)`** → **`read_back`** on the proposal body. The library
+  owns the capture (`capture.ts` sanitized, joined and validated the params), so it owns reporting it
+  back; the host supplies only the lexicon. Rendered from the PARSED params — including on a
+  re-proposal, from the corrected value — and never on the executing re-call.
+
+### Changed
+- `agentStepInternalSlotMask` grows to seven keys (`guardTurn`). `agentStepTaskScopedSlots` is
+  unchanged: the latch is turn-scoped and expires on its own.
+- The executor `stateUpdate` guard stays at the six RUNNER-owned slots and now says why: `guardTurn` is
+  a library slot the runner never transitions, so guarding executors against it would ban nothing.
+- `markGuardFired` patches do NOT compose by spreading — each carries a whole `guardTurn` map built
+  from the state passed in, and the reducer replaces, so two patches from the SAME state lose the
+  first. Documented on the helper and pinned by a test.
+
 ## [2.2.0] — 2026-08-07
 
 Minor: **task-scoped state no longer outlives the task**. A channel middleware reuses ONE thread id

@@ -104,6 +104,55 @@ export interface HandoffSpec<T> {
    *  those signals. Return `undefined` to fall through to `request.context`.
    *  Never called for `off_topic` (that always uses `terminateMessage`). */
   resolveClosingMessage?: (state: T, request: HandoffRequest) => string | undefined;
+  /** Decide the handback SIGNAL from state instead of taking the model's word
+   *  for it. Consulted only for a terminate-mode `completed` / `abandon` — never
+   *  for `off_topic` (a re-route is not a task ending) and never for a
+   *  successful delegate (the conversation never left this agent). Return
+   *  `undefined` to fall through to `HANDBACK_SIGNALS[request.reason]`, the same
+   *  convention `resolveClosingMessage` uses.
+   *
+   *  Why it belongs here: hosts were overriding `handoff_type` and
+   *  `handoff_metadata.service_type` by mutating the resolved message's
+   *  `additional_kwargs` from OUTSIDE — a shape this file documents as a frozen
+   *  channel contract — which also left the `handoff` control-plane event
+   *  carrying the PRE-override reason. Resolving here keeps the event, the
+   *  signal and the metadata consistent by construction.
+   *
+   *  Toggling needs no extra switch: omit the field to disable it for the host,
+   *  or return `undefined` to disable it for one resolution. An env/rollout kill
+   *  switch therefore lives in the HOST function — feature flags are host
+   *  configuration, and an `enabled` flag here would duplicate `undefined`. */
+  resolveHandoffType?: (
+    state: T,
+    request: HandoffRequest,
+  ) => Extract<HandoffRequest["reason"], "completed" | "abandon"> | undefined;
+  /** Host-derived fields to merge into `handoff_metadata` on a handback. The
+   *  library's own keys (`service_type`, `success_message`) are applied LAST and
+   *  cannot be clobbered. Called for EVERY handback type — including
+   *  `off_topic`, because identity forwarded to a call-scoped store must survive
+   *  a re-route — but never for a successful delegate, which is not a handback.
+   *
+   *  Exists because the library builds the envelope and closes it, so hosts
+   *  reopened it afterwards: four agents in this family carry the identical
+   *  `(md as Record<string, unknown>).collected_identity = …` line. */
+  resolveHandoffMetadata?: (
+    state: T,
+    request: HandoffRequest,
+  ) => Record<string, unknown> | undefined;
+  /** Derive a handoff from state when the MODEL ended a turn without one — the
+   *  "don't dead-end the caller" guard. Return `undefined` for the normal case
+   *  (no forced transition). Consumed by `forcedHandoffRequested` on the model
+   *  node's conditional edge and by `createHandoffNode`, which resolves the
+   *  request directly — there is no separate node and the forced request is
+   *  never written to state.
+   *
+   *  Keep it a pure function of state. It runs on turns where the model chose
+   *  to answer in plain text, so anything it decides must be derivable without
+   *  reading the caller's words. NOTE the failure mode this replaces: a host
+   *  graph that re-derives a forced handback from a TERMINAL slot fires it again
+   *  on every later turn of the same call unless that slot is listed in
+   *  `clearsOnHandback` — the caller is then bounced with no way out. */
+  forcedHandoff?: (state: T) => HandoffRequest | undefined;
   /** Host DOMAIN slots to null when a task-ENDING handback resolves — i.e.
    *  `completed` / `abandon` in terminate mode. Never applied to `off_topic`
    *  (a topic-change aside must stay resumable: the caller can come straight
@@ -140,4 +189,18 @@ export interface HandoffSpec<T> {
  *  `handoffRequested(state) ? HANDOFF_NODE : <model node>`. */
 export function handoffRequested(state: LibraryManagedSlots): boolean {
   return state.handoff != null;
+}
+
+/** Edge predicate for the FORCED handoff: true when no handoff is pending (the
+ *  model ended the turn without one) yet `spec.forcedHandoff` derives one from
+ *  state. Wire it on the model node's conditional edge, ahead of END:
+ *  `forcedHandoffRequested(state, spec) ? HANDOFF_NODE : END`. The resolver
+ *  then re-derives the same request from the same pure function, so the graph
+ *  needs no arming node and the slot is never written. */
+export function forcedHandoffRequested<T extends LibraryManagedSlots>(
+  state: T,
+  spec: HandoffSpec<T>,
+): boolean {
+  if (state.handoff != null) return false;
+  return spec.forcedHandoff?.(state) != null;
 }

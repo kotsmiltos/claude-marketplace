@@ -2,10 +2,12 @@
 //
 // Graph-level state — defined ONCE as a Zod schema. Per-tool slots get added as
 // tools are introduced. `awaitingInput` + `currentFlow` + `boundedChoice` +
-// `pagedRead` + `handoff` + `errorCount` are library-managed slots used by the
-// runner to coordinate
+// `pagedRead` + `handoff` + `errorCount` + `guardTurn` are library-managed slots
+// used by the runner to coordinate
 // confirmation gates, OTP gates, double-entry-match gates, multi-turn flows, the
-// `pageable` read reslice-cache, and the auto-handoff counter. They are NOT
+// `pageable` read reslice-cache, and the auto-handoff counter — plus `guardTurn`,
+// the turn-scoped latch a HOST model-input guard writes via `markGuardFired`.
+// They are NOT
 // declared here — the library exports them as a single spreadable Zod fragment
 // (`agentStepZodShape`), built from the same source-of-truth schemas the runner
 // mutates, so the host's storage can never drift from the library's contract.
@@ -57,8 +59,8 @@ const PendingHandoffSchema = z.object({
 
 export const AgentStateSchema = MessagesZodState.extend({
   // Library-managed slots (awaitingInput + currentFlow + boundedChoice +
-  // pagedRead + handoff + errorCount), carrying the last-writer-wins channel
-  // semantics the runner
+  // pagedRead + handoff + errorCount + guardTurn), carrying the last-writer-wins
+  // channel semantics the runner
   // expects. Never re-declare these by hand — spread the library fragment.
   ...agentStepZodShape,
 

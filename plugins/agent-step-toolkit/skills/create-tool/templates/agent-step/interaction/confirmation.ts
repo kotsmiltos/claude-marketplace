@@ -23,6 +23,9 @@ import { valueEqual } from "../run/value-equal.js";
 export const CONFIRMATION_DEFAULTS: Required<ConfirmationOpts> = {
   maxAttempts: 3,
   lockdown: true,
+  // No read-back by default: a host that does not render one keeps handing the
+  // model raw `proposed_params`, exactly as before this option existed.
+  readBack: () => undefined,
 };
 
 export function normalizeConfirmation(
@@ -33,6 +36,7 @@ export function normalizeConfirmation(
   return {
     maxAttempts: v.maxAttempts ?? CONFIRMATION_DEFAULTS.maxAttempts,
     lockdown: v.lockdown ?? CONFIRMATION_DEFAULTS.lockdown,
+    readBack: v.readBack ?? CONFIRMATION_DEFAULTS.readBack,
   };
 }
 

@@ -11,6 +11,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.23.0] — 2026-08-09
+
+Ships **agent-step library 2.3.0** (from 2.2.0): the mechanisms hosts were hand-rolling move into the
+engine. Downstream projects catch up with `/pull-library`; every addition is optional and every default
+preserves existing behaviour, so the upgrade is safe to take before adopting any of it — the migration's
+transforms are about DELETING host workarounds, not adding wiring.
+
+### Added
+- **Library handoff hooks** — `forcedHandoff` + the `forcedHandoffRequested` edge predicate (a
+  state-derived handoff, resolved inside `createHandoffNode` so no host code writes the library slot and
+  no arming node is needed), `resolveHandoffType` (the handback signal decided from state, resolved
+  before the first control-plane event), `resolveHandoffMetadata` (host fields merged into
+  `handoff_metadata`, the library's own keys applied last).
+- **Library guard latch** — the `guardTurn` slot plus `guardFiredOnTurn` / `markGuardFired`, and
+  `resolveCallerTurnId` now exported: fire a host model-input guard once per caller turn without
+  re-deriving the turn identity or parking it in the channel envelope.
+- **Library `ConfirmationOpts.readBack`** → `read_back` on the proposal body, so the model speaks back
+  what the runner actually recorded instead of paraphrasing captured digits.
+- `agent-step-api.md`: a `guardTurn` section (including why its patches do not compose by spreading),
+  the three handoff hooks with the pre-event ordering rationale and the forced-handoff re-fire trap,
+  `readBack` through both propose paths and the result envelope, and `resolveCallerTurnId` in
+  `<caller_turn_identity>`.
+- `streaming-and-channel-contract.md`: `handoff_metadata` may carry host-derived fields — supplied
+  through the hook, never by patching the envelope after the node built it (which also left the
+  control-plane event carrying pre-override values).
+- `migrations/2.2.0-to-2.3.0.md`: six transforms, four of which retire a host workaround.
+
+### Changed
+- Vendored library `VERSION` 2.2.0 → **2.3.0**; library suite 173 → **193**; two library files added
+  (`interaction/guard-latch.ts`, `guard-latch.test.ts`).
+- Library-slot enumerations across the templates, references, and SKILL prose now carry `guardTurn`,
+  each noting it is HOST-written — it is the one library slot excluded from the executor `stateUpdate`
+  guard, and `executor-patterns.md` now says why.
+- `tracked-assets.md` (repo-level maintainer skill) tracks `tool-sandbox-test.ts.template`, which calls
+  `runSteps` directly and so mirrors that public entry point.
+- Plugin + marketplace descriptions name the 2.3.0 capabilities.
+
+### Fixed
+- `workflows/create-tool.md`'s library-test expectation was stale (173) — now the verified 193.
+- `agent-step-api.md` claimed `agentStepZodShape` brings "all six slots" in; it is seven.
+- `project-bootstrap-structure.md`'s `state.ts` slot list omitted `boundedChoice` — stale since the
+  bounded-choice release, corrected here.
+
 ## [0.22.0] — 2026-08-07
 
 Ships **agent-step library 2.2.0** (from 2.1.0): a task-ending handback now clears task-scoped

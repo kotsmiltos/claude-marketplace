@@ -113,8 +113,24 @@ interface ConfirmationOpts {
                                    // pending. Leave it true. Set false only if you deliberately want
                                    // unrelated READS to proceed mid-confirmation (rare; weakens the
                                    // safety gate, since the customer can wander off the pending action).
+  readBack?: (params: Record<string, unknown>, state: unknown) => string | undefined;
+                                   // OPTIONAL (2.3.0) — render what the runner ACTUALLY recorded, for
+                                   // the model to speak back verbatim. A non-empty return rides the
+                                   // proposal body as `read_back` beside `proposed_params`. See below.
 }
 ```
+
+**`readBack`** exists because the library owns the CAPTURE half — `capture.ts` sanitized, joined and
+validated those params — so it alone knows the exact stored value. Handing the model raw
+`proposed_params` and leaving "tell the caller what was recorded" to its discretion is measurably where
+read-backs break: a model converting digits to words drops or doubles one on runs of equals, and the
+caller then confirms against wrong words — the one mistake a confirmation gate cannot catch. The
+library does NOT own the LEXICON (rendering is language- and channel-specific), so the host supplies
+this function. It receives the **parsed** params (rendering from what was stored is what stops the
+read-back drifting from what executes) and the current state view. Deliberately non-generic —
+`ConfirmationOpts` carries no state type, so hosts cast their own state exactly as executors do with
+their slices. Pair it with a prompt rule telling the model to speak `read_back` verbatim when present;
+without such a rule the field is inert.
 
 There is deliberately **no TTL**: the runner times nothing out. Stale gates clear via `abort_pending_input` or via backend signals the executor surfaces as `clear_awaiting_input` / `abort_flow` effects. (2.0.0 removed the inert `ttlMs` field and the empty `OtpOpts` type — `requiresOtp` is a plain `boolean`; the library never counts OTP attempts, the backend is authoritative.)
 
@@ -280,11 +296,11 @@ interface PagedCache<Row> {
 }
 ```
 
-The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `boundedChoice` / `handoff` / `errorCount`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.) Since 2.0.0 `buildAgentStepTool` **verifies channel completeness at construction**: a state schema missing a channel for any library slot the configuration writes throws (the message names the missing slots and the spreadable fragments).
+The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `boundedChoice` / `handoff` / `errorCount` / `guardTurn`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.) Since 2.0.0 `buildAgentStepTool` **verifies channel completeness at construction**: a state schema missing a channel for any library slot the configuration writes throws (the message names the missing slots and the spreadable fragments).
 
 `index.ts` also exports **`agentStepTaskScopedSlots`** (2.2.0) — the subset of library slots that describe work IN PROGRESS (`awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `errorCount`), which `createHandoffNode` nulls when a task-ENDING handback resolves. `handoff` is deliberately absent: the node returns it as null either way. See `<handoff>` for the clearing rules and the host-slot counterpart (`HandoffSpec.clearsOnHandback`).
 
-`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the six library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
+`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the seven library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
 
 ## HandoffRequest (library-managed)
 
@@ -298,6 +314,20 @@ interface HandoffRequest {
                     // completed / abandon → the LLM-composed closing line the node speaks
 }
 ```
+
+## guardTurn (library-managed, HOST-written) — 2.3.0
+
+The turn-scoped latch for **host model-input guards**: `Record<string, string> | null`, mapping a guard id to the caller-turn id it last fired on. It exists because the ReAct loop re-enters the model several times within ONE caller turn (agent → tools → agent …), so a host guard whose condition stays true would re-inject its note on every pass. Deciding "has this already fired since the caller last spoke?" needs the stable caller-turn identity the library already owns (`<caller_turn_identity>`) — hosts that re-derived it by scanning messages backwards ended up parking the answer in the resolved message's `additional_kwargs`, i.e. inside the frozen channel contract.
+
+```ts
+guardFiredOnTurn(state, guardId, getCallerTurnId?): boolean   // has it fired on the CURRENT turn?
+markGuardFired(state, guardId, getCallerTurnId?): Partial<T>  // patch recording that it just did
+```
+
+- **The runner never writes this slot** — it is the one library slot excluded from the executor `stateUpdate` guard (`LIBRARY_MANAGED_KEYS`), because banning a slot the runner doesn't coordinate would ban nothing. It is also absent from `agentStepTaskScopedSlots`: entries expire by themselves when the turn id changes, so the latch is turn-scoped, not task-scoped.
+- **No turn identity ⇒ UNLATCHED** (returns false, patch is empty) — an identity-less consumer keeps the unlatched behaviour rather than being silently locked out, the same stance the confirmation gate takes for `sameTurnLocked`.
+- **The patches do NOT compose by spreading.** Each carries a whole `guardTurn` map built from the state passed in, and the reducer replaces — so `{...markGuardFired(s,"a"), ...markGuardFired(s,"b")}` loses `"a"`. Chain them instead (feed the first patch's state forward, or merge the maps by hand). Pinned by a library test.
+- The library owns the LATCH and the turn identity only. What a guard says, and where the host injects it, stay the host's prompt.
 
 ## errorCount (library-managed)
 
@@ -400,7 +430,7 @@ The runner switches the mutation action into a five-mode state machine. Detected
 ### First call (no pending, or pending action ≠ this action) → **propose mode**
 - Parse params with the action's **effective schema** (the declared `paramsSchema`, page-extended for `pageable` actions) and store them **PARSED** — schema normalization (`z.preprocess`, coercion) is applied before storage: `awaitingInput = { kind: "confirmation", for_action, params, attempts_left: maxAttempts, max_attempts, proposed_on_caller_turn_id? }`. The proposal is stamped with the current caller-turn identity when one exists (see `<caller_turn_identity>`).
 - A failed parse returns `{ ok: false, error: "invalid_params" }` with the overridable `invalid_params` system-message summary and the raw Zod detail in `_debug` (nothing is stored).
-- Return `{ ok: true, summary, needs_confirmation: true, proposed_params, attempts_left }`.
+- Return `{ ok: true, summary, needs_confirmation: true, proposed_params, attempts_left }`, plus **`read_back`** when the action declares `ConfirmationOpts.readBack` and it renders a non-empty string for these parsed params (2.3.0). Absent — not empty — when it renders nothing.
 - **Executor is NOT invoked.**
 
 ### Re-call whose params **parse to the pending proposal**, on a LATER caller turn → **execute mode**
@@ -416,7 +446,7 @@ The runner switches the mutation action into a five-mode state machine. Detected
 ### Re-call with **genuinely different params** (or params that fail to parse) → **rePropose mode**
 - Update `awaitingInput.params` to the newly parsed params, decrement `attempts_left`.
 - If the re-call's params fail to parse: the step fails with `invalid_params` (summary = the overridable system message, raw Zod detail in `_debug`) and the pending proposal is left **unchanged** — no decrement, the prior proposal still stands.
-- If `attempts_left > 0`: return new `needs_confirmation` envelope with decremented `attempts_left`.
+- If `attempts_left > 0`: return new `needs_confirmation` envelope with decremented `attempts_left` — including a fresh `read_back` rendered from the CORRECTED params, so the caller hears what actually replaced the old value.
 - If `attempts_left === 0`: return `{ ok: false, summary, error: "confirmation_attempts_exhausted" }` and clear pending.
 
 ### Lockdown
@@ -508,11 +538,12 @@ While `awaitingInput.kind === "match"`, only three actions are allowed as the fi
 <caller_turn_identity>
 ## Caller-turn identity (`BuildAgentStepToolOptions.getCallerTurnId`)
 
-Three protections key on a **stable identity for the latest caller turn**: the confirmation gate's same-turn lock (`<confirmation_lifecycle>`), the bounded choice's offered-this-turn lock, and the bounded choice's resolved-this-turn lock (`<bounded_choice>`). By default the runner resolves it as the **latest human/user message id** in `state.messages` — LangGraph's messages reducer assigns missing ids before a node sees state, so this is stable across every ReAct loop within one caller turn and independent of history length.
+Four protections key on a **stable identity for the latest caller turn**: the confirmation gate's same-turn lock (`<confirmation_lifecycle>`), the bounded choice's offered-this-turn lock, the bounded choice's resolved-this-turn lock (`<bounded_choice>`), and — since 2.3.0 — the host guard latch (`guardTurn`). By default the runner resolves it as the **latest human/user message id** in `state.messages` — LangGraph's messages reducer assigns missing ids before a node sees state, so this is stable across every ReAct loop within one caller turn and independent of history length.
 
 - Hosts that **compact or replace messages** must provide `getCallerTurnId: (state) => string | null | undefined` returning a stable, non-compacted turn token.
 - When no identity exists (e.g. direct `runSteps` calls with message-less fixtures), the confirmation same-turn guard is **deliberately unavailable** (params-only behavior) — the runner never guesses. Bounded-choice **resolution**, by contrast, **fails closed** (`bounded_choice_turn_identity_unavailable`): recording a selection requires knowing which turn it happened on.
 - The hook (and the message scan) is only consulted when a confirm gate or bounded choice is actually configured — hosts using neither never pay for it.
+- **`resolveCallerTurnId(state, getCallerTurnId?)` is exported** (2.3.0) so hosts stop re-deriving this. It returns the host hook's value when configured, else the latest human message id; blank/whitespace collapses to `undefined` (identity unavailable). The guard latch is built on it — pass the same `getCallerTurnId` you gave `buildAgentStepTool`, or the two halves will disagree about where a turn starts.
 </caller_turn_identity>
 
 <bounded_choice>
@@ -626,6 +657,24 @@ interface HandoffSpec<T> {
                                      // to replace the LLM-composed `request.context`, or `undefined` to
                                      // fall through to it. NEVER called for off_topic (a silent hand-back
                                      // since 1.6.0; terminateMessage only backs delegate failures).
+  resolveHandoffType?: (state: T, request: HandoffRequest)
+                        => "completed" | "abandon" | undefined;
+                                     // OPTIONAL (2.3.0) — decide the handback SIGNAL from state
+                                     // instead of taking the model's word for it. Consulted ONLY for
+                                     // a terminate-mode completed/abandon; never for off_topic (a
+                                     // re-route is not a task ending) and never for a successful
+                                     // delegate. `undefined` falls through to the request's reason.
+  resolveHandoffMetadata?: (state: T, request: HandoffRequest)
+                        => Record<string, unknown> | undefined;
+                                     // OPTIONAL (2.3.0) — host fields merged into handoff_metadata.
+                                     // Called for EVERY handback type INCLUDING off_topic (identity
+                                     // forwarded to a call-scoped store must survive a re-route), but
+                                     // never for a successful delegate. The library's own keys
+                                     // (service_type, success_message) are applied LAST and win.
+  forcedHandoff?: (state: T) => HandoffRequest | undefined;
+                                     // OPTIONAL (2.3.0) — derive a handoff when the MODEL ended a turn
+                                     // without one ("don't dead-end the caller"). Must be a PURE
+                                     // function of state. See below for the re-fire trap.
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
   clearsOnHandback?: readonly (keyof T & string)[];
                                      // OPTIONAL (2.2.0) — host DOMAIN slots to null when a
@@ -642,6 +691,30 @@ speak a success line for `completed` when the mutating action truly persisted, o
 neutral/failed phrasing. It runs in `createHandoffNode` for `completed` / `abandon` only; a returned
 string becomes the final message `content` (and `handoff_metadata.success_message`), `undefined` falls
 through to `request.context`.
+
+**State can decide the signal and the metadata (2.3.0).** `resolveHandoffType` is resolved **before the
+first control-plane event**, so the `handoff` custom event, the closing line, `handoff_type` and
+`handoff_metadata.service_type` all carry one value. That ordering is the point: hosts previously
+overrode the signal by mutating the resolved message's `additional_kwargs` from OUTSIDE — a shape this
+library documents as a frozen channel contract — which left the event carrying the PRE-override reason.
+An override can only swap `completed` ↔ `abandon`; it can never produce or erase an `off_topic`, so
+delegate detection and the clearing gate below are unaffected by construction. `resolveHandoffMetadata`
+is the same move for host-derived fields: they are spread FIRST and the library's keys applied last, so
+a host cannot clobber the contract. No extra toggle is needed for either — omit the field for the host,
+return `undefined` for one resolution; a rollout kill-switch belongs in the host function.
+
+**A handoff can be FORCED from state (2.3.0).** `forcedHandoff` covers the turn where state already says
+the task is over but the model answered in plain text. Wire `forcedHandoffRequested(state, spec)` on the
+MODEL node's conditional edge ahead of `END`; `createHandoffNode` then re-derives the same request from
+the same pure function (`state.handoff ?? spec.forcedHandoff?.(state)`), so predicate and resolver cannot
+disagree, the graph needs no arming node, and **the forced request is never written to state** — no host
+code goes near the library-managed `handoff` slot. A pending slot always wins: the guard never overrides
+a handoff the model actually requested.
+
+> **The re-fire trap.** `forcedHandoff` runs on every turn the model answers in text. If it derives its
+> decision from a TERMINAL domain slot that is not listed in `clearsOnHandback`, it fires again on every
+> later turn of the same call and the caller is bounced with no way out. Adopting `forcedHandoff` and
+> declaring `clearsOnHandback` are one change, not two.
 
 **Task-scoped state is cleared when the task ends (2.2.0).** The THREAD outlives the TASK: a channel
 middleware reuses one thread id for a whole call and never resets it on re-dispatch, so whatever sits
@@ -660,11 +733,11 @@ into the next task and re-fires its branch on every later turn of the same call.
 MERGES cannot be cleared this way (the write is a plain `null`); reset those through the pointer slot
 that selects from them.
 
-Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `createHandoffNode(spec)`.
+Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `forcedHandoffRequested(state, spec)` (the forced-handoff edge predicate — true when nothing is pending yet `spec.forcedHandoff` derives one), `createHandoffNode(spec)`.
 
-Wire a conditional edge after the tool node — `createReactAgent` cannot express it, so the graph is hand-rolled: `addConditionalEdges("tools", s => handoffRequested(s) ? HANDOFF_NODE : "agent")`, `addNode(HANDOFF_NODE, createHandoffNode(spec))`, `addEdge(HANDOFF_NODE, END)`. The node emits a `handoff` custom event FIRST (streaming clients abort TTS / reroute before any content), resolves the response (terminate envelope, or a delegate run over the Platform API with live `delegated_token` pass-through and a behavioral fallback to the envelope on failure), emits `handoff_complete`, and returns `{ handoff: null, ...clears, messages: [AIMessage] }` (the clears are empty unless a task-ending handback resolved — see above) — the model never paraphrases the result.
+Wire a conditional edge after the tool node — `createReactAgent` cannot express it, so the graph is hand-rolled: `addConditionalEdges("tools", s => handoffRequested(s) ? HANDOFF_NODE : "agent")`, `addNode(HANDOFF_NODE, createHandoffNode(spec))`, `addEdge(HANDOFF_NODE, END)`. A host using `forcedHandoff` adds one more predicate on the MODEL node's own edge — `forcedHandoffRequested(s, spec) ? HANDOFF_NODE : END` — and still no extra node. The node emits a `handoff` custom event FIRST (streaming clients abort TTS / reroute before any content), resolves the response (terminate envelope, or a delegate run over the Platform API with live `delegated_token` pass-through and a behavioral fallback to the envelope on failure), emits `handoff_complete`, and returns `{ handoff: null, ...clears, messages: [AIMessage] }` (the clears are empty unless a task-ending handback resolved — see above) — the model never paraphrases the result.
 
-**Final-message kwargs** (the channel contract): every non-delegate resolution is a handback — `is_handoff: true`, `handoff_type` = the reason's signal (`off_topic` / `completed` / `abandon`), `handoff_reason` = `context`, `handoff_metadata: { service_type, success_message }`. Spoken content: the `off_topic` envelope (`terminateMessage`, also the delegate-failure fallback) or the LLM-composed closing in `context` for `completed` / `abandon` (the middleware delivers it and flips routing for the NEXT request). Delegate success → NOT a handoff (conversation kept) — informational `{ delegated_to }` only. Streaming clients must request `stream_mode: ["messages-tuple", "custom"]` — the node-built final message never appears in the token stream; `handoff_complete` carries its text. Full wire details + the middleware checklist: `streaming-and-channel-contract.md`.
+**Final-message kwargs** (the channel contract): every non-delegate resolution is a handback — `is_handoff: true`, `handoff_type` = the effective reason's signal (`off_topic` / `completed` / `abandon`, after any `resolveHandoffType`), `handoff_reason` = `context`, `handoff_metadata: { ...host fields from resolveHandoffMetadata, service_type, success_message }` — host fields first, library keys last and unclobberable. Spoken content: the `off_topic` envelope (`terminateMessage`, also the delegate-failure fallback) or the LLM-composed closing in `context` for `completed` / `abandon` (the middleware delivers it and flips routing for the NEXT request). Delegate success → NOT a handoff (conversation kept) — informational `{ delegated_to }` only. Streaming clients must request `stream_mode: ["messages-tuple", "custom"]` — the node-built final message never appears in the token stream; `handoff_complete` carries its text. Full wire details + the middleware checklist: `streaming-and-channel-contract.md`.
 </handoff>
 
 <system_messages>
@@ -759,7 +832,7 @@ Library-injected fields on specific step kinds:
 - `abort_pending_input` results carry `aborted_awaiting: { kind, for_action }` and/or `aborted_flow: "<name>"` when something was actually cleared.
 - `executor_error` / `invalid_params` results carry `_debug` with the raw cause (the `summary` itself is the overridable system message).
 - `issuesOtp` refused while a match gate is pending carries `error: "otp_blocked_match_pending"`.
-- propose / re-propose results carry `needs_confirmation: true`, `proposed_params`, `attempts_left`.
+- propose / re-propose results carry `needs_confirmation: true`, `proposed_params`, `attempts_left`, and — when the action declares `ConfirmationOpts.readBack` and it renders something — `read_back` (proposal-only; never on the executing re-call).
 - exhausted results carry `error: "confirmation_attempts_exhausted"`.
 - lockdown refusals carry `error: "pending_confirmation_locked" | "otp_pending_locked" | "match_pending_locked"` and `awaiting: { kind, for_action }`.
 - match-mismatch results gain `attempts_left` (decremented) or `verdict: "match_attempts_exhausted"` on the last try.
@@ -796,7 +869,7 @@ Runtime errors raised by the runner (not construction-time, but loud):
 | `reported otp_issued but config lacks issuesOtp opt` | Executor returned the effect but the action's config didn't declare `issuesOtp` |
 | `otp_blocked_match_pending` (step error) | An `issuesOtp` step ran while a double-entry match gate was still pending — consume the match before issuing the OTP (see `<otp_lifecycle>`) |
 
-Slot declaration is enforced at construction since 2.0.0 (the channel-completeness row above) — a state schema missing a required library slot fails at startup instead of silently dropping writes. Spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings all six slots in together with their reducers.
+Slot declaration is enforced at construction since 2.0.0 (the channel-completeness row above) — a state schema missing a required library slot fails at startup instead of silently dropping writes. Spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings all seven slots in together with their reducers.
 </construction_time_checks>
 
 <key_files_to_inspect>
@@ -808,11 +881,11 @@ For ground truth, read these files in the project (don't paraphrase — they ARE
 - `src/agent-step/runner.ts` — the thin public entry points (`buildAgentStepTool`, `runSteps`); the machinery lives in the phase modules:
   - `compile/` — `validate.ts` (every construction-time check), `plan.ts` (`BuildAgentStepToolOptions` + the compiled plan), `schema.ts` / `describe.ts` (the model-facing schema + description)
   - `run/` — `admission.ts` (the fixed-order whole-batch preconditions), `planning.ts` (confirm-mode freeze), `execution.ts` (per-step loop, effects ordering, handoff monotonicity), `finalize.ts` (result body + error-counter policy), `batch-state.ts` (the single write path into view/committed)
-  - `interaction/` — one policy module per gate kind: `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (each states its lockdown, attempts, freshness, and clearing rules in one place)
+  - `interaction/` — one policy module per gate kind: `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (each states its lockdown, attempts, freshness, and clearing rules in one place; `bounded-choice.ts` also owns `resolveCallerTurnId`), plus `guard-latch.ts` (the host guard latch over that same identity)
   - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`) in an ordered `registry.ts`
   - `handoff/` — `contract.ts` (action + signals + `HandoffSpec`), `node.ts` (`createHandoffNode` — the frozen channel contract), `delegate-client.ts` (SSE/Platform-API transport)
 - `src/agent-step/paginate.ts` — the read-pagination primitives + the `pageable` orchestration the runner uses (self / delegate, the cache, the envelope)
 - `src/agent-step/capture.ts` — the caller-digit capture primitives (refinement-not-regex, count-free messages, group join, candidate arrays; see `<caller_digit_capture>`)
 - `src/agent-step/messages.ts` — the runner's overridable system `summary` strings: `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages`
-- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, and the hardening guards; all pass on `npm test`
+- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `guard-latch.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, the hardening guards, and the turn-scoped guard latch; all pass on `npm test`
 </key_files_to_inspect>

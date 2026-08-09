@@ -2484,3 +2484,96 @@ test("invalidatesOnChange: fresh-but-value-equal OBJECT re-write does NOT clear 
   const changed = await runSteps(opts, [{ action: "set_holder", params: { code: "C2" } }], seeded);
   assert.equal(changed.committed.derived, null, "a real value change still clears downstream");
 });
+
+// ─── ConfirmationOpts.readBack ────────────────────────────────────────────── //
+// The engine owns the capture (it parsed, normalized and stored these params),
+// so it owns reporting it back; the host supplies only the rendering. Shipped in
+// 2.3.0 untested at this layer even though it is the mechanism a host relies on
+// to stop the MODEL re-deriving what the caller must confirm.
+
+function makeReadBackOpts(
+  readBack: (params: Record<string, unknown>, state: unknown) => string | undefined,
+): BuildAgentStepToolOptions<S, string, string, typeof baseSelectors> {
+  const base = makeOpts();
+  const cfg = makeConfig();
+  cfg.actions.change_status.controller!.requiresConfirmation = { maxAttempts: 3, readBack };
+  return { ...base.opts, config: cfg };
+}
+
+test("readBack: a non-empty rendering rides the proposal as `read_back`", async () => {
+  const opts = makeReadBackOpts((params) => `heard ${String(params.newStatus)}`);
+  const { body } = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const r = body.results[0] as { needs_confirmation?: boolean; read_back?: string };
+  assert.equal(r.needs_confirmation, true);
+  assert.equal(r.read_back, "heard lost");
+});
+
+test("readBack: it receives the PARSED params and the state view", async () => {
+  // Rendering from the stored params is the whole safety property: what is read
+  // back cannot drift from what will execute.
+  let seenParams: unknown;
+  let seenState: unknown;
+  const opts = makeReadBackOpts((params, state) => {
+    seenParams = params;
+    seenState = state;
+    return "x";
+  });
+  await runSteps(opts, [{ action: "change_status", params: { newStatus: "lost" } }], SEEDED);
+  assert.deepEqual(seenParams, { newStatus: "lost" });
+  assert.deepEqual((seenState as S).customer, { code: "C1" });
+});
+
+test("readBack: undefined or empty adds NO field — hosts without one are unaffected", async () => {
+  for (const render of [() => undefined, () => ""]) {
+    const { body } = await runSteps(
+      makeReadBackOpts(render),
+      [{ action: "change_status", params: { newStatus: "lost" } }],
+      SEEDED,
+    );
+    const r = body.results[0] as { needs_confirmation?: boolean };
+    assert.equal(r.needs_confirmation, true);
+    assert.ok(!("read_back" in r), "absent, not an empty string");
+  }
+});
+
+test("readBack: rendered on a RE-proposal too, from the corrected params", async () => {
+  // A correction re-proposes; the read-back must follow the new value, not the
+  // one the caller just rejected.
+  const opts = makeReadBackOpts((params) => `heard ${String(params.newStatus)}`);
+  const first = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const pending = { ...SEEDED, ...(first.committed as Partial<S>) } as S;
+  const second = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "stolen" } }],
+    pending,
+  );
+  const r = second.body.results[0] as { needs_confirmation?: boolean; read_back?: string };
+  assert.equal(r.needs_confirmation, true);
+  assert.equal(r.read_back, "heard stolen");
+});
+
+test("readBack: NOT rendered on the executing re-call — it is a proposal-only field", async () => {
+  const opts = makeReadBackOpts((params) => `heard ${String(params.newStatus)}`);
+  const first = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const pending = { ...SEEDED, ...(first.committed as Partial<S>) } as S;
+  const executed = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    pending,
+  );
+  const r = executed.body.results[0] as { needs_confirmation?: boolean; read_back?: string };
+  assert.notEqual(r.needs_confirmation, true, "the same params execute on a later call");
+  assert.equal(r.read_back, undefined);
+});

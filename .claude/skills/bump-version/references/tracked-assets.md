@@ -26,13 +26,13 @@ Top level (`skills/create-tool/templates/agent-step/`):
 - `runner.ts` — the thin public entry points (`buildAgentStepTool`, `runSteps`)
 - `messages.ts` — runner-emitted system `summary` strings (neutral English defaults; host-overridable via `BuildAgentStepToolOptions.messages`)
 - `define-config.ts`, `index.ts` (the public surface), `paginate.ts`, `capture.ts` (caller-digit capture primitives)
-- Tests: `runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
+- Tests: `runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
 - `VERSION` — rewrite to the new version string.
 
 Phase modules (internal layout; hosts import only from `index.ts`):
 - `compile/` — `validate.ts`, `plan.ts` (`BuildAgentStepToolOptions`), `schema.ts`, `describe.ts`, `state-schema.ts`
 - `run/` — `admission.ts`, `planning.ts`, `execution.ts`, `finalize.ts`, `batch-state.ts`, `value-equal.ts`
-- `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts`
+- `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (also owns `resolveCallerTurnId`), `guard-latch.ts` (host guard latch over the `guardTurn` slot)
 - `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`
 - `handoff/` — `contract.ts`, `node.ts`, `delegate-client.ts`
 
@@ -60,6 +60,7 @@ signatures and the wire-up, so any change to the executor signature, the registr
 - `skills/create-tool/templates/executor-analysis.ts.template`, `analysis-vm.ts.template`, `datasets.ts.template`, `verifier-data-loaded.ts.template` — the data-analysis scaffold; mirror the `ExecutorResult` / `Verifier` / selector shapes
 - `skills/create-tool/templates/verifier.ts.template`
 - `skills/create-tool/templates/tool-test-setup.ts.template` — wires `toolOpts` (config + registries) mirroring `index.ts`
+- `skills/create-tool/templates/tool-sandbox-test.ts.template` — calls `runSteps(toolOpts, steps, state)` directly, so it mirrors that public entry point's signature and the result-body shape it asserts on. (`prompt-input-test.ts.template` imports only from the shared harness, so the Tier-3 harness templates cover it.)
 - `skills/create-tool/templates/backend-env.ts.template`, `skills/create-tool/templates/backend-client.ts.template` (rarely — only if transport contract changes)
 
 **Touched by:** executor signature changes, registry shape/typing changes, new/removed

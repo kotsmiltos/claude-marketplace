@@ -158,6 +158,13 @@ export interface LibraryManagedSlots {
   currentFlow?: CurrentFlow | null;
   boundedChoice?: BoundedChoice | null;
   pagedRead?: PagedCache<unknown> | null;
+  /** Per-guard latch: guard id → the caller-turn id it last fired on. Lets a
+   *  host fire a model-input guard at most ONCE per caller turn even though the
+   *  ReAct loop re-enters the model several times within that turn. Written via
+   *  {@link markGuardFired}, read via {@link guardFiredOnTurn}. Entries expire
+   *  by themselves when the turn id changes, so it is deliberately NOT
+   *  task-scoped. */
+  guardTurn?: Record<string, string> | null;
   handoff?: HandoffRequest | null;
   /** Consecutive backend-failure counter. The runner increments it on each
    *  batch whose failing step is a backend failure (the runner-raised
@@ -196,6 +203,7 @@ export const agentStepStateSpec = {
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
   boundedChoice: Annotation<BoundedChoice | null>(replaceNull<BoundedChoice>()),
   pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
+  guardTurn: Annotation<Record<string, string> | null>(replaceNull<Record<string, string>>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
   errorCount: Annotation<number | null>(replaceNull<number>()),
 };
@@ -230,6 +238,9 @@ export const agentStepZodShape = {
   pagedRead: withLangGraph(PagedCacheSchema.nullable(), {
     default: (): PagedCache<unknown> | null => null,
   }),
+  guardTurn: withLangGraph(z.record(z.string(), z.string()).nullable(), {
+    default: (): Record<string, string> | null => null,
+  }),
   handoff: withLangGraph(HandoffRequestSchema.nullable(), {
     default: (): HandoffRequest | null => null,
   }),
@@ -248,6 +259,7 @@ export const agentStepInternalSlotMask = {
   currentFlow: true,
   boundedChoice: true,
   pagedRead: true,
+  guardTurn: true,
   handoff: true,
   errorCount: true,
 } as const;

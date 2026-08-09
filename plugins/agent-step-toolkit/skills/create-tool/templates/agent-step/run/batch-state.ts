@@ -179,8 +179,14 @@ export function requestHandoffPatch<T extends LibraryManagedSlots>(
 
 /** The slots the runner owns. An executor's `stateUpdate` may not write them —
  *  library transitions go through typed `ExecutorEffect`s so the runner can
- *  coordinate them (cleanup, ordering, overlay clearing). Kept in sync with
- *  `LibraryManagedSlots` / `agentStepInternalSlotMask` in state.ts. */
+ *  coordinate them (cleanup, ordering, overlay clearing).
+ *
+ *  This is deliberately NOT the whole of `agentStepInternalSlotMask`: that mask
+ *  lists every library slot, while this list is only the RUNNER-owned subset.
+ *  `guardTurn` is the difference — it is a library slot but it is written by the
+ *  HOST's model-input guards through `markGuardFired`, never by the runner, so
+ *  guarding executors against it would ban nothing the runner coordinates. Add
+ *  a slot here only when the runner itself transitions it. */
 const LIBRARY_MANAGED_KEYS = [
   "awaitingInput",
   "currentFlow",

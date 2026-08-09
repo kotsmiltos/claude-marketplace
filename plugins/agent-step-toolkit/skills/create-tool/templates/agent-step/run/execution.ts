@@ -250,12 +250,23 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         step.confirmMode === "propose"
           ? formatMessage(msgs.confirm_proposed, { action: step.action })
           : formatMessage(msgs.confirm_reproposed, { action: step.action });
+      // What the runner ACTUALLY recorded, rendered by the host for the model
+      // to speak back verbatim (ConfirmationOpts.readBack). The library owns
+      // the capture — it sanitized, joined and validated these params — so it
+      // owns reporting them back; the host owns only the lexicon.
+      const readBack = action.confirmation?.readBack(
+        params as Record<string, unknown>,
+        st.view,
+      );
       results.push({
         action: step.action,
         ok: true,
         summary,
         needs_confirmation: true,
         proposed_params: params as object,
+        ...(typeof readBack === "string" && readBack.length > 0
+          ? { read_back: readBack }
+          : {}),
         attempts_left: attemptsLeft,
       });
       lastSummary = summary;

@@ -544,7 +544,7 @@ return {
 
 You can return state updates from `ok: false` executors too — but they only land if the executor returns `ok: false` AFTER doing something legitimately persistable. Most failure paths return no `stateUpdate`.
 
-**`stateUpdate` is domain-only (enforced).** Writing any library-managed slot — `awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `handoff`, `errorCount` — through it throws at runtime. Library transitions go through the `ActionDef.controller.*` opts and the `effects` field on the return value instead; a terminal handoff in particular is the `{ type: "request_handoff", request }` effect (which also gets the built-in action's atomic cleanup), never a slot write.
+**`stateUpdate` is domain-only (enforced).** Writing any RUNNER-owned slot — `awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `handoff`, `errorCount` — through it throws at runtime. (That guard list is deliberately narrower than the full library slot set: `guardTurn` is a library slot the runner never transitions — the host's model-input guards write it via `markGuardFired` — so guarding executors against it would ban nothing.) Library transitions go through the `ActionDef.controller.*` opts and the `effects` field on the return value instead; a terminal handoff in particular is the `{ type: "request_handoff", request }` effect (which also gets the built-in action's atomic cleanup), never a slot write.
 </state_update_shape>
 
 <error_handling>

@@ -57,6 +57,13 @@ On a handoff turn the **final AI message** must carry:
 }
 ```
 
+`handoff_metadata` may carry **additional host-derived fields** (e.g. an identity the agent verified,
+forwarded so a call-scoped store keeps it for the rest of the call). With the library handoff these come
+from `HandoffSpec.resolveHandoffMetadata` (agent-step ≥ 2.3.0), which is merged FIRST so the two contract
+keys above are applied last and cannot be clobbered. Supply them through that hook — never by mutating
+this envelope after the node built it: an outside patch also leaves the `handoff` control-plane event
+carrying the pre-override values.
+
 The middleware routes on the handoff type. A handoff fires ONLY when BOTH `is_handoff: true`
 AND a non-empty `handoff_type` are present. Type matching is **case-insensitive**; this
 contract emits the middleware's canonical lowercase spellings (`completed` / `abandon` /

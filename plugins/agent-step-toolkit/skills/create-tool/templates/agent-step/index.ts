@@ -82,6 +82,7 @@ export {
   HANDBACK_SIGNALS,
   handoffParamsSchema,
   handoffRequested,
+  forcedHandoffRequested,
 } from "./handoff/contract.js";
 export type {
   HandoffSpec,
@@ -89,6 +90,13 @@ export type {
   HandoffDelegateTarget,
 } from "./handoff/contract.js";
 export { createHandoffNode } from "./handoff/node.js";
+
+// Caller-turn identity + the turn-scoped guard latch. `resolveCallerTurnId` is
+// the library's own definition of "the current caller turn" (host hook, else
+// the latest human message id) — the same identity the confirmation gate and
+// the bounded-choice control use. Exported so hosts stop re-deriving it.
+export { resolveCallerTurnId } from "./interaction/bounded-choice.js";
+export { guardFiredOnTurn, markGuardFired } from "./interaction/guard-latch.js";
 
 // Read-pagination primitives. Pure, domain-agnostic helpers for tool read
 // executors — the runner does not use them. A tool's list reads use these to

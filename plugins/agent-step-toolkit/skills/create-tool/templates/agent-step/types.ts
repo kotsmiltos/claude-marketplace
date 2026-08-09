@@ -166,6 +166,25 @@ export interface ActionDef<PrereqName extends string> {
 export interface ConfirmationOpts {
   maxAttempts?: number;
   lockdown?: boolean;
+  /** Render what the runner ACTUALLY recorded, for the model to speak back to
+   *  the caller verbatim. Called when a proposal is stored; a non-empty return
+   *  rides on the proposal body as `read_back` beside `proposed_params`.
+   *
+   *  Why the library asks: it owns the capture half (capture.ts sanitizes,
+   *  joins spoken digit groups and validates), so it alone knows the exact
+   *  value. Handing the model raw `proposed_params` and leaving "tell the
+   *  caller what was recorded" to its discretion is measurably where read-backs
+   *  break — a model converting digits to words drops or doubles one on runs of
+   *  equals, and the caller then confirms against wrong words, the one mistake
+   *  a confirmation gate cannot catch. Whoever owns the capture owns reporting
+   *  it back.
+   *
+   *  The library does NOT own the lexicon: rendering is language- and
+   *  channel-specific, so the host supplies this function as configuration.
+   *  Deliberately non-generic — `ConfirmationOpts` carries no state type today
+   *  and threading one ripples through `ControllerHooks`/`ActionDef`; hosts cast
+   *  their own state, exactly as executors do with their slices. */
+  readBack?: (params: Record<string, unknown>, state: unknown) => string | undefined;
 }
 
 /** Per-action behavioural opts coordinated by the runner. Covers
