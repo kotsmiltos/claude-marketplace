@@ -599,6 +599,8 @@ Unlike the bounded-choice overlay this control needs **no caller-turn identity**
 **Adoption is two halves.** The flag adds the verb; the PROMPT decides when it is chosen. Teach the split explicitly (banking topic → handoff immediately, chit-chat → `deflect_aside`), state both results (on `deflected`, decline in one sentence and repeat the pending question in the same turn; on the escalation, produce NO text), and pin BOTH directions in prompt-input tests — a one-sided suite lets the model quietly reclassify every handback as an aside. Misclassification is benign either way: a wrongly deflected banking ask hands off one turn later on the caller's persistence, and wrongly handed-off chit-chat is exactly the pre-2.4.0 behaviour.
 
 `msgs.aside_deflected` is MODEL-facing, not caller-audible — the library ships no refusal sentence, so the one line the caller hears stays host-owned prompt text.
+
+**The action description is a default, not a fixture.** `DEFLECT_ASIDE_ACTION_DESCRIPTION` is written in the vocabulary of the retail-banking voice agent this control was measured on, and names that domain's out-of-scope topics as its examples of what must NOT be deflected. Any agent in another domain sets **`HandoffSpec.deflectAsideDescription`** — the same escape valve `actionDescription` gives `request_handoff`, for the same reason: a schema variant that contradicts the host prompt mis-routes. Whatever you write must keep the three things the engine relies on — sole step, the caller's request in `aside`, and no spoken text after the escalation result. Mechanics are the library's; wording is the host's, exactly as with `readBack` and the capture primitives' `describe`.
 </deflect_aside>
 
 <pagination>
@@ -709,6 +711,12 @@ interface HandoffSpec<T> {
                                      // Requires this spec (the repeat path escalates into it), so
                                      // it lives here rather than at the top level. Unset ⇒ the
                                      // action never reaches the model. See <deflect_aside>.
+  deflectAsideDescription?: string;  // OPTIONAL (2.4.0) — override the deflect_aside schema-variant
+                                     // description, exactly as actionDescription does for
+                                     // request_handoff. The shipped default is written in the
+                                     // vocabulary of the domain the control was measured on;
+                                     // outside that domain, supply your own or the schema
+                                     // contradicts your prompt.
 }
 ```
 

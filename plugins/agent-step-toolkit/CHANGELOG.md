@@ -21,7 +21,7 @@ dangled. For NON-banking chit-chat, something no agent in the fleet serves, the 
 caller nothing but a lost turn and a dropped question; the failure mode is cross-cutting. 2.4.0 adds
 one injected control that keeps the caller in the task for one free deflection and then re-routes
 deterministically. Opt-in and additive: without `HandoffSpec.deflectAside` the model-facing surface is
-byte-identical to 2.3.0. Suite 193 → 200.
+byte-identical to 2.3.0. Suite 193 → 201.
 Migration: [migrations/2.3.0-to-2.4.0.md](migrations/2.3.0-to-2.4.0.md).
 
 ### Added
@@ -35,6 +35,12 @@ Migration: [migrations/2.3.0-to-2.4.0.md](migrations/2.3.0-to-2.4.0.md).
   issue a second call for it to happen.
 - **`HandoffSpec.deflectAside?: boolean`** — the opt-in. Requires handoff (the repeat path escalates
   into it); `activeWhen` keeps the action out of the schema entirely when unset.
+- **`HandoffSpec.deflectAsideDescription?: string`** — host override for the `deflect_aside`
+  schema-variant description, the same escape valve `actionDescription` gives `request_handoff`. The
+  shipped default is written in the vocabulary of the domain the control was measured on and names
+  that domain's out-of-scope topics as the examples of what must NOT be deflected; an agent elsewhere
+  would otherwise ship a schema contradicting its own prompt. Mechanics stay the library's, wording
+  goes back to the host — the same split `readBack` and the capture primitives already follow.
 - **`deflectedAside` slot** — the one-shot latch, task-scoped via `agentStepTaskScopedSlots`.
 - **`msgs.aside_deflected`** — the MODEL-facing instruction returned on the free deflection (not
   caller-audible; the library ships no refusal sentence, the wording stays host-owned).

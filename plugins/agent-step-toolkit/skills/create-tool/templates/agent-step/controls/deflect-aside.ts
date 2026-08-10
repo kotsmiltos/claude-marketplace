@@ -54,13 +54,17 @@ export const DEFLECT_ASIDE_ACTION_DESCRIPTION =
 export const deflectAsideControl: ControlAction = {
   name: DEFLECT_ASIDE_ACTION,
   activeWhen: (ctx) => ctx.deflectAsideEnabled,
-  schemaVariant: () =>
+  schemaVariant: (ctx) =>
     z
       .object({
         action: z.literal(DEFLECT_ASIDE_ACTION),
         params: deflectAsideParamsSchema,
       })
-      .describe(DEFLECT_ASIDE_ACTION_DESCRIPTION),
+      // The default below is written in the vocabulary of the domain this
+      // control was measured on; a host in another domain overrides it via
+      // `HandoffSpec.deflectAsideDescription`, exactly as `request_handoff`
+      // allows through `actionDescription`. Mechanics stay the library's.
+      .describe(ctx.deflectAsideDescription ?? DEFLECT_ASIDE_ACTION_DESCRIPTION),
   descriptionLine: () =>
     `- \`${DEFLECT_ASIDE_ACTION}\`: deflect a non-banking aside without ending the task (sole step, no prereqs); a repeat hands off.`,
   // The whole point is a mid-gate aside: the pending confirmation/OTP must

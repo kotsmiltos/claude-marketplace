@@ -201,6 +201,17 @@ export interface HandoffSpec<T> {
    *  handed-off aside is exactly today's behaviour. The prompt must teach the
    *  split — see the `deflect_aside` action description. */
   deflectAside?: boolean;
+  /** Host override for the `deflect_aside` schema-variant description — the
+   *  same escape valve `actionDescription` gives `request_handoff`, and for the
+   *  same reason: the shipped default (`DEFLECT_ASIDE_ACTION_DESCRIPTION`) is
+   *  written in the vocabulary of the retail-banking voice agent the control
+   *  was measured on, naming that domain's out-of-scope topics as the examples
+   *  of what must NOT be deflected. An agent in any other domain would be
+   *  reading a schema that contradicts its own prompt, so it supplies its own
+   *  wording here — keeping the same three things the engine relies on: sole
+   *  step, the caller's request in `aside`, and no spoken text after the
+   *  escalation result. Mechanics are the library's; wording is the host's. */
+  deflectAsideDescription?: string;
 }
 
 /** Edge predicate for the host graph's conditional edge after its tool node:

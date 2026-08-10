@@ -21,7 +21,11 @@ import { z } from "zod";
 import { Annotation } from "@langchain/langgraph";
 
 import { defineConfig } from "./define-config.js";
-import { runSteps, type BuildAgentStepToolOptions } from "./runner.js";
+import {
+  buildAgentStepTool,
+  runSteps,
+  type BuildAgentStepToolOptions,
+} from "./runner.js";
 import { DEFLECT_ASIDE_ACTION } from "./controls/deflect-aside.js";
 import { createHandoffNode } from "./handoff/node.js";
 import type { HandoffSpec } from "./handoff/contract.js";
@@ -272,4 +276,50 @@ test("deflect_aside: a missing aside is invalid_params and latches nothing", asy
   assert.equal(body.failed_at, 0);
   assert.equal((body.results[0] as { error?: string }).error, "invalid_params");
   assert.equal((committed as S).deflectedAside ?? null, null);
+});
+
+test("HandoffSpec.deflectAsideDescription overrides the deflect_aside schema variant description", () => {
+  // The shipped default is written in the vocabulary of the domain this
+  // control was measured on, naming that domain's out-of-scope topics as the
+  // examples of what must NOT be deflected. An agent in another domain would
+  // otherwise ship a schema contradicting its own prompt — so the host gets
+  // the same escape valve `actionDescription` gives `request_handoff`.
+  // Read the variant descriptions off the WIRE shape (what the provider sees).
+  const variantDescriptions = (tool: { schema: unknown }): (string | undefined)[] => {
+    const s = tool.schema as {
+      properties: { steps: { items: { anyOf?: Array<{ description?: string }> } } };
+    };
+    return (s.properties.steps.items.anyOf ?? [s.properties.steps.items]).map(
+      (o) => (o as { description?: string }).description,
+    );
+  };
+
+  const stock = variantDescriptions(buildAgentStepTool(makeOpts(true)));
+  assert.ok(
+    stock.some((d) => d?.includes("WITHOUT ending the task")),
+    "without an override the built-in description is used",
+  );
+
+  const custom = makeOpts(true);
+  custom.handoff = {
+    ...custom.handoff!,
+    deflectAsideDescription: "CUSTOM-DEFLECT-DESC",
+  };
+  const overridden = variantDescriptions(buildAgentStepTool(custom));
+  assert.ok(
+    overridden.includes("CUSTOM-DEFLECT-DESC"),
+    "override replaces the description",
+  );
+  assert.ok(
+    !overridden.some((d) => d?.includes("WITHOUT ending the task")),
+    "the default text is fully replaced",
+  );
+
+  // The override is inert when the control is not injected at all.
+  const off = makeOpts(false);
+  off.handoff = { ...off.handoff!, deflectAsideDescription: "CUSTOM-DEFLECT-DESC" };
+  assert.ok(
+    !variantDescriptions(buildAgentStepTool(off)).includes("CUSTOM-DEFLECT-DESC"),
+    "no deflect variant exists without the opt-in flag",
+  );
 });

@@ -231,6 +231,7 @@ export function compilePlan<
     boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
     // Requires the handoff by construction — the repeat path escalates into it.
     deflectAsideEnabled: opts.handoff != null && opts.handoff.deflectAside === true,
+    deflectAsideDescription: opts.handoff?.deflectAsideDescription,
   };
   const controls = activeControls(activation);
   const controlNames = new Set(controls.map((c) => c.name));
