@@ -93,6 +93,9 @@ export function validateConfig(opts: ValidatableOptions): void {
     handoffEnabled: opts.handoff != null,
     boundedChoices,
     boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
+    deflectAsideEnabled:
+      opts.handoff != null &&
+      (opts.handoff as { deflectAside?: boolean }).deflectAside === true,
   };
 
   const actionNames = Object.keys(config.actions);

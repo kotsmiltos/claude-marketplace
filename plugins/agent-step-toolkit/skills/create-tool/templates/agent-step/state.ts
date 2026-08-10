@@ -165,6 +165,11 @@ export interface LibraryManagedSlots {
    *  by themselves when the turn id changes, so it is deliberately NOT
    *  task-scoped. */
   guardTurn?: Record<string, string> | null;
+  /** One-shot social-aside deflection latch (the `deflect_aside` control):
+   *  true once the free in-place deflection of THIS task has been spent, so
+   *  the next `deflect_aside` escalates to a real `off_topic` handback instead
+   *  of deflecting again. Task-scoped — a task-ending handback clears it. */
+  deflectedAside?: boolean | null;
   handoff?: HandoffRequest | null;
   /** Consecutive backend-failure counter. The runner increments it on each
    *  batch whose failing step is a backend failure (the runner-raised
@@ -204,6 +209,7 @@ export const agentStepStateSpec = {
   boundedChoice: Annotation<BoundedChoice | null>(replaceNull<BoundedChoice>()),
   pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
   guardTurn: Annotation<Record<string, string> | null>(replaceNull<Record<string, string>>()),
+  deflectedAside: Annotation<boolean | null>(replaceNull<boolean>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
   errorCount: Annotation<number | null>(replaceNull<number>()),
 };
@@ -241,6 +247,9 @@ export const agentStepZodShape = {
   guardTurn: withLangGraph(z.record(z.string(), z.string()).nullable(), {
     default: (): Record<string, string> | null => null,
   }),
+  deflectedAside: withLangGraph(z.boolean().nullable(), {
+    default: (): boolean | null => null,
+  }),
   handoff: withLangGraph(HandoffRequestSchema.nullable(), {
     default: (): HandoffRequest | null => null,
   }),
@@ -260,6 +269,7 @@ export const agentStepInternalSlotMask = {
   boundedChoice: true,
   pagedRead: true,
   guardTurn: true,
+  deflectedAside: true,
   handoff: true,
   errorCount: true,
 } as const;
@@ -280,5 +290,6 @@ export const agentStepTaskScopedSlots = [
   "currentFlow",
   "boundedChoice",
   "pagedRead",
+  "deflectedAside",
   "errorCount",
 ] as const satisfies readonly (keyof typeof agentStepInternalSlotMask)[];

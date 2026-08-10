@@ -192,6 +192,7 @@ const LIBRARY_MANAGED_KEYS = [
   "currentFlow",
   "boundedChoice",
   "pagedRead",
+  "deflectedAside",
   "handoff",
   "errorCount",
 ] as const;

@@ -12,6 +12,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.4.0] — 2026-08-10
+
+Minor: **the trigger-happy-handoff damper.** Measured on a QA voice session — a weather aside mid-
+identification was handed off `off_topic` on the FIRST utterance, the caller was re-routed to the
+general agent which neither answered the weather nor offered to resume, and the in-progress task
+dangled. For NON-banking chit-chat, something no agent in the fleet serves, the re-route buys the
+caller nothing but a lost turn and a dropped question; the failure mode is cross-cutting. 2.4.0 adds
+one injected control that keeps the caller in the task for one free deflection and then re-routes
+deterministically. Opt-in and additive: without `HandoffSpec.deflectAside` the model-facing surface is
+byte-identical to 2.3.0. Suite 193 → 200.
+Migration: [migrations/2.3.0-to-2.4.0.md](migrations/2.3.0-to-2.4.0.md).
+
+### Added
+- **`deflect_aside`** (`controls/deflect-aside.ts`), params `{ aside }` — handle a NON-BANKING aside
+  mid-task WITHOUT ending the task. FIRST use per task: no handoff — the task-scoped `deflectedAside`
+  latch is set, every pending gate/flow survives untouched, and the result instructs the model to
+  decline in ONE short sentence and repeat its pending question in the SAME turn. REPEAT in the same
+  task: escalates ATOMICALLY into the `off_topic` handback via the same `requestHandoffPatch` the
+  handoff control applies, with the aside as routing `context` — one-shot, like the bounded-choice
+  overlay, so a caller who keeps pivoting still re-routes deterministically and the model never has to
+  issue a second call for it to happen.
+- **`HandoffSpec.deflectAside?: boolean`** — the opt-in. Requires handoff (the repeat path escalates
+  into it); `activeWhen` keeps the action out of the schema entirely when unset.
+- **`deflectedAside` slot** — the one-shot latch, task-scoped via `agentStepTaskScopedSlots`.
+- **`msgs.aside_deflected`** — the MODEL-facing instruction returned on the free deflection (not
+  caller-audible; the library ships no refusal sentence, the wording stays host-owned).
+- **`DEFLECT_ASIDE_ACTION`** / **`DEFLECT_ASIDE_ACTION_DESCRIPTION`** exported from `index.ts`.
+
+### Changed
+- `agentStepInternalSlotMask` grows to eight keys (`deflectedAside`); `LIBRARY_MANAGED_KEYS` gains the
+  same slot, so an executor cannot transition it.
+- New `deflect` exclusivity group (`deflect_must_be_sole_step`). The control is registered LAST —
+  injection order is model-facing surface — and leads locked batches like the handoff does
+  (`allowedDuringGateLockdown`, `allowedDuringChoicePending`): the whole point is a MID-GATE aside, so
+  the pending confirmation/OTP/match must survive it untouched.
+- An `off_topic` resolution deliberately does NOT clear the latch — a mid-task aside roundtrip that
+  comes back must not re-arm the freebie. Only a task-ENDING handback clears it.
+
 ## [2.3.0] — 2026-08-09
 
 Minor: **mechanisms move into the engine.** A survey of the voice-agent family found three mechanisms

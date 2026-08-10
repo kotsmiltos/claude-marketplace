@@ -183,6 +183,24 @@ export interface HandoffSpec<T> {
    *  thread id gives it memory, not history — the first delegated turn knows
    *  only what this input carries). */
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
+  /** Opt into the `deflect_aside` control: the trigger-happy-handoff damper.
+   *  A NON-BANKING aside mid-task (weather, small talk — something no agent in
+   *  the fleet serves, so a re-route buys the caller nothing but a lost turn)
+   *  gets ONE free in-place deflection per task: the runner latches the
+   *  task-scoped `deflectedAside` slot, leaves every pending gate intact, and
+   *  instructs the model to decline in one sentence and repeat its pending
+   *  question in the same turn. A SECOND deflection request in the same task
+   *  escalates atomically into the `off_topic` handback (the aside rides as
+   *  its `context`), so a persistent pivot still re-routes deterministically —
+   *  one-shot, like the bounded-choice overlay.
+   *
+   *  The model still owns the classification (banking topics keep signalling
+   *  `off_topic` directly — another agent may serve them; only chit-chat is
+   *  deflected), and a misjudgement is benign in both directions: a wrongly
+   *  deflected banking ask hands off one turn later on persistence, a wrongly
+   *  handed-off aside is exactly today's behaviour. The prompt must teach the
+   *  split — see the `deflect_aside` action description. */
+  deflectAside?: boolean;
 }
 
 /** Edge predicate for the host graph's conditional edge after its tool node:

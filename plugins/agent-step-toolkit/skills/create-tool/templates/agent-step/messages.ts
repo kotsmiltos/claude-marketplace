@@ -73,6 +73,12 @@ export interface SystemMessages {
   match_attempts_exhausted: string;
   /** A handoff step succeeded; the turn must end silently. `{reason}`. */
   handoff_requested: string;
+  /** The `deflect_aside` control accepted the task's ONE free in-place
+   *  deflection: the model must decline the aside in a single short sentence
+   *  and repeat its pending question in the SAME turn — no handoff happened
+   *  and every pending gate survives. Model-facing instruction, not
+   *  caller-audible. */
+  aside_deflected: string;
   /** The batch contained no steps. */
   no_steps: string;
   /** Instruction accompanying the synthetic `auto_handoff` result. The
@@ -121,6 +127,8 @@ export const DEFAULT_SYSTEM_MESSAGES: SystemMessages = {
   match_attempts_exhausted: 'Match attempts exhausted for "{action}"; flow aborted.',
   handoff_requested:
     "Handoff requested ({reason}). The turn ends here — produce no further answer.",
+  aside_deflected:
+    "Aside noted — NOT handed off. Decline it in ONE short sentence (no details, no promises) and repeat your pending question in the SAME turn. If the caller pivots away from the task again, call deflect_aside again — the system will hand the conversation off then.",
   no_steps: "No steps executed.",
   auto_handoff_instruction:
     "Handoff triggered after repeated backend failures. The turn ends here — produce no further answer; the platform delivers the closing.",
