@@ -12,6 +12,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.4.0] — 2026-08-10
+
+Minor: **the trigger-happy-handoff damper.** Field observation across voice agents: a social aside
+mid-task ("what's the weather?") was handed off `off_topic` on the FIRST utterance — the caller was
+re-routed to an agent that serves the aside no better, and the task dangled. For chit-chat NO
+configured agent serves, the re-route buys the caller nothing but a lost turn. The new
+`deflect_aside` control makes the POLICY engine-owned (one free in-place deflection per task, then a
+deterministic escalation) while the CLASSIFICATION stays with the model (a topic another configured
+agent may serve still goes to `request_handoff` with `off_topic`). Misclassification is benign in
+both directions. Nothing removed or reshaped. Suite 193 → 207.
+Migration: [migrations/2.3.0-to-2.4.0.md](migrations/2.3.0-to-2.4.0.md).
+
+### Added
+- **`deflect_aside` control** (`controls/deflect-aside.ts`, opt-in via `HandoffSpec.deflectAside`) —
+  params `{ aside }` (the caller's off-task request, in the caller's language). FIRST use per task:
+  no handoff — the task-scoped `deflectedAside` latch is set, every pending gate/flow survives
+  untouched (allowed during gate lockdown and choice-pending, like the handoff), and the step result
+  instructs the model (`SystemMessages.aside_deflected`) to decline in ONE short sentence and repeat
+  its pending question in the SAME turn. REPEAT in the same task: escalates ATOMICALLY into the
+  `off_topic` handback with the aside as routing `context` — one-shot, like the bounded-choice
+  overlay, with no window where the model must issue a second call. Sole-step enforced via the new
+  `deflect` exclusivity group (`deflect_must_be_sole_step`); registered LAST so the four established
+  schema variants keep their injection order; reserved name only when enabled.
+- **`HandoffSpec.deflectAside?: boolean | { actionDescription?: string }`** — `true`/`{}` enables
+  the control with its domain-neutral default description; the object form's `actionDescription`
+  replaces the LLM-facing schema-variant description (the same override seam `request_handoff` has)
+  so a host states its own classification policy. Requires the handoff by construction — the repeat
+  path escalates into it.
+- **`deflectedAside` slot** — task-scoped: in `agentStepZodShape` / `agentStepStateSpec` /
+  `agentStepTaskScopedSlots` (a task-ENDING handback clears it; an `off_topic` roundtrip
+  deliberately does NOT re-arm the freebie) and in the runner's `stateUpdate` ownership guard.
+  `agentStepInternalSlotMask` grows 7 → 8 keys. Construction REQUIRES the channel only when the
+  control is enabled — without it the latch write would be silently discarded, so
+  `buildAgentStepTool` refuses to construct.
+- **Exports** `DEFLECT_ASIDE_ACTION`, `DEFLECT_ASIDE_ACTION_DESCRIPTION`; **`SystemMessages.aside_deflected`**
+  (model-facing instruction, not caller-audible; host-overridable like every system message).
+- `deflect-aside.test.ts` — 14 tests: opt-in gating, latch + survival of confirmation / OTP+flow /
+  match / bounded-choice pendings, atomic escalation with context, task-scoped clearing AND
+  `off_topic` latch survival, sole-step, invalid params, message override, missing-channel
+  construction refusal, object-form description override.
+
 ## [2.3.0] — 2026-08-09
 
 Minor: **mechanisms move into the engine.** A survey of the voice-agent family found three mechanisms

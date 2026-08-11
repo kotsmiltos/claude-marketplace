@@ -20,6 +20,7 @@ import {
   REQUEST_BOUNDED_CHOICE_ACTION,
   RESOLVE_BOUNDED_CHOICE_ACTION,
 } from "./bounded-choice.js";
+import { deflectAsideControl, DEFLECT_ASIDE_ACTION } from "./deflect-aside.js";
 import { HANDOFF_ACTION } from "../handoff/contract.js";
 
 export const CONTROL_REGISTRY: readonly ControlAction[] = [
@@ -27,6 +28,9 @@ export const CONTROL_REGISTRY: readonly ControlAction[] = [
   requestHandoffControl,
   requestBoundedChoiceControl,
   resolveBoundedChoiceControl,
+  // Appended LAST deliberately: injection order is model-facing surface, and
+  // the damper must not shift the four established variants.
+  deflectAsideControl,
 ];
 
 export const EXCLUSIVITY_GROUPS: readonly ExclusivityGroup[] = [
@@ -46,6 +50,17 @@ export const EXCLUSIVITY_GROUPS: readonly ExclusivityGroup[] = [
     errorCode: "bounded_choice_must_be_sole_step",
     // Both controls are meta-transitions: a same-batch domain call could
     // otherwise turn "continue" into consent for a suspended mutation.
+    summary: (foundAction: string) =>
+      `"${foundAction}" must be the only step in the batch.`,
+  },
+  {
+    name: "deflect",
+    memberNames: [DEFLECT_ASIDE_ACTION],
+    errorCode: "deflect_must_be_sole_step",
+    // The deflection answers a turn where the caller pivoted AWAY from the
+    // task — a same-batch domain step would mean the model both deflected and
+    // kept working, and on the repeat path the step escalates into a handoff,
+    // which abandons the turn (same incoherence as the handoff group).
     summary: (foundAction: string) =>
       `"${foundAction}" must be the only step in the batch.`,
   },

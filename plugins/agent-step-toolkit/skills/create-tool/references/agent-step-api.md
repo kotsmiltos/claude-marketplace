@@ -157,8 +157,8 @@ interface ExecutorResult<T> {
   stateUpdate?: Partial<T>;        // HOST-OWNED slots only — threaded to subsequent batch
                                    // steps + committed at end. Writing a library-managed slot
                                    // (awaitingInput, currentFlow, boundedChoice, pagedRead,
-                                   // handoff, errorCount) through it THROWS — library
-                                   // transitions go through `effects` instead.
+                                   // deflectedAside, handoff, errorCount) through it THROWS —
+                                   // library transitions go through `effects` instead.
   effects?: ExecutorEffect[];      // typed library-state transitions (below)
   ok: boolean;                     // false short-circuits the batch
 }
@@ -296,11 +296,11 @@ interface PagedCache<Row> {
 }
 ```
 
-The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `boundedChoice` / `handoff` / `errorCount` / `guardTurn`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.) Since 2.0.0 `buildAgentStepTool` **verifies channel completeness at construction**: a state schema missing a channel for any library slot the configuration writes throws (the message names the missing slots and the spreadable fragments).
+The host gets the `pagedRead: PagedCache<unknown> | null` slot (alongside `awaitingInput` / `currentFlow` / `boundedChoice` / `deflectedAside` / `handoff` / `errorCount` / `guardTurn`) by spreading the library's `agentStepZodShape` into its Zod state schema — the bootstrap state template does this. Each slot in `agentStepZodShape` is wrapped with `withLangGraph` so it carries the runner's expected last-writer-wins reducer/default as channel metadata. The per-slot schemas (`AwaitingInputSchema`, `CurrentFlowSchema`, `BoundedChoiceSchema`, `PagedCacheSchema`, `HandoffRequestSchema`) are individually exported from `index.ts` too. (A host still on a LangGraph `Annotation.Root` spreads the equivalent `agentStepStateSpec` fragment instead — still exported, but the scaffold uses the Zod path.) Since 2.0.0 `buildAgentStepTool` **verifies channel completeness at construction**: a state schema missing a channel for any library slot the configuration writes throws (the message names the missing slots and the spreadable fragments).
 
-`index.ts` also exports **`agentStepTaskScopedSlots`** (2.2.0) — the subset of library slots that describe work IN PROGRESS (`awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `errorCount`), which `createHandoffNode` nulls when a task-ENDING handback resolves. `handoff` is deliberately absent: the node returns it as null either way. See `<handoff>` for the clearing rules and the host-slot counterpart (`HandoffSpec.clearsOnHandback`).
+`index.ts` also exports **`agentStepTaskScopedSlots`** (2.2.0) — the subset of library slots that describe work IN PROGRESS (`awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `deflectedAside` (2.4.0), `errorCount`), which `createHandoffNode` nulls when a task-ENDING handback resolves. `handoff` is deliberately absent: the node returns it as null either way. (`deflectedAside` being task-scoped means a task-ENDING handback re-arms the free deflection for the next task, while an `off_topic` re-route — not a task ending — deliberately does NOT.) See `<handoff>` for the clearing rules and the host-slot counterpart (`HandoffSpec.clearsOnHandback`).
 
-`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the seven library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
+`index.ts` also exports **`agentStepInternalSlotMask`** — a Zod `.omit()` mask of the eight library-managed slot keys. A host derives a graph INPUT schema by omitting these (they are runner-written only, never caller input) from its full state schema: `AgentStateSchema.omit({ ...agentStepInternalSlotMask, /* + any host-derived slots */ }).partial().extend({ messages: MessagesZodState.shape.messages })`. Re-attach `messages` after `.partial()` — `.partial()` strips the messages-channel metadata LangGraph Studio keys off to render its chat input box (see `state-and-prompt-integration.md`). Wired as the `input` of a hand-built `new StateGraph({ state, input })`, this rejects/coerces a malformed or internal-slot-injecting invoke at the boundary.
 
 ## HandoffRequest (library-managed)
 
@@ -369,7 +369,7 @@ agent-step: action "verify_card" lists prereq "customerVerified" but verifiers["
 
 ## 3. Reserved action names
 
-`abort_pending_input` is ALWAYS reserved — the library auto-injects it into the tool schema whenever ANY action declares one of: `requiresConfirmation`, `requiresOtp`, `issuesOtp`, `startsFlow`, `endsFlow`, `requiresFlow`, `requiresMatch`, `startsMatchFor`. `request_handoff` is reserved ONLY when `BuildAgentStepToolOptions.handoff` is provided (see `<handoff>`) — a tool that does NOT opt in may define its own action under that name (the orchestrator/scaffold handoff mechanism does exactly that). `request_bounded_choice` / `resolve_bounded_choice` are reserved ONLY when `boundedChoices` is provided (see `<bounded_choice>`). These library-owned actions are **controls** (`controls/` in the library): each carries its own activation, schema variant, description line, lockdown allowances, and execution — the run pipeline dispatches them instead of an executor. Declaring a reserved name throws:
+`abort_pending_input` is ALWAYS reserved — the library auto-injects it into the tool schema whenever ANY action declares one of: `requiresConfirmation`, `requiresOtp`, `issuesOtp`, `startsFlow`, `endsFlow`, `requiresFlow`, `requiresMatch`, `startsMatchFor`. `request_handoff` is reserved ONLY when `BuildAgentStepToolOptions.handoff` is provided (see `<handoff>`) — a tool that does NOT opt in may define its own action under that name (the orchestrator/scaffold handoff mechanism does exactly that). `request_bounded_choice` / `resolve_bounded_choice` are reserved ONLY when `boundedChoices` is provided (see `<bounded_choice>`). `deflect_aside` (2.4.0) is reserved ONLY when `HandoffSpec.deflectAside` is set (see `<handoff>`). These library-owned actions are **controls** (`controls/` in the library): each carries its own activation, schema variant, description line, lockdown allowances, and execution — the run pipeline dispatches them instead of an executor. Declaring a reserved name throws:
 
 ```
 agent-step: "<name>" is a reserved action name auto-injected by the library; remove it from config.actions.
@@ -683,6 +683,16 @@ interface HandoffSpec<T> {
                                      // cleared automatically; list only your own. Each is written
                                      // as `null`, so it must be nullable with a replace-style
                                      // reducer.
+  deflectAside?: boolean | { actionDescription?: string };
+                                     // OPTIONAL (2.4.0) — enable the `deflect_aside` control: one
+                                     // free in-place deflection per task of an aside NO configured
+                                     // agent serves, before the off_topic handback fires. The
+                                     // object form's `actionDescription` replaces the LLM-facing
+                                     // description of the auto-injected schema variant (the same
+                                     // override `actionDescription` above provides for
+                                     // request_handoff) so the host states its own classification
+                                     // policy. Requires the `deflectedAside` state channel —
+                                     // construction throws without it. See below.
 }
 ```
 
@@ -733,7 +743,36 @@ into the next task and re-fires its branch on every later turn of the same call.
 MERGES cannot be cleared this way (the write is a plain `null`); reset those through the pointer slot
 that selects from them.
 
-Exports: `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `forcedHandoffRequested(state, spec)` (the forced-handoff edge predicate — true when nothing is pending yet `spec.forcedHandoff` derives one), `createHandoffNode(spec)`.
+**One free aside deflection before the handback (2.4.0).** `deflectAside` opts into the
+`deflect_aside` control — a damper for the trigger-happy `off_topic` handoff on a social aside
+mid-task (weather, small talk — chit-chat NO configured agent serves, where a re-route buys the
+caller nothing but a lost turn). Params: `{ aside: string }` (the caller's off-task request, in the
+caller's language). The CLASSIFICATION stays with the model — a topic another configured agent may
+serve still goes to `request_handoff` with `off_topic`; only nobody-serves-it chit-chat is deflected
+— while the POLICY is engine-owned:
+
+- **First use per task:** no handoff. The task-scoped `deflectedAside` latch is set, every pending
+  gate/flow survives untouched (the control is allowed during gate lockdown and choice-pending, like
+  the handoff), and the step result instructs the model (`SystemMessages.aside_deflected`) to decline
+  in ONE short sentence and repeat its pending question in the SAME turn.
+- **Repeat in the same task:** the free deflection is spent — the control escalates ATOMICALLY into
+  the `off_topic` handback (the same slot transition `request_handoff` performs), with the aside as
+  the routing `context`. One-shot, like the bounded-choice overlay: a caller who keeps pivoting away
+  still re-routes deterministically, with no window where the model must issue a second call.
+
+Misclassification is benign in both directions: an in-scope ask wrongly deflected hands off one turn
+later on persistence; chit-chat wrongly sent through `request_handoff` is exactly the pre-control
+behaviour. `deflect_aside` must be the SOLE step in its batch (`deflect_must_be_sole_step`) and is a
+reserved name only when enabled. The latch is task-scoped: a task-ENDING handback clears it (next
+task gets its own freebie), but an `off_topic` roundtrip deliberately does NOT re-arm it. Enabling
+the control makes the `deflectedAside` channel REQUIRED at construction — without it the latch write
+would be silently discarded and the escalation would never fire, so `buildAgentStepTool` refuses to
+construct. The host prompt must teach the split (which topics other agents serve vs. chit-chat) —
+the domain-neutral default description (`DEFLECT_ASIDE_ACTION_DESCRIPTION`) can't know the fleet, so
+a real deployment usually states its own policy via `deflectAside: { actionDescription }`.
+
+Exports: `DEFLECT_ASIDE_ACTION` (`"deflect_aside"`), `DEFLECT_ASIDE_ACTION_DESCRIPTION` (the
+domain-neutral default the object form overrides), plus `HANDOFF_ACTION` (`"request_handoff"`), `HANDOFF_NODE` (`"resolve_handoff"` — a node can't be named `handoff`, the state channel claims it), `HANDBACK_SIGNALS` (reason → `handoff_type` signal; identity over `off_topic` / `completed` / `abandon`), `handoffParamsSchema`, `handoffRequested(state)` (edge predicate), `forcedHandoffRequested(state, spec)` (the forced-handoff edge predicate — true when nothing is pending yet `spec.forcedHandoff` derives one), `createHandoffNode(spec)`.
 
 Wire a conditional edge after the tool node — `createReactAgent` cannot express it, so the graph is hand-rolled: `addConditionalEdges("tools", s => handoffRequested(s) ? HANDOFF_NODE : "agent")`, `addNode(HANDOFF_NODE, createHandoffNode(spec))`, `addEdge(HANDOFF_NODE, END)`. A host using `forcedHandoff` adds one more predicate on the MODEL node's own edge — `forcedHandoffRequested(s, spec) ? HANDOFF_NODE : END` — and still no extra node. The node emits a `handoff` custom event FIRST (streaming clients abort TTS / reroute before any content), resolves the response (terminate envelope, or a delegate run over the Platform API with live `delegated_token` pass-through and a behavioral fallback to the envelope on failure), emits `handoff_complete`, and returns `{ handoff: null, ...clears, messages: [AIMessage] }` (the clears are empty unless a task-ending handback resolved — see above) — the model never paraphrases the result.
 
@@ -776,6 +815,10 @@ interface SystemMessages {
   otp_blocked_match_pending: string;     // {action} {match_action}
   match_attempts_exhausted: string;      // {action}
   handoff_requested: string;             // {reason}
+  aside_deflected: string;               // (no placeholders) the deflect_aside control accepted the
+                                         // task's ONE free deflection: instructs the model to decline
+                                         // the aside in one short sentence and repeat its pending
+                                         // question in the SAME turn. Model-facing, not caller-audible.
   no_steps: string;                      // (no placeholders)
   auto_handoff_instruction: string;      // {message} — see <auto_handoff>
 }
@@ -863,13 +906,13 @@ Runtime errors raised by the runner (not construction-time, but loud):
 
 | Error message contains | Cause |
 |------------------------|-------|
-| `wrote library-managed slot(s) … through stateUpdate` | Executor patched `awaitingInput` / `currentFlow` / `boundedChoice` / `pagedRead` / `handoff` / `errorCount` via `stateUpdate` — request the transition as a typed effect instead |
+| `wrote library-managed slot(s) … through stateUpdate` | Executor patched `awaitingInput` / `currentFlow` / `boundedChoice` / `pagedRead` / `deflectedAside` / `handoff` / `errorCount` via `stateUpdate` — request the transition as a typed effect instead |
 | `requested merge_flow_data but no flow is active` | Executor emitted `merge_flow_data` without `startsFlow` and no flow is open |
 | `reported otp_issued but no flow is active` | Issuer didn't pair with `startsFlow` |
 | `reported otp_issued but config lacks issuesOtp opt` | Executor returned the effect but the action's config didn't declare `issuesOtp` |
 | `otp_blocked_match_pending` (step error) | An `issuesOtp` step ran while a double-entry match gate was still pending — consume the match before issuing the OTP (see `<otp_lifecycle>`) |
 
-Slot declaration is enforced at construction since 2.0.0 (the channel-completeness row above) — a state schema missing a required library slot fails at startup instead of silently dropping writes. Spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings all seven slots in together with their reducers.
+Slot declaration is enforced at construction since 2.0.0 (the channel-completeness row above) — a state schema missing a required library slot fails at startup instead of silently dropping writes. Spreading `agentStepZodShape` into your Zod state schema (as the bootstrap state template does) brings all eight slots in together with their reducers.
 </construction_time_checks>
 
 <key_files_to_inspect>
@@ -882,10 +925,10 @@ For ground truth, read these files in the project (don't paraphrase — they ARE
   - `compile/` — `validate.ts` (every construction-time check), `plan.ts` (`BuildAgentStepToolOptions` + the compiled plan), `schema.ts` / `describe.ts` (the model-facing schema + description)
   - `run/` — `admission.ts` (the fixed-order whole-batch preconditions), `planning.ts` (confirm-mode freeze), `execution.ts` (per-step loop, effects ordering, handoff monotonicity), `finalize.ts` (result body + error-counter policy), `batch-state.ts` (the single write path into view/committed)
   - `interaction/` — one policy module per gate kind: `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (each states its lockdown, attempts, freshness, and clearing rules in one place; `bounded-choice.ts` also owns `resolveCallerTurnId`), plus `guard-latch.ts` (the host guard latch over that same identity)
-  - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`) in an ordered `registry.ts`
+  - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`) in an ordered `registry.ts`
   - `handoff/` — `contract.ts` (action + signals + `HandoffSpec`), `node.ts` (`createHandoffNode` — the frozen channel contract), `delegate-client.ts` (SSE/Platform-API transport)
 - `src/agent-step/paginate.ts` — the read-pagination primitives + the `pageable` orchestration the runner uses (self / delegate, the cache, the envelope)
 - `src/agent-step/capture.ts` — the caller-digit capture primitives (refinement-not-regex, count-free messages, group join, candidate arrays; see `<caller_digit_capture>`)
 - `src/agent-step/messages.ts` — the runner's overridable system `summary` strings: `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages`
-- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `guard-latch.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, the hardening guards, and the turn-scoped guard latch; all pass on `npm test`
+- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `guard-latch.test.ts` + `deflect-aside.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, the hardening guards, the turn-scoped guard latch, and the aside-deflection control; all pass on `npm test`
 </key_files_to_inspect>

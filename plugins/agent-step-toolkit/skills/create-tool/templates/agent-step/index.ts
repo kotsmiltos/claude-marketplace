@@ -91,6 +91,14 @@ export type {
 } from "./handoff/contract.js";
 export { createHandoffNode } from "./handoff/node.js";
 
+// The trigger-happy-handoff damper (`HandoffSpec.deflectAside`): one free
+// in-place deflection of an out-of-scope aside per task; a repeat escalates
+// atomically into the `off_topic` handback. See controls/deflect-aside.ts.
+export {
+  DEFLECT_ASIDE_ACTION,
+  DEFLECT_ASIDE_ACTION_DESCRIPTION,
+} from "./controls/deflect-aside.js";
+
 // Caller-turn identity + the turn-scoped guard latch. `resolveCallerTurnId` is
 // the library's own definition of "the current caller turn" (host hook, else
 // the latest human message id) — the same identity the confirmation gate and

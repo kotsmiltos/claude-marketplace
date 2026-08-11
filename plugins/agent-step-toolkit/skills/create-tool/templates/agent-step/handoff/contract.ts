@@ -183,6 +183,51 @@ export interface HandoffSpec<T> {
    *  thread id gives it memory, not history — the first delegated turn knows
    *  only what this input carries). */
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
+  /** Opt into the `deflect_aside` control: the trigger-happy-handoff damper.
+   *  An aside mid-task that NO configured agent serves (weather, small talk —
+   *  a re-route buys the caller nothing but a lost turn) gets ONE free
+   *  in-place deflection per task: the runner latches the task-scoped
+   *  `deflectedAside` slot, leaves every pending gate intact, and instructs
+   *  the model to decline in one sentence and repeat its pending question in
+   *  the same turn. A SECOND deflection request in the same task escalates
+   *  atomically into the `off_topic` handback (the aside rides as its
+   *  `context`), so a persistent pivot still re-routes deterministically —
+   *  one-shot, like the bounded-choice overlay.
+   *
+   *  The model still owns the classification (a topic another configured
+   *  agent may serve keeps signalling `off_topic` directly; only chit-chat is
+   *  deflected), and a misjudgement is benign in both directions: a wrongly
+   *  deflected in-scope ask hands off one turn later on persistence, a
+   *  wrongly handed-off aside is exactly the pre-control behaviour. The
+   *  prompt must teach the split — see the `deflect_aside` action
+   *  description.
+   *
+   *  `true` (or `{}`) enables the control with its domain-neutral default
+   *  description; the object form's `actionDescription` replaces the LLM-facing
+   *  description attached to the schema variant — the same override
+   *  `actionDescription` above provides for `request_handoff` — so a host can
+   *  state its own classification policy (which topics other agents serve)
+   *  in the model's own terms. */
+  deflectAside?: boolean | { actionDescription?: string };
+}
+
+/** True when `spec` opts into the `deflect_aside` control (either form).
+ *  Shared by compile/plan.ts and compile/validate.ts so activation and
+ *  channel validation cannot diverge. Requires the handoff by construction —
+ *  the repeat path escalates into it. */
+export function deflectAsideEnabled(
+  spec: { deflectAside?: boolean | { actionDescription?: string } } | null | undefined,
+): boolean {
+  return spec != null && !!spec.deflectAside;
+}
+
+/** The host override for the `deflect_aside` LLM-facing description, when the
+ *  object form carries one. */
+export function deflectAsideActionDescription(
+  spec: { deflectAside?: boolean | { actionDescription?: string } } | null | undefined,
+): string | undefined {
+  const d = spec?.deflectAside;
+  return typeof d === "object" && d != null ? d.actionDescription : undefined;
 }
 
 /** Edge predicate for the host graph's conditional edge after its tool node:
