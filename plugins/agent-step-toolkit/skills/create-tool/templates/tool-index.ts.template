@@ -63,6 +63,9 @@ export const {{TOOL_NAME}}Tool = buildAgentStepTool({
   verifiers,
   // Optional library features (see references/agent-step-api.md):
   //   handoff: <HandoffSpec>            — built-in `request_handoff` control + graph node
+  //                                       (its `deflectAside` opt adds the `deflect_aside`
+  //                                       control: one free in-place aside deflection per
+  //                                       task before the off_topic handback fires)
   //   boundedChoices: <registry>        — one-shot conversational-choice controls
   //   getCallerTurnId: (state) => id    — stable caller-turn identity; REQUIRED if the
   //                                       host compacts/replaces messages and uses

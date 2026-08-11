@@ -1,7 +1,7 @@
 // FILE: src/agent-step/deflect-aside.test.ts
 //
 // The trigger-happy-handoff damper (`deflect_aside`, HandoffSpec.deflectAside):
-// one free in-place deflection of a non-banking aside per task; the repeat
+// one free in-place deflection of an out-of-scope aside per task; the repeat
 // escalates atomically into the `off_topic` handback. What these tests pin:
 //
 //   - opt-in: without the spec flag the control is not injected (unknown
@@ -278,13 +278,122 @@ test("deflect_aside: a missing aside is invalid_params and latches nothing", asy
   assert.equal((committed as S).deflectedAside ?? null, null);
 });
 
-test("HandoffSpec.deflectAsideDescription overrides the deflect_aside schema variant description", () => {
-  // The shipped default is written in the vocabulary of the domain this
-  // control was measured on, naming that domain's out-of-scope topics as the
-  // examples of what must NOT be deflected. An agent in another domain would
-  // otherwise ship a schema contradicting its own prompt — so the host gets
-  // the same escape valve `actionDescription` gives `request_handoff`.
-  // Read the variant descriptions off the WIRE shape (what the provider sees).
+// ─── Gate preservation beyond the confirmation gate ─────────────────────── //
+// `allowedDuringGateLockdown` / `allowedDuringChoicePending` must mean what
+// they say for EVERY pending-interaction shape, not just the read-back.
+
+test("deflect_aside: a pending OTP gate and its flow SURVIVE the deflection", async () => {
+  const pending: S = {
+    messages: [turn("t-otp")],
+    awaitingInput: { kind: "otp", for_action: "validate_thing_otp", flow_ref: "thing_flow" },
+    currentFlow: { name: "thing_flow", data: { step: "otp_sent" } },
+  };
+  const { body, committed } = await runSteps(makeOpts(true), [DEFLECT()], pending);
+  assert.equal((body.results[0] as { deflected?: boolean }).deflected, true);
+  const next = { ...pending, ...committed } as S;
+  assert.deepEqual(next.awaitingInput, pending.awaitingInput, "OTP gate untouched");
+  assert.deepEqual(next.currentFlow, pending.currentFlow, "flow untouched");
+  assert.equal(next.handoff ?? null, null);
+  assert.equal(next.deflectedAside, true);
+});
+
+test("deflect_aside: a pending double-entry match SURVIVES the deflection", async () => {
+  const pending: S = {
+    messages: [turn("t-match")],
+    awaitingInput: {
+      kind: "match",
+      for_action: "change_thing",
+      attempts_left: 2,
+      max_attempts: 3,
+    },
+  };
+  const { body, committed } = await runSteps(makeOpts(true), [DEFLECT()], pending);
+  assert.equal((body.results[0] as { deflected?: boolean }).deflected, true);
+  const next = { ...pending, ...committed } as S;
+  assert.deepEqual(next.awaitingInput, pending.awaitingInput, "match gate untouched");
+  assert.equal(next.handoff ?? null, null);
+  assert.equal(next.deflectedAside, true);
+});
+
+test("deflect_aside: a pending bounded choice SURVIVES the deflection (allowedDuringChoicePending)", async () => {
+  const opts: BuildAgentStepToolOptions<S, string, string, typeof selectors> = {
+    ...makeOpts(true),
+    boundedChoices: {
+      off_menu_ask: {
+        description: "meta-choice while an unsupported detail is pending",
+        selections: ["continue"],
+      },
+    },
+  };
+  const pending: S = {
+    messages: [turn("t-choice")],
+    boundedChoice: { name: "off_menu_ask", status: "pending" },
+  };
+  const { body, committed } = await runSteps(opts, [DEFLECT()], pending);
+  assert.equal((body.results[0] as { deflected?: boolean }).deflected, true);
+  const next = { ...pending, ...committed } as S;
+  assert.deepEqual(next.boundedChoice, pending.boundedChoice, "choice still pending");
+  assert.equal(next.handoff ?? null, null);
+  assert.equal(next.deflectedAside, true);
+});
+
+test("deflect_aside: an off_topic resolution does NOT clear the latch — a roundtrip cannot re-arm the freebie", async () => {
+  const spec: HandoffSpec<S> = {
+    offTopic: { mode: "terminate" },
+    terminateMessage: "Transferring you now.",
+    deflectAside: true,
+  };
+  const node = createHandoffNode<S>(spec);
+  const state: S = {
+    messages: [],
+    deflectedAside: true,
+    handoff: { reason: "off_topic", context: "τι καιρό έχει" },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const update = await node(state, {
+    configurable: { thread_id: "t-keep" },
+    writer: () => {},
+  } as any);
+  assert.equal(
+    (update as S).deflectedAside,
+    undefined,
+    "an off_topic handback is not task-ending — the spent latch must survive",
+  );
+});
+
+// ─── Host surface: message override, channel validation, object form ─────── //
+
+test("deflect_aside: a host messages.aside_deflected override reaches the step summary", async () => {
+  const opts: BuildAgentStepToolOptions<S, string, string, typeof selectors> = {
+    ...makeOpts(true),
+    messages: { aside_deflected: "CUSTOM-ASIDE-NOTE" },
+  };
+  const { body } = await runSteps(opts, [DEFLECT()], {} as S);
+  assert.equal((body.results[0] as { summary?: string }).summary, "CUSTOM-ASIDE-NOTE");
+});
+
+test("deflect_aside: construction rejects a state schema missing the deflectedAside channel", () => {
+  // Everything ELSE this config writes is present — only the latch channel is
+  // missing, so without the validate.ts guard the write would be silently
+  // discarded and the escalation would never fire.
+  const incomplete = Annotation.Root({
+    thing: Annotation<string | null>(replaceNull<string>()),
+    awaitingInput: Annotation<AwaitingInput | null>(replaceNull<AwaitingInput>()),
+    handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
+    errorCount: Annotation<number | null>(replaceNull<number>()),
+  });
+  assert.throws(
+    () => buildAgentStepTool({ ...makeOpts(true), stateSchema: incomplete }),
+    /missing channel\(s\) "deflectedAside"/,
+  );
+  // Without the opt-in the same schema is complete — the channel is only
+  // required by the feature that writes it.
+  buildAgentStepTool({ ...makeOpts(false), stateSchema: incomplete });
+});
+
+test("deflect_aside: the object form enables the control and overrides the schema description", () => {
+  // Read the variant descriptions from the wire shape (what the provider
+  // actually receives) — same probe as the request_handoff override test.
   const variantDescriptions = (tool: { schema: unknown }): (string | undefined)[] => {
     const s = tool.schema as {
       properties: { steps: { items: { anyOf?: Array<{ description?: string }> } } };
@@ -296,30 +405,19 @@ test("HandoffSpec.deflectAsideDescription overrides the deflect_aside schema var
 
   const stock = variantDescriptions(buildAgentStepTool(makeOpts(true)));
   assert.ok(
-    stock.some((d) => d?.includes("WITHOUT ending the task")),
-    "without an override the built-in description is used",
+    stock.some((d) => d?.includes("OUTSIDE every configured agent's scope")),
+    "boolean opt-in carries the domain-neutral default description",
   );
 
   const custom = makeOpts(true);
   custom.handoff = {
     ...custom.handoff!,
-    deflectAsideDescription: "CUSTOM-DEFLECT-DESC",
+    deflectAside: { actionDescription: "CUSTOM-DEFLECT-DESC" },
   };
   const overridden = variantDescriptions(buildAgentStepTool(custom));
+  assert.ok(overridden.includes("CUSTOM-DEFLECT-DESC"), "override replaces the description");
   assert.ok(
-    overridden.includes("CUSTOM-DEFLECT-DESC"),
-    "override replaces the description",
-  );
-  assert.ok(
-    !overridden.some((d) => d?.includes("WITHOUT ending the task")),
+    !overridden.some((d) => d?.includes("OUTSIDE every configured agent's scope")),
     "the default text is fully replaced",
-  );
-
-  // The override is inert when the control is not injected at all.
-  const off = makeOpts(false);
-  off.handoff = { ...off.handoff!, deflectAsideDescription: "CUSTOM-DEFLECT-DESC" };
-  assert.ok(
-    !variantDescriptions(buildAgentStepTool(off)).includes("CUSTOM-DEFLECT-DESC"),
-    "no deflect variant exists without the opt-in flag",
   );
 });

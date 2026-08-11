@@ -92,7 +92,7 @@ export type {
 export { createHandoffNode } from "./handoff/node.js";
 
 // The trigger-happy-handoff damper (`HandoffSpec.deflectAside`): one free
-// in-place deflection of a non-banking aside per task; a repeat escalates
+// in-place deflection of an out-of-scope aside per task; a repeat escalates
 // atomically into the `off_topic` handback. See controls/deflect-aside.ts.
 export {
   DEFLECT_ASIDE_ACTION,

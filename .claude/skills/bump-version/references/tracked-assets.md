@@ -33,7 +33,7 @@ Phase modules (internal layout; hosts import only from `index.ts`):
 - `compile/` — `validate.ts`, `plan.ts` (`BuildAgentStepToolOptions`), `schema.ts`, `describe.ts`, `state-schema.ts`
 - `run/` — `admission.ts`, `planning.ts`, `execution.ts`, `finalize.ts`, `batch-state.ts`, `value-equal.ts`
 - `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (also owns `resolveCallerTurnId`), `guard-latch.ts` (host guard latch over the `guardTurn` slot)
-- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts` (the aside-deflection damper over the `deflectedAside` slot)
+- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`
 - `handoff/` — `contract.ts`, `node.ts`, `delegate-client.ts`
 
 A source repo may carry an `UPSTREAM.md` (its own porting note) — do NOT copy it into the toolkit.

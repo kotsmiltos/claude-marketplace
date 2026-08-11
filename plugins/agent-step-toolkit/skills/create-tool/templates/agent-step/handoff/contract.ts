@@ -184,34 +184,50 @@ export interface HandoffSpec<T> {
    *  only what this input carries). */
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
   /** Opt into the `deflect_aside` control: the trigger-happy-handoff damper.
-   *  A NON-BANKING aside mid-task (weather, small talk — something no agent in
-   *  the fleet serves, so a re-route buys the caller nothing but a lost turn)
-   *  gets ONE free in-place deflection per task: the runner latches the
-   *  task-scoped `deflectedAside` slot, leaves every pending gate intact, and
-   *  instructs the model to decline in one sentence and repeat its pending
-   *  question in the same turn. A SECOND deflection request in the same task
-   *  escalates atomically into the `off_topic` handback (the aside rides as
-   *  its `context`), so a persistent pivot still re-routes deterministically —
+   *  An aside mid-task that NO configured agent serves (weather, small talk —
+   *  a re-route buys the caller nothing but a lost turn) gets ONE free
+   *  in-place deflection per task: the runner latches the task-scoped
+   *  `deflectedAside` slot, leaves every pending gate intact, and instructs
+   *  the model to decline in one sentence and repeat its pending question in
+   *  the same turn. A SECOND deflection request in the same task escalates
+   *  atomically into the `off_topic` handback (the aside rides as its
+   *  `context`), so a persistent pivot still re-routes deterministically —
    *  one-shot, like the bounded-choice overlay.
    *
-   *  The model still owns the classification (banking topics keep signalling
-   *  `off_topic` directly — another agent may serve them; only chit-chat is
+   *  The model still owns the classification (a topic another configured
+   *  agent may serve keeps signalling `off_topic` directly; only chit-chat is
    *  deflected), and a misjudgement is benign in both directions: a wrongly
-   *  deflected banking ask hands off one turn later on persistence, a wrongly
-   *  handed-off aside is exactly today's behaviour. The prompt must teach the
-   *  split — see the `deflect_aside` action description. */
-  deflectAside?: boolean;
-  /** Host override for the `deflect_aside` schema-variant description — the
-   *  same escape valve `actionDescription` gives `request_handoff`, and for the
-   *  same reason: the shipped default (`DEFLECT_ASIDE_ACTION_DESCRIPTION`) is
-   *  written in the vocabulary of the retail-banking voice agent the control
-   *  was measured on, naming that domain's out-of-scope topics as the examples
-   *  of what must NOT be deflected. An agent in any other domain would be
-   *  reading a schema that contradicts its own prompt, so it supplies its own
-   *  wording here — keeping the same three things the engine relies on: sole
-   *  step, the caller's request in `aside`, and no spoken text after the
-   *  escalation result. Mechanics are the library's; wording is the host's. */
-  deflectAsideDescription?: string;
+   *  deflected in-scope ask hands off one turn later on persistence, a
+   *  wrongly handed-off aside is exactly the pre-control behaviour. The
+   *  prompt must teach the split — see the `deflect_aside` action
+   *  description.
+   *
+   *  `true` (or `{}`) enables the control with its domain-neutral default
+   *  description; the object form's `actionDescription` replaces the LLM-facing
+   *  description attached to the schema variant — the same override
+   *  `actionDescription` above provides for `request_handoff` — so a host can
+   *  state its own classification policy (which topics other agents serve)
+   *  in the model's own terms. */
+  deflectAside?: boolean | { actionDescription?: string };
+}
+
+/** True when `spec` opts into the `deflect_aside` control (either form).
+ *  Shared by compile/plan.ts and compile/validate.ts so activation and
+ *  channel validation cannot diverge. Requires the handoff by construction —
+ *  the repeat path escalates into it. */
+export function deflectAsideEnabled(
+  spec: { deflectAside?: boolean | { actionDescription?: string } } | null | undefined,
+): boolean {
+  return spec != null && !!spec.deflectAside;
+}
+
+/** The host override for the `deflect_aside` LLM-facing description, when the
+ *  object form carries one. */
+export function deflectAsideActionDescription(
+  spec: { deflectAside?: boolean | { actionDescription?: string } } | null | undefined,
+): string | undefined {
+  const d = spec?.deflectAside;
+  return typeof d === "object" && d != null ? d.actionDescription : undefined;
 }
 
 /** Edge predicate for the host graph's conditional edge after its tool node:

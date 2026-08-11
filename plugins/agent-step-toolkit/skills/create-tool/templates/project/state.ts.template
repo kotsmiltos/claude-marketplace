@@ -60,8 +60,8 @@ const PendingHandoffSchema = z.object({
 
 export const AgentStateSchema = MessagesZodState.extend({
   // Library-managed slots (awaitingInput + currentFlow + boundedChoice +
-  // pagedRead + deflectedAside + handoff + errorCount + guardTurn), carrying the last-writer-wins
-  // channel semantics the runner
+  // pagedRead + deflectedAside + handoff + errorCount + guardTurn), carrying
+  // the last-writer-wins channel semantics the runner
   // expects. Never re-declare these by hand — spread the library fragment.
   ...agentStepZodShape,
 

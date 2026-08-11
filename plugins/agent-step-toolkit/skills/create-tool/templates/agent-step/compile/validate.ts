@@ -8,7 +8,11 @@
 // flow state) are left to the run pipeline's defensive throws.
 
 import type { ActionDef } from "../types.js";
-import { handoffParamsSchema } from "../handoff/contract.js";
+import {
+  deflectAsideEnabled,
+  handoffParamsSchema,
+  type HandoffSpec,
+} from "../handoff/contract.js";
 import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
 import type { ControlActivation } from "../controls/contract.js";
 import { reservedControlNames } from "../controls/registry.js";
@@ -64,6 +68,12 @@ function requiredManagedChannels(opts: ValidatableOptions): string[] {
   if (opts.handoff != null || opts.onErrorThreshold != null) {
     required.add("errorCount");
   }
+  // The deflect_aside latch: without this channel the runner's write is
+  // silently discarded, so the free deflection never spends and the
+  // escalation NEVER fires.
+  if (deflectAsideEnabled(opts.handoff as HandoffSpec<unknown> | undefined)) {
+    required.add("deflectedAside");
+  }
   return [...required];
 }
 
@@ -93,9 +103,9 @@ export function validateConfig(opts: ValidatableOptions): void {
     handoffEnabled: opts.handoff != null,
     boundedChoices,
     boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
-    deflectAsideEnabled:
-      opts.handoff != null &&
-      (opts.handoff as { deflectAside?: boolean }).deflectAside === true,
+    deflectAsideEnabled: deflectAsideEnabled(
+      opts.handoff as HandoffSpec<unknown> | undefined,
+    ),
   };
 
   const actionNames = Object.keys(config.actions);

@@ -25,7 +25,11 @@ import type { LibraryManagedSlots } from "../state.js";
 import type { SystemMessages } from "../messages.js";
 import { resolveSystemMessages } from "../messages.js";
 import { resolvePageable, type ResolvedPageable } from "../paginate.js";
-import type { HandoffSpec } from "../handoff/contract.js";
+import {
+  deflectAsideActionDescription,
+  deflectAsideEnabled,
+  type HandoffSpec,
+} from "../handoff/contract.js";
 import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
 import { normalizeConfirmation } from "../interaction/confirmation.js";
 import type { ControlAction, ControlActivation } from "../controls/contract.js";
@@ -230,8 +234,8 @@ export function compilePlan<
     boundedChoices,
     boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
     // Requires the handoff by construction — the repeat path escalates into it.
-    deflectAsideEnabled: opts.handoff != null && opts.handoff.deflectAside === true,
-    deflectAsideDescription: opts.handoff?.deflectAsideDescription,
+    deflectAsideEnabled: deflectAsideEnabled(opts.handoff),
+    deflectAsideActionDescription: deflectAsideActionDescription(opts.handoff),
   };
   const controls = activeControls(activation);
   const controlNames = new Set(controls.map((c) => c.name));

@@ -43,9 +43,10 @@ export interface ControlActivation {
    *  one free in-place deflection of a social aside per task before an
    *  off_topic handback fires. */
   deflectAsideEnabled: boolean;
-  /** Host override for the `deflect_aside` schema-variant description (the
-   *  shipped default is domain-flavoured — see HandoffSpec). */
-  deflectAsideDescription?: string;
+  /** Host override for the `deflect_aside` schema-variant description
+   *  (HandoffSpec.deflectAside object form) — the deflect twin of
+   *  `handoffActionDescription` above. */
+  deflectAsideActionDescription?: string;
 }
 
 /** Runtime context a control's `execute` receives. Narrow on purpose: a
