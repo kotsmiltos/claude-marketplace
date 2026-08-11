@@ -11,6 +11,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.6.0] — 2026-08-11
+
+Ships **observability library 1.5.0** (from 1.4.1) — opt-in backend HTTP call tracing, the
+one run kind the tracer could not see (outgoing backend calls were traced to stdout only,
+which rotates away in QA/PROD). Absorbed from a downstream agent that built and verified
+the module at the project layer (set-pin-agents-ts plan-012).
+
+### Added
+- Library 1.5.0: `backend-trace.ts` — `traceBackendCall` executes a backend HTTP call as a
+  traced `http:<endpoint>` child run (tag `backend-http`; endpoint/base-URL/envelope/attempt
+  metadata), nested under the issuing node/tool run via AsyncLocalStorage callback
+  inheritance; the `{result, logged}` split returns the real response to the caller while
+  recording only the caller-masked view; `withAttemptContext`/`currentAttempt` make silent
+  retries visible as one run per attempt. 5 new tests (suite 109 → 114). No new env keys —
+  rides `KAFKA_ENABLED`. Library redaction stays credential-only: inputs/logged views MUST
+  be pre-masked by the project's domain redaction (README "Backend HTTP call tracing").
+- Install workflow Step 5: optional item — offer to wrap a project's backend chokepoint
+  with `traceBackendCall`, gated on a domain-redaction audit first; never instruments
+  individual call sites.
+- `migrations/1.4.1-to-1.5.0.md`: no mandatory transforms (additive); conditional
+  import-swap for projects carrying a pre-1.5.0 hand-rolled module.
+
+### Changed
+- Capability descriptions (plugin.json, marketplace entry, root README) now name the
+  opt-in backend HTTP call runs; SKILL.md quick reference gained the backend-tracing line;
+  vendored-file count is now 26.
+- `migrations/README.md` index gained its missing 1.4.0→1.4.1 row alongside the new
+  1.4.1→1.5.0 row.
+
+Downstream projects upgrade via `/add-kafka-observability` (upgrade mode).
+
 ## [0.5.1] — 2026-08-09
 
 Ships **observability library 1.4.1** (from 1.4.0) — documentation-only. No skill capability,

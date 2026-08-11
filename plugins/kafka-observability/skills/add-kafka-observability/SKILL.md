@@ -1,6 +1,6 @@
 ---
 name: add-kafka-observability
-description: Install or upgrade LangSmith-parity Kafka observability in a LangGraph.js / LangChain.js agent repo. Vendors the src/observability/ library (a BaseTracer subclass publishing EVERY traced run — graph, nodes, LLM calls with full prompts/outputs/usage, tool runs — as start/end events to a Kafka topic), adds the @confluentinc/kafka-javascript dependency, wires ONE startup() call at the graph entrypoint (dual global attachment: configure hook + configure-slot wrap, robust to platform harnesses that sever async-context ancestry), updates .env.example and deployment settings (Key Vault refs for secrets), adds a test script, and verifies with typecheck + unit tests. Detects pre-existing Kafka functionality first — a foreign module on src/observability/ or producers elsewhere — and asks the user to classify it (agent-flow observability vs unrelated, e.g. liveness/business events) and decide keep-both vs replace before touching anything; never overwrites a foreign module. Use when a repo must stream its LangSmith telemetry to Kafka, replace/unplug LangSmith, add Kafka observability, or upgrade an already-vendored src/observability/ library.
+description: Install or upgrade LangSmith-parity Kafka observability in a LangGraph.js / LangChain.js agent repo. Vendors the src/observability/ library (a BaseTracer subclass publishing EVERY traced run — graph, nodes, LLM calls with full prompts/outputs/usage, tool runs, plus opt-in backend HTTP call runs via the traceBackendCall helper — as start/end events to a Kafka topic), adds the @confluentinc/kafka-javascript dependency, wires ONE startup() call at the graph entrypoint (dual global attachment: configure hook + configure-slot wrap, robust to platform harnesses that sever async-context ancestry), updates .env.example and deployment settings (Key Vault refs for secrets), adds a test script, and verifies with typecheck + unit tests. Detects pre-existing Kafka functionality first — a foreign module on src/observability/ or producers elsewhere — and asks the user to classify it (agent-flow observability vs unrelated, e.g. liveness/business events) and decide keep-both vs replace before touching anything; never overwrites a foreign module. Use when a repo must stream its LangSmith telemetry to Kafka, replace/unplug LangSmith, add Kafka observability, or upgrade an already-vendored src/observability/ library.
 ---
 
 <objective>
@@ -129,6 +129,11 @@ vendor → wire → configure → verify → report.
 - Dependency: `@confluentinc/kafka-javascript` (native librdkafka — Docker images need a
   matching prebuild or the source-build toolchain; node-pre-gyp prebuilds cover glibc+musl).
 - Test script: `"test:observability": "tsc && node --test dist/observability/*.test.js"`.
+- Backend HTTP tracing (opt-in, 1.5.0+): the project's backend client wraps each call in
+  `traceBackendCall` (run `http:<endpoint>`, tag `backend-http`; retry wrappers use
+  `withAttemptContext`). Inputs and the `logged` view MUST be pre-masked by the
+  project's domain redaction — library redaction is credential-only. Rides
+  `KAFKA_ENABLED`; no new env vars. See the library README "Backend HTTP call tracing".
 - Event contract: envelope `{ id, thread_id, application_name, timestamp, data }`, Kafka
   key = event `id` (the shared ES sink upserts by key — never key by thread_id).
 - Env vars: required when enabled — `KAFKA_ENABLED`, `APPLICATION_NAME`,

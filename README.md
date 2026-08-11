@@ -108,7 +108,8 @@ Ships one skill:
   ancestry (one `startup()` call at the graph entrypoint, zero per-node
   instrumentation) — and publishes **every** traced run — graph
   invocation, each LangGraph node, each LLM call (full rendered prompts, outputs, token
-  usage), each tool run, errors — as start/end events to a Kafka topic:
+  usage), each tool run, errors — plus opt-in backend HTTP call runs (`traceBackendCall`
+  wraps the project's backend client chokepoint) — as start/end events to a Kafka topic:
   standard envelope (`id` as Kafka key, `thread_id` correlation), zod-validated,
   secret-redacted, 512 KB-truncated, over a bounded non-blocking fire-and-forget producer
   (librdkafka, `acks=all`, idempotent, bounded shutdown). Disabled by default

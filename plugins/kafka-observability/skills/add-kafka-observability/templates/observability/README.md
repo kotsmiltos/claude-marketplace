@@ -19,6 +19,10 @@ node, LLM call with full rendered messages + outputs + token usage, tool run) pr
 Apps that have verified which of their runs carry duplicated content can opt into
 emitting fewer events — see **Run filtering** (default: off, everything emits).
 
+One run kind is opt-in rather than automatic: outgoing **backend HTTP calls** become
+traced child runs when the project's backend client wraps them in `traceBackendCall` —
+see **Backend HTTP call tracing** below.
+
 Trace hierarchy (`trace_id`, `parent_run_id`, `dotted_order`) travels in every event, so
 the LangSmith-style run tree is reconstructable downstream. `thread_id` comes from run
 metadata (LangGraph injects `configurable.thread_id`); events outside a thread use
@@ -90,6 +94,52 @@ KafkaEventProducer (kafka-producer.ts)
   }
 }
 ```
+
+## Backend HTTP call tracing (opt-in)
+
+LangChain only creates runs for what it executes — the graph, its nodes, LLM calls, tool
+runs. The HTTP calls a tool's executor makes to its backends are invisible to the tracer
+unless the project makes them runs. `backend-trace.ts` does exactly that:
+
+```ts
+import { traceBackendCall } from "./observability/index.js";
+
+return traceBackendCall<T>(
+  { endpoint, baseUrl, envelope, input: { payload: maskedPayload } },
+  async () => {
+    const parsed = await doTheActualFetch();          // throws propagate + are recorded
+    return {
+      result: parsed as T,                            // REAL body — returned to the caller
+      logged: { status, latency_ms, response: mask(parsed) },  // MASKED — recorded on the run
+    };
+  },
+);
+```
+
+- The run is named `http:<endpoint>`, tagged `backend-http`, with
+  `backend_endpoint` / `backend_base_url` / `backend_envelope` /
+  `backend_attempt` / `backend_max_attempts` / `backend_retryable` metadata.
+- It nests under the node/tool run that issued it (callback inheritance via LangChain's
+  AsyncLocalStorage — no `RunnableConfig` threading through the client's signature), so
+  it arrives thread-correlated and positioned in the trace tree. If the async ancestry
+  is severed (see **Attachment**), it degrades to an unparented `"no-thread"` root run —
+  still emitted.
+- Wrap the ONE chokepoint all backend calls funnel through (a `postBackend`-style
+  helper), not individual call sites. No new configuration — it rides `KAFKA_ENABLED`.
+- Retries: run each attempt inside `withAttemptContext({ attempt, attempts }, fn)` in
+  the project's retry wrapper, and a silent retry becomes visible as two `http:` runs
+  under the same parent — the only way to see one once stdout is gone.
+
+**Security contract (non-negotiable).** This library's redaction masks credentials only
+— it has no notion of the domain's PII (card numbers, tax ids, phone numbers, names
+under generic keys). `input` and the `logged` half MUST already be masked by the
+project's own domain redaction before they reach `traceBackendCall`; the `{result,
+logged}` split exists so the caller still gets the real body while only the masked view
+is recorded. Never hand it a raw payload or raw response. Remember these events land in
+a durable, indexed sink — a value that was tolerable in a log file that rotates away by
+evening is not tolerable there. Audit the project's redaction key list against the real
+backend response shapes before wiring this up (field spellings like `customerName` /
+`shortName` / `contactName` are commonly missed).
 
 ## Run filtering (opt-in — default emits every run)
 
@@ -207,7 +257,9 @@ Diagnostics (all one-line, greppable):
   sensitive-keyed string or any OTHER sensitive-keyed object/array is masked whole
   (`credentials: {…}` never leaks unmatched inner keys). NOTE: redaction masks secrets,
   not PII — full prompts/transcripts (incl. `telephone_number`) flow to the topic by
-  design, same data-boundary decision as self-hosted LangSmith.
+  design, same data-boundary decision as self-hosted LangSmith. Backend HTTP payloads
+  are the exception: they MUST be domain-masked by the project before they reach
+  `traceBackendCall` (see **Backend HTTP call tracing**).
 
 ## LangSmith migration
 
