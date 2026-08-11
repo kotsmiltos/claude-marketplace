@@ -56,7 +56,7 @@ Present:
 # Kafka observability — <install|upgrade to> <version>: <repo name>
 
 ## Vendored (replaced wholesale, safe)
-- src/observability/  (24 files: library + tests + README + VERSION)
+- src/observability/  (26 files: library + tests + README + VERSION)
 
 ## Project edits (need your OK)
 - package.json         + "@confluentinc/kafka-javascript", + "test:observability" script
@@ -137,6 +137,17 @@ them to the user before overwriting).
    that don't otherwise handle it.
 4. `package.json`: add `"test:observability": "tsc && node --test dist/observability/*.test.js"`;
    fold into `test:all` when one exists.
+5. **Optional — backend HTTP call tracing (1.5.0+).** If the project routes its backend
+   HTTP calls through a single chokepoint (a `postBackend`-style helper), OFFER to wrap
+   it in `traceBackendCall` so every outgoing call becomes a traced `http:<endpoint>`
+   run (and its retry wrapper, if any, in `withAttemptContext`). This is a project-code
+   edit behind the same approval as the rest of Step 5, and it carries a hard
+   precondition: the values passed as `input`/`logged` must already be masked by the
+   project's OWN domain redaction — audit that redaction against the real backend
+   response shapes first (the library redactor is credential-only and will happily ship
+   a full card number or customer name; see the library README "Backend HTTP call
+   tracing"). Skip silently when there is no chokepoint — never instrument individual
+   call sites.
 
 ## Step 6: Configure
 

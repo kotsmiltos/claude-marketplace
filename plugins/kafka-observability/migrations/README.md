@@ -23,3 +23,5 @@ the current library directly.
 | `1.1.0-to-1.2.0.md` | Attachment robustness (INC-2026-0045): configure-slot wrap alongside the ALS-scoped configure hook, `KAFKA_ATTACH_MODE`, attachment/break diagnostics. One transform: `.env.example` gains the commented `KAFKA_ATTACH_MODE` line. |
 | `1.2.0-to-1.3.0.md` | Opt-in run filtering (`KAFKA_RUN_FILTER_MODE`/`KAFKA_RUN_FILTER_PATTERNS`, default off = every run emitted; root run always survives). One transform: `.env.example` gains the commented filter lines. |
 | `1.3.0-to-1.4.0.md` | Redaction precision: LLM usage counters/containers survive (scalar type guard + anchored usage-container exemption); credential masking unchanged. Pure file refresh — no transforms. |
+| `1.4.0-to-1.4.1.md` | Documentation-only re-sync (comment/fixture/README wording); no behaviour, exports, or env change. Pure file refresh — no transforms. |
+| `1.4.1-to-1.5.0.md` | Opt-in backend HTTP call tracing (`traceBackendCall` / `withAttemptContext` in new `backend-trace.ts`; `http:<endpoint>` child runs, caller-side pre-masking contract). No mandatory transforms; conditional swap for projects with a pre-1.5.0 hand-rolled module. |

@@ -24,6 +24,11 @@
 // enabled, all required settings are validated together and fail fast — no
 // fallbacks, per the team's configuration rule.
 //
+// Beyond the runs LangChain creates on its own (graph, nodes, LLM calls, tool
+// runs), backend-trace.ts (re-exported here) lets the project's backend HTTP
+// client wrap each outgoing call as a traced child run — opt-in, and subject
+// to that module's pre-masking security contract.
+//
 // Wiring (done by /add-kafka-observability): the module that builds/exports
 // the graph calls startup() once at module load:
 //
@@ -51,6 +56,8 @@ export { RunEventEmitter, runToEventData } from "./event-emitter.js";
 export type { ObservabilityEvent, RunEventData } from "./schemas.js";
 export { getAttachDiagnostics } from "./configure-slot.js";
 export type { AttachDiagnostics } from "./configure-slot.js";
+export { traceBackendCall, withAttemptContext, currentAttempt } from "./backend-trace.js";
+export type { TracedCallInfo, TracedCallOutcome } from "./backend-trace.js";
 
 let producer: KafkaEventProducer | null = null;
 let started = false;

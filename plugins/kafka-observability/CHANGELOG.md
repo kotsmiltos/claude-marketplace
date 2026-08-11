@@ -6,6 +6,43 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.5.0 (2026-08-11)
+
+Coverage release: opt-in **backend HTTP call tracing**. Outgoing backend calls were the
+one run kind the tracer could not see — traced to stdout only, which rotates away in
+QA/PROD, so an after-the-fact investigation had the LLM and node runs of a conversation
+but no record of what was sent to the backends or what came back. Absorbed from a
+downstream agent that built and verified the module at the project layer
+(set-pin-agents-ts plan-012).
+
+### Added
+
+- `backend-trace.ts` — `traceBackendCall` executes a backend HTTP call as a traced child
+  run: name `http:<endpoint>`, tag `backend-http`, metadata `backend_endpoint` /
+  `backend_base_url` / `backend_envelope` / `backend_attempt` / `backend_max_attempts` /
+  `backend_retryable`. Nests under the issuing node/tool run via LangChain's
+  AsyncLocalStorage callback inheritance (installs `@langchain/core/context` explicitly —
+  load-bearing side-effect import), so no `RunnableConfig` threading and no executor
+  signature change. The `{result, logged}` split returns the REAL response to the caller
+  while recording only the caller-masked view. `withAttemptContext` / `currentAttempt`
+  make a silent retry visible as one run per attempt.
+- `backend-trace.test.ts` — 5 tests through the real emitter/tracer path (pair emission +
+  nesting + metadata, byte-level leak check on the masked/real split, error recording,
+  per-attempt runs, attempt-context scoping). Suite: 109 → 114.
+- New `index.ts` re-exports: `traceBackendCall`, `withAttemptContext`, `currentAttempt`,
+  `TracedCallInfo`, `TracedCallOutcome`.
+- README: "Backend HTTP call tracing" section (chokepoint pattern, retry visibility, and
+  the pre-masking security contract — library redaction stays credential-only; domain
+  masking is the caller's job, and these events land in a durable indexed sink).
+
+### Changed
+
+- Nothing breaking; no env keys, no event-schema change. Nothing is traced until project
+  code calls the helper — without adoption, emitted bytes are identical to 1.4.1.
+
+Migration: [migrations/1.4.1-to-1.5.0.md](migrations/1.4.1-to-1.5.0.md) (no mandatory
+transforms; conditional swap for projects with a pre-1.5.0 hand-rolled module).
+
 ## 1.4.1 (2026-08-09)
 
 Documentation-only. No behaviour, no exports, no env keys, no event-shape change — a project
