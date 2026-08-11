@@ -11,6 +11,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.24.0] — 2026-08-11
+
+Ships **agent-step library 2.4.0** (from 2.3.0): `deflect_aside`, the trigger-happy-handoff damper.
+Downstream projects catch up with `/pull-library`; the change is additive and opt-in — without
+`HandoffSpec.deflectAside` the model-facing surface is byte-identical to 2.3.0, so the upgrade is
+safe to take before adopting it.
+
+### Added
+- **Library `deflect_aside` control** — one free in-place deflection per task of an aside NO
+  configured agent serves: the task-scoped `deflectedAside` latch is set, every pending gate/flow
+  survives untouched, and the model is instructed to decline in ONE short sentence and repeat its
+  pending question in the SAME turn; a repeat in the same task escalates ATOMICALLY into the
+  `off_topic` handback with the aside as routing context. Opt-in via `HandoffSpec.deflectAside`
+  (`true`, or `{ actionDescription }` to state the fleet's own classification policy in the model's
+  terms); construction requires the `deflectedAside` channel only when the control is enabled. New
+  exports `DEFLECT_ASIDE_ACTION` / `DEFLECT_ASIDE_ACTION_DESCRIPTION`; new overridable
+  `SystemMessages.aside_deflected`. Library suite 193 → 207.
+- **Migration `2.3.0-to-2.4.0.md`** — additive; one verify-transform (the slot arrives with the
+  spread state fragments; the internal-slot mask now carries eight keys) plus opt-in adoption
+  follow-ups. `/pull-library` applies it.
+
+### Changed
+- Toolkit docs/templates propagate the 2.4.0 contract: the `HandoffSpec` listing + a control-semantics
+  section in `agent-step-api.md`, slot enumerations across references and project templates, the
+  reserved-names list, and the library file inventories.
+
+### Fixed
+- `create-tool.md` verification step: stale library test count (193 → 207) and the suite enumeration
+  now includes `deflect-aside`.
+
 ## [0.23.0] — 2026-08-09
 
 Ships **agent-step library 2.3.0** (from 2.2.0): the mechanisms hosts were hand-rolling move into the
