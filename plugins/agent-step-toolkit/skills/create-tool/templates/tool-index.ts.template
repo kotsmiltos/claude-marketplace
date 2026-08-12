@@ -65,8 +65,15 @@ export const {{TOOL_NAME}}Tool = buildAgentStepTool({
   //   handoff: <HandoffSpec>            — built-in `request_handoff` control + graph node
   //                                       (its `deflectAside` opt adds the `deflect_aside`
   //                                       control: one free in-place aside deflection per
-  //                                       task before the off_topic handback fires)
+  //                                       task before the off_topic handback fires; its
+  //                                       `modelRequestSchema` opt narrows the model-facing
+  //                                       request_handoff params to exact reason/context pairs)
   //   boundedChoices: <registry>        — one-shot conversational-choice controls
+  //                                       (per-choice `renderRequest`/`renderResolution` render
+  //                                       the exact offer/resume the model speaks verbatim)
+  //   abortPolicy: <AbortPolicy>        — narrow `abort_pending_input` to an engine-enforced
+  //                                       in-domain transition (leads the batch, real target,
+  //                                       declared followers); omit for legacy permissive abort
   //   getCallerTurnId: (state) => id    — stable caller-turn identity; REQUIRED if the
   //                                       host compacts/replaces messages and uses
   //                                       confirm gates or bounded choices

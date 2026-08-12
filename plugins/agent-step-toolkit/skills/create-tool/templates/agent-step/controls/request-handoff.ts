@@ -25,7 +25,10 @@ export const requestHandoffControl: ControlAction = {
   activeWhen: (ctx) => ctx.handoffEnabled,
   schemaVariant: (ctx) =>
     z
-      .object({ action: z.literal(HANDOFF_ACTION), params: handoffParamsSchema })
+      .object({
+        action: z.literal(HANDOFF_ACTION),
+        params: ctx.handoffModelRequestSchema,
+      })
       .describe(ctx.handoffActionDescription ?? HANDOFF_ACTION_DESCRIPTION),
   descriptionLine: () =>
     `- \`${HANDOFF_ACTION}\`: hand the conversation off instead of answering (sole step, no prereqs).`,
@@ -40,7 +43,12 @@ export const requestHandoffControl: ControlAction = {
     const { state, msgs } = ctx;
     let request: HandoffRequest;
     try {
-      request = handoffParamsSchema.parse(params);
+      // The host's narrower model schema is the authority for this actuator.
+      // Canonicalize its output through the base slot/effect schema before it
+      // reaches state, preserving the trusted internal handoff contract.
+      request = handoffParamsSchema.parse(
+        ctx.activation.handoffModelRequestSchema.parse(params),
+      );
     } catch (err) {
       const message =
         err instanceof z.ZodError

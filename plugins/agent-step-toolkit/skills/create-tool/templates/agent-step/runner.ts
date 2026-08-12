@@ -48,6 +48,7 @@ export type { BuildAgentStepToolOptions } from "./compile/plan.js";
 export type { RunResult } from "./run/finalize.js";
 export type { StateSchemaLike } from "./compile/state-schema.js";
 export {
+  REPEAT_PENDING_CONFIRMATION_ACTION,
   REQUEST_BOUNDED_CHOICE_ACTION,
   RESOLVE_BOUNDED_CHOICE_ACTION,
 } from "./controls/registry.js";

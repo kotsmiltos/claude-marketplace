@@ -2,8 +2,8 @@
 //
 // The ordered control registry. ORDER IS MODEL-FACING SURFACE: it fixes the
 // sequence of injected schema variants and description lines (abort → handoff
-// → bounded-choice request → bounded-choice resolve). Do not reorder without
-// re-verifying the model-facing golden.
+// → repeat confirmation → bounded-choice request → bounded-choice resolve).
+// Do not reorder without re-verifying the model-facing golden.
 //
 // Exclusivity groups are likewise evaluated in their declared order at
 // admission: a batch mixing a handoff with a choice control is attributed to
@@ -14,6 +14,10 @@ import { formatMessage } from "../messages.js";
 import type { ControlAction, ControlActivation, ExclusivityGroup } from "./contract.js";
 import { abortControl, ABORT_ACTION } from "./abort.js";
 import { requestHandoffControl } from "./request-handoff.js";
+import {
+  repeatPendingConfirmationControl,
+  REPEAT_PENDING_CONFIRMATION_ACTION,
+} from "./repeat-confirmation.js";
 import {
   requestBoundedChoiceControl,
   resolveBoundedChoiceControl,
@@ -26,6 +30,7 @@ import { HANDOFF_ACTION } from "../handoff/contract.js";
 export const CONTROL_REGISTRY: readonly ControlAction[] = [
   abortControl,
   requestHandoffControl,
+  repeatPendingConfirmationControl,
   requestBoundedChoiceControl,
   resolveBoundedChoiceControl,
   // Appended LAST deliberately: injection order is model-facing surface, and
@@ -43,6 +48,15 @@ export const EXCLUSIVITY_GROUPS: readonly ExclusivityGroup[] = [
     // result nobody will see).
     summary: (foundAction: string, msgs: SystemMessages) =>
       formatMessage(msgs.handoff_must_be_sole_step, { action: foundAction }),
+  },
+  {
+    name: "repeat-confirmation",
+    memberNames: [REPEAT_PENDING_CONFIRMATION_ACTION],
+    errorCode: "repeat_confirmation_must_be_sole_step",
+    // A recap is a read-only turn boundary. Mixing domain work into the same
+    // batch could turn the caller's clarification into confirmation.
+    summary: (foundAction: string) =>
+      `"${foundAction}" must be the only step in the batch.`,
   },
   {
     name: "bounded-choice",
@@ -78,4 +92,9 @@ export function reservedControlNames(ctx: ControlActivation): string[] {
   return names.includes(ABORT_ACTION) ? names : [ABORT_ACTION, ...names];
 }
 
-export { ABORT_ACTION, REQUEST_BOUNDED_CHOICE_ACTION, RESOLVE_BOUNDED_CHOICE_ACTION };
+export {
+  ABORT_ACTION,
+  REPEAT_PENDING_CONFIRMATION_ACTION,
+  REQUEST_BOUNDED_CHOICE_ACTION,
+  RESOLVE_BOUNDED_CHOICE_ACTION,
+};

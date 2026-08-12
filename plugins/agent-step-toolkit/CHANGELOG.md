@@ -12,6 +12,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [2.5.0] — 2026-08-11
+
+Minor: **the confirmation gate hardens, and configuration keeps absorbing prompt prose.** A survey of
+live behaviour across downstream voice agents surfaced the next round of mechanisms being carried in
+prompts and host code: recaps re-composed by the model when a caller asks to hear them again,
+schema-valid proposals over state that cannot satisfy them, a permissive abort that could discard a
+pending gate and start new work in one utterance, terminal-handoff routing pairs living as prompt
+prose, silent engine transitions the model could only infer, and fixed choice offers paraphrased at
+the moment they mattered. All six move into the engine. Everything is opt-in; nothing is removed or
+reshaped, and every default preserves 2.4.0 behaviour byte-for-byte. No new state slot. Suite 207 → 236.
+Migration: [migrations/2.4.0-to-2.5.0.md](migrations/2.4.0-to-2.5.0.md).
+
+### Added
+- **`repeat_pending_confirmation` control + `ConfirmationOpts.repeatReadBack`** — persist the
+  non-empty `readBack` rendering on the pending gate (`awaitingInput.read_back`) and let the
+  sole-step control return those EXACT stored bytes on a later caller turn — never re-rendering from
+  mutable state, never confirming/executing, never spending an attempt. Repetition advances the
+  gate's presentation-turn provenance, so a second ReAct loop can neither repeat again nor execute
+  the mutation on the same caller turn; a misdirected call fails closed. Reserved (and injected)
+  only when at least one confirm-gated action opts in; the eligible actions are rendered into the
+  control's own model-facing description.
+- **`ConfirmationOpts.refuseProposal?(params, state)`** — propose-time, STATE-aware refusal: runs
+  after params parse and before anything commits; refusing stores no gate, spends no attempt, and
+  does not consume a pending bounded choice (the same non-burning semantics as `invalid_params`).
+  For proposals whose validity depends on state, not shape — e.g. an empty probe proposing to
+  consume a carried identity when nothing was carried.
+- **`BuildAgentStepToolOptions.abortPolicy?: AbortPolicy`** — narrow the built-in abort to an
+  engine-enforced in-domain transition: `requireActive`, `allowStandalone`, `allowedFollowers`,
+  `allowedPendingTargets`. Admission enforces abort-leads-the-batch and at-most-one declared domain
+  follower; every knob is validated at construction and the configured contract is rendered into the
+  control's model-facing description. Omit for legacy permissive abort, byte-for-byte.
+- **`HandoffSpec.modelRequestSchema?: z.ZodType<HandoffRequest>`** — a narrower MODEL-FACING
+  `request_handoff` schema, used to generate the wire schema AND parse the control at runtime, so
+  exact reason/context route pairs become configuration instead of prompt prose. The library-managed
+  slot and trusted executor/config effects keep the base schema.
+- **`BoundedChoiceDef.renderRequest` / `renderResolution`** — engine-rendered caller-audible choice
+  OFFER and RESUME, riding the control results as `read_back` for the model to speak verbatim — the
+  read-back doctrine extended to the bounded-choice overlay.
+- New exports: `REPEAT_PENDING_CONFIRMATION_ACTION`, `AbortPolicy` (type). New test suite
+  `repeat-confirmation.test.ts`.
+
+### Changed
+- **Bounded-choice consumption is transcript-visible** — the consuming step's result is stamped
+  `choice_consumed`, so pending/resolved status derives from tool results alone.
+- **Leading-resolve batch admitted** — `resolve_bounded_choice` may lead a batch whose followers are
+  the pending choice's own `directInputActions` (the shape a model naturally emits when one reply
+  both selects "continue" and supplies the suspended detail). Every permitted follower is already
+  trusted to consume caller input while the choice is pending; the same-turn locks still apply, and
+  nothing is relaxed toward a mutation.
+- Control injection order is now: `abort_pending_input` → `request_handoff` →
+  `repeat_pending_confirmation` → `request_bounded_choice` → `resolve_bounded_choice` →
+  `deflect_aside`. Since every 2.4.0+ control is opt-in, a host that enables none of them keeps a
+  byte-identical model-facing surface.
+
+### Docs
+- New reference `agent-design-principles.md` — the host-architecture doctrine (mechanism-in-engine,
+  language-only prompt, transcript-only state, discovery-by-calling, engine-rendered consequence
+  text, one prompt authority per behaviour, configuration-owned payloads, engine-bounded
+  consequences, substance-not-phrasing fixtures, layered live measurement), with the five-question
+  port-mode audit.
+
 ## [2.4.0] — 2026-08-10
 
 Minor: **the trigger-happy-handoff damper.** Field observation across voice agents: a social aside

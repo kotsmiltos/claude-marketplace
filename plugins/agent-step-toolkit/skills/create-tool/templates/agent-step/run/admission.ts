@@ -16,7 +16,8 @@
 //   5. flow mutex               — opening a DIFFERENT flow while one is active
 //   6. control exclusivity      — sole-step control families (handoff,
 //                                 bounded-choice), in registry-group order
-//   7. soleStep / soleOnExecute — per-action batch-isolation opts
+//   7. abort policy             — optional host source/follower allow-lists
+//   8. soleStep / soleOnExecute — per-action batch-isolation opts
 //
 // Lockdown (cross-turn, "the customer owes an answer") and exclusivity
 // (within-batch, "this transition cannot share a batch") are distinct rules
@@ -134,21 +135,28 @@ export function admitBatch<T extends LibraryManagedSlots>(
     // escapes (abort, handoff) and the request control (whose repeat path is
     // the configured atomic handoff) may lead the batch. Enforced only when
     // both turn identities exist; a same-turn resolve would otherwise let a
-    // second ReAct loop answer the choice on the caller's behalf.
+    // second ReAct loop answer the choice on the caller's behalf. Abort may
+    // escape this lock only as a sole step: an abort+domain batch would let the
+    // same pre-offer caller utterance both discard the choice and supply its
+    // replacement input.
     const offeredThisTurn =
       choiceAtStart.requested_on_caller_turn_id !== undefined &&
       currentCallerTurnId !== undefined &&
       choiceAtStart.requested_on_caller_turn_id === currentCallerTurnId;
     const choice = activation.boundedChoices[choiceAtStart.name];
     const directInputActions = new Set(choice?.directInputActions ?? []);
+    const abortAllowed =
+      first?.action === ABORT_ACTION &&
+      (!offeredThisTurn || userSteps.length === 1);
     const allowed =
       !!first &&
-      (first.action === ABORT_ACTION ||
+      (abortAllowed ||
         (offeredThisTurn
           ? plan.controls.some(
               (c) =>
                 c.allowedDuringChoicePending &&
                 c.name === first.action &&
+                c.name !== ABORT_ACTION &&
                 c.name !== RESOLVE_BOUNDED_CHOICE_ACTION,
             )
           : plan.controls.some(
@@ -280,20 +288,145 @@ export function admitBatch<T extends LibraryManagedSlots>(
       const activeMembers = group.memberNames.filter((n) => plan.controlNames.has(n));
       if (activeMembers.length === 0) continue;
       const found = userSteps.find((s) => activeMembers.includes(s.action));
-      if (found) {
+      if (!found) continue;
+      // Narrow relaxation (2026-08-11): a LEADING `resolve_bounded_choice` may
+      // be followed by the pending choice's own direct-input actions — the
+      // batch a model naturally emits when one caller reply both selects
+      // "continue" and supplies the suspended detail. Every follower is an
+      // action the config already trusts to consume caller input while the
+      // choice is pending (the confirm-required mutation is never among
+      // them), so the shape this group exists to prevent — "continue" turning
+      // into consent for a suspended mutation — stays impossible. The
+      // offered-this-turn lock (section 3) still refuses the same-turn form.
+      if (found.action === RESOLVE_BOUNDED_CHOICE_ACTION) {
+        const pendingChoice = getBoundedChoice(view);
+        if (
+          userSteps[0].action === RESOLVE_BOUNDED_CHOICE_ACTION &&
+          pendingChoice?.status === "pending"
+        ) {
+          const directInputs = new Set(
+            activation.boundedChoices[pendingChoice.name]?.directInputActions ?? [],
+          );
+          if (userSteps.slice(1).every((s) => directInputs.has(s.action))) continue;
+        }
+      }
+      return {
+        entry: {
+          action: found.action,
+          ok: false,
+          summary: group.summary(found.action, msgs),
+          error: group.errorCode,
+        },
+      };
+    }
+  }
+
+  // ── 7. Optional abort policy. Omission preserves the legacy permissive
+  //    behavior. Once configured, abort is an explicit in-domain transition:
+  //    it leads the batch, clears something real when required, and has at
+  //    most one declared domain follower. Control followers are never legal;
+  //    in particular request_handoff was already refused by the sole-step
+  //    exclusivity rule above.
+  const abortPolicy = activation.abortPolicy;
+  const abortIndex = userSteps.findIndex((step) => step.action === ABORT_ACTION);
+  if (abortPolicy && abortIndex !== -1) {
+    if (abortIndex !== 0) {
+      return {
+        entry: {
+          action: ABORT_ACTION,
+          ok: false,
+          summary: `"${ABORT_ACTION}" must be the first step in the batch.`,
+          error: "abort_must_be_first",
+        },
+      };
+    }
+
+    const hasActiveTarget =
+      awaiting != null ||
+      currentFlow != null ||
+      (activation.boundedChoicesEnabled && choiceAtStart?.status === "pending");
+    if (abortPolicy.requireActive && !hasActiveTarget) {
+      return {
+        entry: {
+          action: ABORT_ACTION,
+          ok: false,
+          summary: `"${ABORT_ACTION}" requires pending input, an active flow, or a pending bounded choice.`,
+          error: "abort_requires_active_input",
+        },
+      };
+    }
+
+    if (
+      abortPolicy.allowedPendingTargets !== null &&
+      (awaiting == null ||
+        !abortPolicy.allowedPendingTargets.includes(awaiting.for_action))
+    ) {
+      const allowed = abortPolicy.allowedPendingTargets
+        .map((name) => `"${name}"`)
+        .join(", ");
+      const summary =
+        awaiting == null
+          ? `"${ABORT_ACTION}" requires pending input targeting one of: ${allowed}.`
+          : `"${ABORT_ACTION}" cannot clear pending input for "${awaiting.for_action}"; allowed targets: ${allowed}.`;
+      return {
+        entry: {
+          action: ABORT_ACTION,
+          ok: false,
+          summary,
+          error: "abort_pending_target_not_allowed",
+          ...(awaiting
+            ? {
+                awaiting: {
+                  kind: awaiting.kind,
+                  for_action: awaiting.for_action,
+                },
+              }
+            : {}),
+        },
+      };
+    }
+
+    const followers = userSteps.slice(1);
+    if (followers.length === 0 && !abortPolicy.allowStandalone) {
+      return {
+        entry: {
+          action: ABORT_ACTION,
+          ok: false,
+          summary: `"${ABORT_ACTION}" must be followed by exactly one allowed domain action.`,
+          error: "abort_follower_required",
+        },
+      };
+    }
+    if (followers.length > 1) {
+      return {
+        entry: {
+          action: ABORT_ACTION,
+          ok: false,
+          summary: `"${ABORT_ACTION}" may be followed by at most one domain action.`,
+          error: "abort_too_many_followers",
+        },
+      };
+    }
+    const follower = followers[0];
+    if (follower) {
+      const isDomainAction = plan.actions[follower.action] != null;
+      const isAllowed =
+        abortPolicy.allowedFollowers === null ||
+        abortPolicy.allowedFollowers.includes(follower.action);
+      if (!isDomainAction || !isAllowed) {
         return {
           entry: {
-            action: found.action,
+            action: follower.action,
             ok: false,
-            summary: group.summary(found.action, msgs),
-            error: group.errorCode,
+            summary: `"${follower.action}" is not an allowed follower of "${ABORT_ACTION}".`,
+            error: "abort_follower_not_allowed",
           },
         };
       }
     }
   }
 
-  // ── 7. soleStep / soleOnExecute. Distinct from lockdown — lockdown bars
+  // ── 8. soleStep / soleOnExecute. Distinct from lockdown — lockdown bars
   //    unrelated actions ACROSS turns while pending; these opts bar them
   //    WITHIN a single batch.
   //    - `soleStep`: strict — refuse any batch larger than 1 containing this

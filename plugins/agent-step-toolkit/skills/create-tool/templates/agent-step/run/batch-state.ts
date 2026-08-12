@@ -27,6 +27,10 @@ import type { PatchMerger } from "../compile/state-schema.js";
 export interface BatchState<T extends LibraryManagedSlots> {
   view: Partial<T>;
   committed: Partial<T>;
+  /** Fold a patch into the current view without committing it. Used when a
+   *  host renderer must see the exact post-transition state before the runner
+   *  can finish constructing that transition's single atomic patch. */
+  preview(patch: Partial<T>): Partial<T>;
   /** Fold a patch into BOTH accumulators through the host schema's reducers. */
   apply(patch: Partial<T>): void;
 }
@@ -38,6 +42,9 @@ export function createBatchState<T extends LibraryManagedSlots>(
   const st: BatchState<T> = {
     view: merge({}, (initialState ?? {}) as Partial<T>),
     committed: {},
+    preview(patch: Partial<T>) {
+      return merge(st.view, patch);
+    },
     apply(patch: Partial<T>) {
       st.view = merge(st.view, patch);
       st.committed = merge(st.committed, patch);
@@ -72,13 +79,16 @@ export function getHandoff<T>(view: Partial<T>): HandoffRequest | null {
 
 /** Set the confirmation gate: a proposed mutation awaiting the caller's YES.
  *  `proposedOnCallerTurnId` stamps the caller turn of the proposal so a
- *  matching re-call on the SAME turn is refused instead of executed. */
+ *  matching re-call on the SAME turn is refused instead of executed.
+ *  `readBack` carries the already-rendered exact caller-audible recap only for
+ *  actions which opted into repeatable read-back. */
 export function setConfirmationPatch<T extends LibraryManagedSlots>(
   forAction: string,
   params: Record<string, unknown>,
   attemptsLeft: number,
   maxAttempts: number,
   proposedOnCallerTurnId: string | undefined,
+  readBack?: string,
 ): Partial<T> {
   const awaitingInput: AwaitingInput = {
     kind: "confirmation",
@@ -89,6 +99,7 @@ export function setConfirmationPatch<T extends LibraryManagedSlots>(
     ...(proposedOnCallerTurnId !== undefined
       ? { proposed_on_caller_turn_id: proposedOnCallerTurnId }
       : {}),
+    ...(readBack !== undefined ? { read_back: readBack } : {}),
   };
   return { awaitingInput } as Partial<T>;
 }

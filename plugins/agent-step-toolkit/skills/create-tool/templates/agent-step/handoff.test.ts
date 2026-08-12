@@ -383,6 +383,128 @@ test("HandoffSpec.actionDescription overrides the request_handoff schema variant
   );
 });
 
+const constrainedModelHandoffSchema: z.ZodType<HandoffRequest> =
+  z.discriminatedUnion("reason", [
+    z.object({
+      reason: z.literal("off_topic"),
+      context: z.string().min(1),
+    }),
+    z.object({
+      reason: z.literal("abandon"),
+      context: z.enum([
+        "status_change:human_requested",
+        "status_change:cancelled",
+      ]),
+    }),
+  ]);
+
+test("HandoffSpec.modelRequestSchema narrows both wire schema and runtime parsing", async () => {
+  const { opts } = makeOpts(true);
+  opts.handoff = {
+    ...opts.handoff!,
+    actionDescription: "Configured handoff routes only.",
+    modelRequestSchema: constrainedModelHandoffSchema,
+  };
+
+  const tool = buildAgentStepTool(opts);
+  const root = tool.schema as {
+    properties: {
+      steps: {
+        items: {
+          anyOf: Array<{
+            properties?: {
+              action?: { const?: string };
+              params?: unknown;
+            };
+          }>;
+        };
+      };
+    };
+  };
+  const handoffVariant = root.properties.steps.items.anyOf.find(
+    (variant) => variant.properties?.action?.const === HANDOFF_ACTION,
+  );
+  assert.ok(handoffVariant?.properties?.params, "handoff variant is present");
+  const paramsWire = JSON.stringify(handoffVariant.properties.params);
+  assert.match(paramsWire, /status_change:human_requested/);
+  assert.match(paramsWire, /status_change:cancelled/);
+  assert.doesNotMatch(paramsWire, /completed/);
+
+  const rejected = await runSteps(
+    opts,
+    [
+      {
+        action: HANDOFF_ACTION,
+        params: { reason: "abandon", context: "free-form closing" },
+      },
+    ],
+    {} as S,
+  );
+  assert.equal(rejected.body.results[0].error, "invalid_params");
+  assert.equal(rejected.committed.handoff, undefined);
+
+  const accepted = await runSteps(
+    opts,
+    [
+      {
+        action: HANDOFF_ACTION,
+        params: {
+          reason: "abandon",
+          context: "status_change:human_requested",
+          leaked: "strip-before-state",
+        },
+      },
+    ],
+    {} as S,
+  );
+  assert.equal(accepted.body.failed_at, undefined);
+  assert.deepEqual(accepted.committed.handoff, {
+    reason: "abandon",
+    context: "status_change:human_requested",
+  });
+});
+
+test("HandoffSpec.modelRequestSchema is construction-validated", () => {
+  const { opts } = makeOpts(true);
+  const invalid = {
+    ...opts,
+    handoff: {
+      ...opts.handoff!,
+      modelRequestSchema: null,
+    },
+  } as unknown as typeof opts;
+  assert.throws(
+    () => buildAgentStepTool(invalid),
+    /modelRequestSchema must be a Zod schema/,
+  );
+});
+
+test("abortPolicy cannot weaken request_handoff sole-step admission", async () => {
+  const { opts, calls } = makeOpts(true);
+  opts.abortPolicy = {
+    requireActive: true,
+    allowStandalone: false,
+    allowedFollowers: ["read_thing"],
+  };
+  const initial: S = {
+    awaitingInput: {
+      kind: "confirmation",
+      for_action: "change_thing",
+      params: { v: "y" },
+      attempts_left: 3,
+      max_attempts: 3,
+    },
+  };
+  const { body, committed } = await runSteps(
+    opts,
+    [{ action: "abort_pending_input", params: {} }, HANDOFF_STEP],
+    initial,
+  );
+  assert.equal(body.results[0].error, "handoff_must_be_sole_step");
+  assert.deepEqual(committed, {});
+  assert.deepEqual(calls, { read: 0, change: 0 });
+});
+
 // ─── handoff node ─────────────────────────────────────────────────────────── //
 
 function nodeConfig(events: unknown[], threadId = "t-1") {

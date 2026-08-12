@@ -117,6 +117,7 @@ The sandbox tests can't run without it. If a new tool calls a backend the sandbo
 All domain knowledge in `references/`:
 
 - **agent-step-api.md** — Runner types (ActionDef, ControllerHooks, Verifier, ConfirmationOpts, invalidatesOnChange), construction-time checks, library invariants.
+- **agent-design-principles.md** — How a well-formed HOST agent divides responsibility around the engine: mechanism-in-engine, language-only prompt, transcript-only state, discovery-by-calling, engine-rendered consequence text, one prompt authority per behaviour, configuration-owned payloads, engine-bounded consequences, substance-not-phrasing fixtures, layered live measurement. Ends with the five-question port-mode audit. Read at bootstrap, before prompt work, and when porting.
 - **tool-directory-layout.md** — Per-file purpose, naming conventions, file-creation order.
 - **executor-patterns.md** — Read executor vs mutation executor patterns; backend client usage; state update shape; voice-safe outputs.
 - **state-and-prompt-integration.md** — How to patch `src/state.ts`, `src/prompt.ts`, `src/tools/index.ts`.
@@ -152,7 +153,7 @@ All in `templates/`:
 - `project/test-harness-sandbox.ts.template`, `project/test-harness-prompt-input.ts.template`, `project/test-harness-index.ts.template`
 
 **Agent-step library** (verbatim copy by bootstrap — the ENTIRE `agent-step/` tree, recursively; no substitution):
-- Top level: `agent-step/types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `capture.ts`, `index.ts` + the test suites (`runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `deflect-aside.test.ts`, `zod-state.test.ts`)
+- Top level: `agent-step/types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `capture.ts`, `index.ts` + the test suites (`runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `deflect-aside.test.ts`, `repeat-confirmation.test.ts`, `zod-state.test.ts`)
 - Phase modules (internal layout; hosts import only from `index.ts`): `agent-step/compile/`, `agent-step/run/`, `agent-step/interaction/`, `agent-step/controls/`, `agent-step/handoff/` — see `references/project-bootstrap-structure.md` for the per-file inventory
 - `agent-step/VERSION` — the library version marker. Bumped by `/bump-version` when the embedded copy is refreshed; read by `/pull-library` to upgrade a downstream project's vendored copy. Travels into every bootstrapped project at `src/agent-step/VERSION`.
 

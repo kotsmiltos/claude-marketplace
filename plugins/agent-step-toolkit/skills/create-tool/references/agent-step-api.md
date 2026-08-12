@@ -18,6 +18,9 @@ export const myTool = buildAgentStepTool({
   verifiers,                       // VerifierRegistry<T>
   handoff: handoffSpec,            // OPTIONAL — opt into the built-in request_handoff (see <handoff>)
   boundedChoices: { ... },         // OPTIONAL — opt into the one-shot bounded-choice overlay (see <bounded_choice>)
+  abortPolicy: { ... },            // OPTIONAL (2.5.0) — narrow the built-in abort control to an
+                                   // engine-enforced in-domain transition; omit for the legacy
+                                   // permissive behaviour (see <conventions> §3)
   getCallerTurnId: (state) => id,  // OPTIONAL — stable caller-turn identity resolver (see <caller_turn_identity>)
   messages: { ... },               // OPTIONAL — override the runner's own system summary strings (see <system_messages>)
 });
@@ -117,6 +120,25 @@ interface ConfirmationOpts {
                                    // OPTIONAL (2.3.0) — render what the runner ACTUALLY recorded, for
                                    // the model to speak back verbatim. A non-empty return rides the
                                    // proposal body as `read_back` beside `proposed_params`. See below.
+  repeatReadBack?: boolean;        // OPTIONAL (2.5.0) — persist the non-empty readBack rendering on the
+                                   // pending gate (`awaitingInput.read_back`) and inject the built-in
+                                   // `repeat_pending_confirmation` control, which may return those EXACT
+                                   // stored bytes on a later caller turn — never re-rendering from
+                                   // mutable state, never confirming/executing, never spending an
+                                   // attempt. Default false. Enabling it without a non-empty rendering
+                                   // leaves that proposal ineligible for repetition. See below.
+  refuseProposal?: (params: Record<string, unknown>, state: unknown)
+    => ({ summary: string; error: string } & Record<string, unknown>) | null | undefined;
+                                   // OPTIONAL (2.5.0) — propose-time, STATE-aware refusal. Runs on the
+                                   // propose/re-propose path AFTER params parse and BEFORE anything
+                                   // commits: no gate stored, no attempt spent, a pending bounded choice
+                                   // NOT consumed (the same non-burning semantics as invalid_params).
+                                   // Return a result body to refuse; null/undefined to proceed. For
+                                   // proposals whose validity depends on STATE, not shape — e.g. an
+                                   // empty probe proposing to consume a carried identity when nothing
+                                   // was carried: answer immediately instead of storing a gate over a
+                                   // value that does not exist. Same non-generic state contract as
+                                   // readBack.
 }
 ```
 
@@ -131,6 +153,21 @@ read-back drifting from what executes) and the current state view. Deliberately 
 `ConfirmationOpts` carries no state type, so hosts cast their own state exactly as executors do with
 their slices. Pair it with a prompt rule telling the model to speak `read_back` verbatim when present;
 without such a rule the field is inert.
+
+**`repeatReadBack`** (2.5.0) closes the other half of the same failure: 2.3.0 made the FIRST recap
+engine-rendered, but when the caller asks for it again ("pardon?"), the model was back to reproducing
+the recap itself from mutable context. With the opt set, the rendering is persisted on the gate and the
+sole-step `repeat_pending_confirmation` control (reserved only when at least one action opts in) returns
+the stored bytes verbatim. Repetition advances the gate's presentation-turn provenance — the repeated
+recap becomes the consent question the caller must answer on a LATER turn — so a second ReAct loop can
+neither repeat again nor execute the mutation on the same caller turn. The control validates that the
+pending gate belongs to an opted-in action and actually carries a rendering; a misdirected call
+fails closed and changes nothing.
+
+**`refuseProposal`** (2.5.0) fills the lifecycle gap between the params schema (shape, no state
+access) and the executor (state, but runs only AFTER consent): a schema-valid, state-impossible
+proposal is answered immediately, storing nothing and burning nothing. Keep it a pure function of
+(params, state) and mirror the executor's own consumption rule so the two can never disagree.
 
 There is deliberately **no TTL**: the runner times nothing out. Stale gates clear via `abort_pending_input` or via backend signals the executor surfaces as `clear_awaiting_input` / `abort_flow` effects. (2.0.0 removed the inert `ttlMs` field and the empty `OtpOpts` type — `requiresOtp` is a plain `boolean`; the library never counts OTP attempts, the backend is authoritative.)
 
@@ -232,11 +269,15 @@ The runner's lockdown slot. Discriminated union over the three input gates:
 type AwaitingInput =
   | { kind: "confirmation"; for_action: string; params: object;
       attempts_left: number; max_attempts: number; flow_ref?: string;
-      proposed_on_caller_turn_id?: string }   // the caller turn the proposal was stored on;
-                                              // a matching re-call on the SAME turn is refused
+      proposed_on_caller_turn_id?: string;    // the caller turn the proposal was stored on (or last
+                                              // REPEATED on — the repeat control advances it); a
+                                              // matching re-call on the SAME turn is refused
                                               // (confirmation_same_turn_locked) — see
                                               // <confirmation_lifecycle>. Absent when no stable
                                               // turn identity existed at propose time.
+      read_back?: string }                    // (2.5.0) exact caller-audible rendering, persisted only
+                                              // when the owning action sets ConfirmationOpts.repeatReadBack;
+                                              // repeat_pending_confirmation returns these stored bytes.
   | { kind: "otp";          for_action: string; flow_ref: string }
   | { kind: "match";        for_action: string;
       attempts_left: number; max_attempts: number; flow_ref?: string };
@@ -369,13 +410,37 @@ agent-step: action "verify_card" lists prereq "customerVerified" but verifiers["
 
 ## 3. Reserved action names
 
-`abort_pending_input` is ALWAYS reserved — the library auto-injects it into the tool schema whenever ANY action declares one of: `requiresConfirmation`, `requiresOtp`, `issuesOtp`, `startsFlow`, `endsFlow`, `requiresFlow`, `requiresMatch`, `startsMatchFor`. `request_handoff` is reserved ONLY when `BuildAgentStepToolOptions.handoff` is provided (see `<handoff>`) — a tool that does NOT opt in may define its own action under that name (the orchestrator/scaffold handoff mechanism does exactly that). `request_bounded_choice` / `resolve_bounded_choice` are reserved ONLY when `boundedChoices` is provided (see `<bounded_choice>`). `deflect_aside` (2.4.0) is reserved ONLY when `HandoffSpec.deflectAside` is set (see `<handoff>`). These library-owned actions are **controls** (`controls/` in the library): each carries its own activation, schema variant, description line, lockdown allowances, and execution — the run pipeline dispatches them instead of an executor. Declaring a reserved name throws:
+`abort_pending_input` is ALWAYS reserved — the library auto-injects it into the tool schema whenever ANY action declares one of: `requiresConfirmation`, `requiresOtp`, `issuesOtp`, `startsFlow`, `endsFlow`, `requiresFlow`, `requiresMatch`, `startsMatchFor`. `request_handoff` is reserved ONLY when `BuildAgentStepToolOptions.handoff` is provided (see `<handoff>`) — a tool that does NOT opt in may define its own action under that name (the orchestrator/scaffold handoff mechanism does exactly that). `request_bounded_choice` / `resolve_bounded_choice` are reserved ONLY when `boundedChoices` is provided (see `<bounded_choice>`). `deflect_aside` (2.4.0) is reserved ONLY when `HandoffSpec.deflectAside` is set (see `<handoff>`). `repeat_pending_confirmation` (2.5.0) is reserved ONLY when at least one action sets `ConfirmationOpts.repeatReadBack` — sole-step (`repeat_confirmation_must_be_sole_step`: a recap is a read-only turn boundary; domain work in the same batch could turn the caller's clarification into consent). These library-owned actions are **controls** (`controls/` in the library): each carries its own activation, schema variant, description line, lockdown allowances, and execution — the run pipeline dispatches them instead of an executor. Declaring a reserved name throws:
 
 ```
 agent-step: "<name>" is a reserved action name auto-injected by the library; remove it from config.actions.
 ```
 
 `abort_pending_input` is idempotent — it clears `awaitingInput` AND `currentFlow` together. No-op when nothing is active.
+
+**`abortPolicy`** (2.5.0, optional) narrows abort from that permissive default into an engine-enforced
+in-domain transition. Omit it and the legacy behaviour is preserved byte-for-byte. When configured:
+
+```ts
+interface AbortPolicy<ActionName extends string> {
+  requireActive?: boolean;                      // refuse abort when no gate, flow, or PENDING bounded
+                                                // choice is active (a resolved choice is a persistent
+                                                // one-shot marker, not active input). Default false.
+  allowStandalone?: boolean;                    // permit abort as the batch's only step; when false,
+                                                // exactly one legal follower is required. Default true.
+  allowedFollowers?: readonly ActionName[];     // domain actions that may immediately follow abort.
+                                                // Omit = any declared domain action; [] = none.
+  allowedPendingTargets?: readonly ActionName[];// gates abort may clear: batch-start awaitingInput
+                                                // must exist and its for_action be listed. Omit = any.
+}
+```
+
+Admission then enforces: abort LEADS the batch, clears something real when `requireActive`, and has at
+most one declared domain follower — control followers are never legal. Every knob is validated at
+construction (unknown or duplicate action names, an unsatisfiable `allowStandalone=false` with an empty
+follower list — all throw). The activation renders the configured contract into the control's own
+model-facing description, so the surface the model reads is derived from the same configuration the
+engine enforces.
 
 ## 4. Per-action description is required
 
@@ -566,6 +631,19 @@ interface BoundedChoiceDef {
                                            // locked until resolve_bounded_choice runs.
   onRepeatHandoff?: HandoffRequest;        // atomic handoff fallback when the model re-requests
                                            // an already-used choice (requires the handoff opt).
+  renderRequest?: (state: unknown) => string | undefined;
+                                           // OPTIONAL (2.5.0) — render the exact caller-audible
+                                           // OFFER when the choice is stored. A non-empty return
+                                           // rides the control result as `read_back`, spoken
+                                           // verbatim. Receives the in-batch state view including
+                                           // the newly pending choice and any suspended gate.
+  renderResolution?: (selection: string, state: unknown) => string | undefined;
+                                           // OPTIONAL (2.5.0) — render the exact caller-audible
+                                           // RESUME after a nonterminal selection is recorded;
+                                           // same `read_back` contract. The read-back doctrine
+                                           // (see ConfirmationOpts.readBack) extended to the
+                                           // choice overlay: fixed offers and resumes are exactly
+                                           // where model paraphrase was measured to drift.
 }
 ```
 
@@ -575,7 +653,8 @@ Providing a non-empty registry injects two library-owned **controls** into the t
 - **Lockdown while pending.** Only the choice controls, `abort_pending_input`, `request_handoff`, and the configured `directInputActions` may run (`bounded_choice_pending_locked` otherwise). This is what prevents a meta-level "continue" from becoming consent for a suspended permanent mutation if the model emits the wrong action.
 - **Offered-this-turn lock.** The request control stamps `requested_on_caller_turn_id`; while that turn is current, `resolve_bounded_choice` and direct-input consumption are refused (`bounded_choice_same_turn_locked`) — the caller must actually hear the fork and reply before anything counts as their selection. Abort / handoff / repeat-request stay available.
 - **Resolved-this-turn lock.** A nonterminal resolution records `resolved_on_caller_turn_id`; domain work stays locked while that turn is current (`bounded_choice_resume_turn_locked`), so a second ReAct loop in the SAME turn cannot execute suspended work. Resolution **fails closed** without a stable turn identity (`bounded_choice_turn_identity_unavailable`) — see `<caller_turn_identity>`.
-- **Consume-on-acceptance.** A pending choice is consumed as `domain_input` only when a direct-input step is ACCEPTED (flow gate + prereqs + params all passed; a confirm propose counts). `invalid_params` / prereq denials do NOT burn the one-shot.
+- **Consume-on-acceptance.** A pending choice is consumed as `domain_input` only when a direct-input step is ACCEPTED (flow gate + prereqs + params all passed; a confirm propose counts). `invalid_params` / prereq denials do NOT burn the one-shot. (2.5.0) Consumption is **transcript-visible**: the consuming step's result is stamped `choice_consumed`, so the model derives pending/resolved status from tool results alone — a silent engine transition the model can only learn from state is a bug by definition.
+- **Leading-resolve batch (2.5.0).** A batch may open with `resolve_bounded_choice` followed by the pending choice's own `directInputActions` — the shape a model naturally emits when one caller reply both selects "continue" and supplies the suspended detail. Every permitted follower is an action the config already trusts to consume caller input while the choice is pending (a confirm-required mutation is structurally never among them), so "continue" still cannot become consent; the same-turn locks above still apply, and any other follower keeps refusing.
 - `resolve_bounded_choice` with nothing pending → `bounded_choice_not_pending`; an unknown selection is an `invalid_params` refusal.
 
 The registry is validated at construction: non-empty names/descriptions/selections, no duplicate selections, `directInputActions` must name real actions, `onRepeatHandoff` requires the `handoff` opt (see `<construction_time_checks>`).
@@ -693,6 +772,15 @@ interface HandoffSpec<T> {
                                      // request_handoff) so the host states its own classification
                                      // policy. Requires the `deflectedAside` state channel —
                                      // construction throws without it. See below.
+  modelRequestSchema?: z.ZodType<HandoffRequest>;
+                                     // OPTIONAL (2.5.0) — a NARROWER schema for the MODEL-FACING
+                                     // request_handoff params, used both to generate the wire
+                                     // schema and to parse the control at runtime — exact
+                                     // reason/context route pairs become configuration instead of
+                                     // prompt prose, each variant carrying its own when-to-use
+                                     // description. Does NOT replace HandoffRequestSchema: the
+                                     // library-managed slot and trusted executor/config effects
+                                     // keep the base schema. Output must still be a HandoffRequest.
 }
 ```
 
@@ -901,6 +989,8 @@ The runner validates the config + registries at construction. These all throw at
 | `declares requiresMatch with capturer "X" but no such action exists` | `requiresMatch.capturer` names a non-existent action (2.0.0) |
 | `the state schema is missing channel(s)` | Channel-completeness check (2.0.0): a library slot this configuration writes has no channel in the host schema — spread `agentStepZodShape` / `agentStepStateSpec` |
 | `bounded choice "X" …` | Bounded-choice registry validation (2.0.0): empty name/description/selections, duplicate selections, unknown `directInputActions`, or `onRepeatHandoff` without the `handoff` opt |
+| `abortPolicy …` | Abort-policy validation (2.5.0): non-boolean knobs, empty/duplicate/unknown action names in `allowedFollowers` / `allowedPendingTargets`, or `allowStandalone=false` with an explicitly empty follower list |
+| `handoff.modelRequestSchema must be a Zod schema` | The model-facing handoff schema narrowing (2.5.0) isn't a Zod schema |
 
 Runtime errors raised by the runner (not construction-time, but loud):
 
@@ -925,10 +1015,10 @@ For ground truth, read these files in the project (don't paraphrase — they ARE
   - `compile/` — `validate.ts` (every construction-time check), `plan.ts` (`BuildAgentStepToolOptions` + the compiled plan), `schema.ts` / `describe.ts` (the model-facing schema + description)
   - `run/` — `admission.ts` (the fixed-order whole-batch preconditions), `planning.ts` (confirm-mode freeze), `execution.ts` (per-step loop, effects ordering, handoff monotonicity), `finalize.ts` (result body + error-counter policy), `batch-state.ts` (the single write path into view/committed)
   - `interaction/` — one policy module per gate kind: `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (each states its lockdown, attempts, freshness, and clearing rules in one place; `bounded-choice.ts` also owns `resolveCallerTurnId`), plus `guard-latch.ts` (the host guard latch over that same identity)
-  - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`) in an ordered `registry.ts`
+  - `controls/` — the library-owned model-facing actions (`abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`, `repeat-confirmation.ts`) in an ordered `registry.ts`
   - `handoff/` — `contract.ts` (action + signals + `HandoffSpec`), `node.ts` (`createHandoffNode` — the frozen channel contract), `delegate-client.ts` (SSE/Platform-API transport)
 - `src/agent-step/paginate.ts` — the read-pagination primitives + the `pageable` orchestration the runner uses (self / delegate, the cache, the envelope)
 - `src/agent-step/capture.ts` — the caller-digit capture primitives (refinement-not-regex, count-free messages, group join, candidate arrays; see `<caller_digit_capture>`)
 - `src/agent-step/messages.ts` — the runner's overridable system `summary` strings: `SystemMessages`, `DEFAULT_SYSTEM_MESSAGES`, `resolveSystemMessages`
-- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `guard-latch.test.ts` + `deflect-aside.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, the hardening guards, the turn-scoped guard latch, and the aside-deflection control; all pass on `npm test`
+- `src/agent-step/runner.test.ts` + `paginate.test.ts` + `capture.test.ts` + `handoff.test.ts` + `bounded-choice.test.ts` + `hardening.test.ts` + `guard-latch.test.ts` + `deflect-aside.test.ts` + `repeat-confirmation.test.ts` + `zod-state.test.ts` — worked examples covering every runner branch, the pagination primitives, the digit-capture primitives, the handoff machinery, the bounded-choice policy, the hardening guards, the turn-scoped guard latch, the aside-deflection control, and the stored-byte confirmation repeat; all pass on `npm test`
 </key_files_to_inspect>

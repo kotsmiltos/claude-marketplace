@@ -7,14 +7,21 @@
 // must exist); only genuinely runtime conditions (an effect against absent
 // flow state) are left to the run pipeline's defensive throws.
 
+import type { z } from "zod";
 import type { ActionDef } from "../types.js";
 import {
   deflectAsideEnabled,
   handoffParamsSchema,
   type HandoffSpec,
 } from "../handoff/contract.js";
+import type { HandoffRequest } from "../state.js";
 import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
-import type { ControlActivation } from "../controls/contract.js";
+import { repeatReadBackEnabled } from "../interaction/confirmation.js";
+import {
+  resolveAbortPolicy,
+  type AbortPolicy,
+  type ControlActivation,
+} from "../controls/contract.js";
 import { reservedControlNames } from "../controls/registry.js";
 import { channelsOf, type StateSchemaLike } from "./state-schema.js";
 
@@ -27,7 +34,10 @@ export interface ValidatableOptions {
   selectors: Record<string, unknown>;
   executors: Record<string, unknown>;
   verifiers: Record<string, unknown>;
-  handoff?: unknown;
+  handoff?: {
+    modelRequestSchema?: z.ZodType<HandoffRequest>;
+  };
+  abortPolicy?: AbortPolicy<string>;
   boundedChoices?: BoundedChoiceRegistry;
   onErrorThreshold?: unknown;
 }
@@ -96,11 +106,119 @@ export function validateConfig(opts: ValidatableOptions): void {
     );
   }
   const boundedChoices = opts.boundedChoices ?? {};
+  const configuredHandoffSchema = opts.handoff?.modelRequestSchema as unknown;
+  if (
+    configuredHandoffSchema !== undefined &&
+    (configuredHandoffSchema === null ||
+      (typeof configuredHandoffSchema !== "object" &&
+        typeof configuredHandoffSchema !== "function") ||
+      typeof (configuredHandoffSchema as { safeParse?: unknown }).safeParse !==
+        "function")
+  ) {
+    throw new Error("agent-step: handoff.modelRequestSchema must be a Zod schema.");
+  }
+  const effectiveHandoffSchema =
+    configuredHandoffSchema === undefined
+      ? handoffParamsSchema
+      : (configuredHandoffSchema as z.ZodType<HandoffRequest>);
+  const actionNames = Object.keys(config.actions);
+  const repeatableConfirmationActions = actionNames.filter((name) =>
+    repeatReadBackEnabled(
+      config.actions[name].controller?.requiresConfirmation,
+    ),
+  );
+
+  const rawAbortPolicy = opts.abortPolicy as unknown;
+  if (
+    rawAbortPolicy !== undefined &&
+    (rawAbortPolicy === null || typeof rawAbortPolicy !== "object")
+  ) {
+    throw new Error("agent-step: abortPolicy must be an object.");
+  }
+  if (opts.abortPolicy) {
+    if (
+      opts.abortPolicy.requireActive !== undefined &&
+      typeof opts.abortPolicy.requireActive !== "boolean"
+    ) {
+      throw new Error("agent-step: abortPolicy.requireActive must be a boolean.");
+    }
+    if (
+      opts.abortPolicy.allowStandalone !== undefined &&
+      typeof opts.abortPolicy.allowStandalone !== "boolean"
+    ) {
+      throw new Error("agent-step: abortPolicy.allowStandalone must be a boolean.");
+    }
+    const followers = opts.abortPolicy.allowedFollowers;
+    if (followers !== undefined) {
+      if (
+        !Array.isArray(followers) ||
+        followers.some(
+          (name) => typeof name !== "string" || name.trim().length === 0,
+        )
+      ) {
+        throw new Error(
+          "agent-step: abortPolicy.allowedFollowers must contain non-empty action names.",
+        );
+      }
+      if (new Set(followers).size !== followers.length) {
+        throw new Error(
+          "agent-step: abortPolicy.allowedFollowers contains duplicate actions.",
+        );
+      }
+      for (const follower of followers) {
+        if (!actionNames.includes(follower)) {
+          throw new Error(
+            `agent-step: abortPolicy lists unknown allowedFollower "${follower}".`,
+          );
+        }
+      }
+      if (opts.abortPolicy.allowStandalone === false && followers.length === 0) {
+        throw new Error(
+          "agent-step: abortPolicy with allowStandalone=false requires at least one allowedFollower (or omit allowedFollowers to permit any domain action).",
+        );
+      }
+    }
+
+    const pendingTargets = opts.abortPolicy.allowedPendingTargets;
+    if (pendingTargets !== undefined) {
+      if (
+        !Array.isArray(pendingTargets) ||
+        pendingTargets.some(
+          (name) => typeof name !== "string" || name.trim().length === 0,
+        )
+      ) {
+        throw new Error(
+          "agent-step: abortPolicy.allowedPendingTargets must contain non-empty action names.",
+        );
+      }
+      if (pendingTargets.length === 0) {
+        throw new Error(
+          "agent-step: abortPolicy.allowedPendingTargets must not be empty when provided.",
+        );
+      }
+      if (new Set(pendingTargets).size !== pendingTargets.length) {
+        throw new Error(
+          "agent-step: abortPolicy.allowedPendingTargets contains duplicate actions.",
+        );
+      }
+      for (const target of pendingTargets) {
+        if (!actionNames.includes(target)) {
+          throw new Error(
+            `agent-step: abortPolicy lists unknown allowedPendingTarget "${target}".`,
+          );
+        }
+      }
+    }
+  }
+
   const activation: ControlActivation = {
     // Reserved names don't depend on lifecycle opts (the abort name is always
     // reserved); pass a conservative value.
     hasLifecycleOpts: true,
     handoffEnabled: opts.handoff != null,
+    handoffModelRequestSchema: effectiveHandoffSchema,
+    abortPolicy: resolveAbortPolicy(opts.abortPolicy),
+    repeatableConfirmationActions,
     boundedChoices,
     boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
     deflectAsideEnabled: deflectAsideEnabled(
@@ -108,7 +226,6 @@ export function validateConfig(opts: ValidatableOptions): void {
     ),
   };
 
-  const actionNames = Object.keys(config.actions);
   // `abort_pending_input` is always reserved. `request_handoff` is reserved
   // ONLY when the library handoff is opted into — a tool that does NOT pass
   // `handoff` may define its own action under that name.
@@ -212,10 +329,22 @@ export function validateConfig(opts: ValidatableOptions): void {
       );
     }
     if (choice.onRepeatHandoff) {
-      const parsed = handoffParamsSchema.safeParse(choice.onRepeatHandoff);
-      if (!parsed.success) {
+      // A configured repeat fallback must be one of the same routes the model
+      // is allowed to request. The base schema remains the trusted state/effect
+      // contract, but accepting a broader fallback here would make the host's
+      // advertised route allow-list internally inconsistent.
+      const parsed = effectiveHandoffSchema.safeParse(choice.onRepeatHandoff);
+      const canonical = parsed.success
+        ? handoffParamsSchema.safeParse(parsed.data)
+        : null;
+      if (!parsed.success || !canonical?.success) {
+        const issues = !parsed.success
+          ? parsed.error.issues
+          : canonical && !canonical.success
+            ? canonical.error.issues
+            : [];
         throw new Error(
-          `agent-step: bounded choice "${name}" has an invalid onRepeatHandoff: ${parsed.error.issues
+          `agent-step: bounded choice "${name}" has an invalid onRepeatHandoff: ${issues
             .map((issue) => issue.message)
             .join("; ")}`,
         );

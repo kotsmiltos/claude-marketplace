@@ -70,6 +70,13 @@ export const {{TOOL_NAME}}Config = defineConfig<ActionName, PrereqName>({
         //                 the model speaks it back verbatim instead of paraphrasing `proposed_params`.
         //                 Add it whenever the params carry caller-dictated digits; pair it with a
         //                 prompt rule to speak `read_back` when present, or the field is inert.
+        //   repeatReadBack — persist the readBack rendering on the gate and inject the sole-step
+        //                 `repeat_pending_confirmation` control: a "pardon?" turn returns the EXACT
+        //                 stored bytes without confirming, re-rendering, or spending an attempt.
+        //                 Add it to high-stakes recaps the caller may ask to hear again.
+        //   refuseProposal — (params, state) => result body | null: propose-time, STATE-aware refusal
+        //                 (no gate stored, no attempt spent, pending bounded choice not consumed).
+        //                 For proposals whose validity depends on state, not shape.
         // There is deliberately NO TTL — the runner times nothing out. Stale
         // gates clear via `abort_pending_input` or executor effects.
         requiresConfirmation: { maxAttempts: 3 },

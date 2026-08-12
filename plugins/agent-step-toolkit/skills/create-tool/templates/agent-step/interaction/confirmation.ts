@@ -23,9 +23,12 @@ import { valueEqual } from "../run/value-equal.js";
 export const CONFIRMATION_DEFAULTS: Required<ConfirmationOpts> = {
   maxAttempts: 3,
   lockdown: true,
+  repeatReadBack: false,
   // No read-back by default: a host that does not render one keeps handing the
   // model raw `proposed_params`, exactly as before this option existed.
   readBack: () => undefined,
+  // No propose-time refusal by default: every schema-valid proposal stores.
+  refuseProposal: () => null,
 };
 
 export function normalizeConfirmation(
@@ -36,8 +39,19 @@ export function normalizeConfirmation(
   return {
     maxAttempts: v.maxAttempts ?? CONFIRMATION_DEFAULTS.maxAttempts,
     lockdown: v.lockdown ?? CONFIRMATION_DEFAULTS.lockdown,
+    repeatReadBack: v.repeatReadBack ?? CONFIRMATION_DEFAULTS.repeatReadBack,
     readBack: v.readBack ?? CONFIRMATION_DEFAULTS.readBack,
+    refuseProposal: v.refuseProposal ?? CONFIRMATION_DEFAULTS.refuseProposal,
   };
+}
+
+/** Does this raw controller declaration opt into the repeat-read-back
+ *  control? Kept here with normalization so compile and construction-time
+ *  validation derive activation from one interpretation. */
+export function repeatReadBackEnabled(
+  v: boolean | ConfirmationOpts | undefined,
+): boolean {
+  return typeof v === "object" && v.repeatReadBack === true;
 }
 
 /** The pending confirmation as plan expansion needs it, or null when the

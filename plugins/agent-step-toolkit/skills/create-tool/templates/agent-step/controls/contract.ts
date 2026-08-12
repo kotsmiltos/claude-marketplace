@@ -24,10 +24,61 @@
 
 import type { z } from "zod";
 import type { StepResult } from "../types.js";
-import type { LibraryManagedSlots } from "../state.js";
+import type { HandoffRequest, LibraryManagedSlots } from "../state.js";
 import type { SystemMessages } from "../messages.js";
 import type { BatchState } from "../run/batch-state.js";
 import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
+
+/** Optional host policy for the built-in `abort_pending_input` control.
+ *
+ * Omit the policy to preserve the legacy, permissive behaviour. When present,
+ * abort is a deliberately narrow in-domain transition: it must lead the batch,
+ * may be required to have something to clear, and may only continue into one
+ * configured domain action. The action-name generic keeps the allow-list tied
+ * to the host's declared domain surface at construction time. */
+export interface AbortPolicy<ActionName extends string> {
+  /** Refuse abort when no confirmation/OTP/match, flow, or pending bounded
+   * choice is active. A resolved choice is a persistent one-shot marker, not
+   * active caller input. Default `false`. */
+  requireActive?: boolean;
+  /** Permit abort as the batch's only step. When `false`, exactly one legal
+   * follower is required. Default `true`. */
+  allowStandalone?: boolean;
+  /** Domain actions which may immediately follow abort. Omit to allow any
+   * declared domain action; an empty list permits no follower. */
+  allowedFollowers?: readonly ActionName[];
+  /** Pending-input action targets from which abort is permitted. When set,
+   * batch-start `awaitingInput` must exist and its `for_action` must be in this
+   * list; an active flow or pending bounded choice alone is not sufficient.
+   * Omit to allow abort from any active interaction target. */
+  allowedPendingTargets?: readonly ActionName[];
+}
+
+/** Compile-time-normalized abort policy consumed by controls and admission.
+ * `null` is meaningful: no policy was configured, so legacy behaviour stays
+ * byte-for-byte compatible. */
+export interface ResolvedAbortPolicy {
+  requireActive: boolean;
+  allowStandalone: boolean;
+  allowedFollowers: readonly string[] | null;
+  allowedPendingTargets: readonly string[] | null;
+}
+
+export function resolveAbortPolicy<ActionName extends string>(
+  policy: AbortPolicy<ActionName> | undefined,
+): ResolvedAbortPolicy | null {
+  if (!policy) return null;
+  return {
+    requireActive: policy.requireActive ?? false,
+    allowStandalone: policy.allowStandalone ?? true,
+    allowedFollowers:
+      policy.allowedFollowers === undefined ? null : [...policy.allowedFollowers],
+    allowedPendingTargets:
+      policy.allowedPendingTargets === undefined
+        ? null
+        : [...policy.allowedPendingTargets],
+  };
+}
 
 /** What the compile phase resolved about which library features are on. Built
  *  once per plan (compile/plan.ts); drives control activation everywhere. */
@@ -37,6 +88,16 @@ export interface ControlActivation {
   handoffEnabled: boolean;
   /** Host override for the `request_handoff` schema-variant description. */
   handoffActionDescription?: string;
+  /** Effective model-facing AND runtime schema for `request_handoff`. The
+   * base handoff state/effect schema remains broader and library-owned. */
+  handoffModelRequestSchema: z.ZodType<HandoffRequest>;
+  /** `null` preserves the legacy permissive abort mechanics. */
+  abortPolicy: ResolvedAbortPolicy | null;
+  /** Confirm-gated domain actions which opted into exact stored read-back
+   *  repetition. Non-empty activates `repeat_pending_confirmation`; the
+   *  control still verifies that the current gate belongs to one of these
+   *  actions and actually carries a rendered read-back. */
+  repeatableConfirmationActions: readonly string[];
   boundedChoices: BoundedChoiceRegistry;
   boundedChoicesEnabled: boolean;
   /** The `deflect_aside` control (HandoffSpec.deflectAside, requires handoff):

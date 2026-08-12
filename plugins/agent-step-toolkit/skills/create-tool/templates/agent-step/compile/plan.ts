@@ -28,11 +28,20 @@ import { resolvePageable, type ResolvedPageable } from "../paginate.js";
 import {
   deflectAsideActionDescription,
   deflectAsideEnabled,
+  handoffParamsSchema,
   type HandoffSpec,
 } from "../handoff/contract.js";
 import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
-import { normalizeConfirmation } from "../interaction/confirmation.js";
-import type { ControlAction, ControlActivation } from "../controls/contract.js";
+import {
+  normalizeConfirmation,
+  repeatReadBackEnabled,
+} from "../interaction/confirmation.js";
+import {
+  resolveAbortPolicy,
+  type AbortPolicy,
+  type ControlAction,
+  type ControlActivation,
+} from "../controls/contract.js";
 import { activeControls } from "../controls/registry.js";
 import {
   buildMergerFromStateSchema,
@@ -72,6 +81,9 @@ export interface BuildAgentStepToolOptions<
    *  (`createHandoffNode(spec)` from handoff/node.ts) — the runner never
    *  performs the terminate/delegate I/O itself. */
   handoff?: HandoffSpec<T>;
+  /** Optionally narrow the built-in abort control to an engine-enforced
+   * in-domain transition. Omit for the legacy permissive/idempotent behavior. */
+  abortPolicy?: AbortPolicy<Extract<keyof Selectors, string>>;
   /** Opt into the library's one-shot bounded-choice overlay. This injects the
    *  `request_bounded_choice` and `resolve_bounded_choice` controls without
    *  adding domain actions or replacing a pending confirmation/OTP/match.
@@ -227,10 +239,19 @@ export function compilePlan<
   }
   const rawActions = opts.config.actions as Record<string, ActionDef<string>>;
   const boundedChoices = opts.boundedChoices ?? {};
+  const repeatableConfirmationActions = Object.entries(rawActions)
+    .filter(([, action]) =>
+      repeatReadBackEnabled(action.controller?.requiresConfirmation),
+    )
+    .map(([name]) => name);
   const activation: ControlActivation = {
     hasLifecycleOpts: hasAnyLifecycleOpt(rawActions),
     handoffEnabled: opts.handoff != null,
     handoffActionDescription: opts.handoff?.actionDescription,
+    handoffModelRequestSchema:
+      opts.handoff?.modelRequestSchema ?? handoffParamsSchema,
+    abortPolicy: resolveAbortPolicy(opts.abortPolicy),
+    repeatableConfirmationActions,
     boundedChoices,
     boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
     // Requires the handoff by construction — the repeat path escalates into it.

@@ -53,8 +53,10 @@ export const requestBoundedChoiceControl: ControlAction = {
       .describe(
         "Request one configured, nonterminal caller choice as the ONLY step. " +
           "The engine records it without clearing or executing any pending confirmation/OTP/match. " +
-          "After the tool succeeds, speak the host prompt's fixed choice. Never call this twice; " +
-          "the engine applies the configured repeat fallback.\n" +
+          "After success, speak a returned `read_back` verbatim when present; otherwise use the " +
+          "host prompt's fixed choice. Call whenever the configured semantic condition applies; " +
+          "the engine owns first-versus-repeat detection and automatically applies the configured " +
+          "repeat fallback.\n" +
           choiceIndex,
       );
   },
@@ -138,6 +140,7 @@ export const requestBoundedChoiceControl: ControlAction = {
           : {}),
       }),
     );
+    const readBack = choice.renderRequest?.(state.view);
     const summary = `Bounded choice "${name}" is now awaiting the caller's selection.`;
     return {
       entry: {
@@ -147,6 +150,9 @@ export const requestBoundedChoiceControl: ControlAction = {
         choice: name,
         choice_requested: true,
         selections: [...choice.selections],
+        ...(typeof readBack === "string" && readBack.length > 0
+          ? { read_back: readBack }
+          : {}),
       },
       failed: false,
     };
@@ -181,8 +187,9 @@ export const resolveBoundedChoiceControl: ControlAction = {
       })
       .describe(
         "Resolve the currently pending bounded choice as the ONLY step. This is a meta-choice: " +
-          "it never confirms or executes a suspended domain action. After success, return to the " +
-          "pending process question described by the host prompt.",
+          "it never confirms or executes a suspended domain action. After success, speak a returned " +
+          "`read_back` verbatim when present; otherwise return to the pending process question " +
+          "described by the host prompt.",
       );
   },
   descriptionLine: () =>
@@ -252,6 +259,7 @@ export const resolveBoundedChoiceControl: ControlAction = {
         resolved_on_caller_turn_id: ctx.currentCallerTurnId,
       }),
     );
+    const readBack = configured.renderResolution?.(selection, state.view);
     const summary = `Bounded choice "${name}" resolved as "${selection}"; no domain action was confirmed or executed.`;
     return {
       entry: {
@@ -261,6 +269,9 @@ export const resolveBoundedChoiceControl: ControlAction = {
         choice: name,
         selection,
         choice_resolved: true,
+        ...(typeof readBack === "string" && readBack.length > 0
+          ? { read_back: readBack }
+          : {}),
       },
       failed: false,
     };

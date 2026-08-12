@@ -11,6 +11,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.25.0] — 2026-08-12
+
+Ships **agent-step library 2.5.0** (from 2.4.0): the confirmation gate hardens and configuration
+keeps absorbing prompt prose. Six capabilities, all opt-in; without adoption the model-facing
+surface is byte-identical to 2.4.0, and no state-schema change is needed (no new slot). Downstream
+projects catch up with `/pull-library`.
+
+### Added
+- **Library 2.5.0** — `repeat_pending_confirmation` + `ConfirmationOpts.repeatReadBack` (the pending
+  gate persists its exact read-back rendering; a "pardon?" turn returns the stored bytes without
+  consent, re-render, or attempt spend, and the repeat advances the gate's presentation-turn
+  provenance), `ConfirmationOpts.refuseProposal` (propose-time state-aware refusal with
+  `invalid_params`-grade non-burning semantics), `BuildAgentStepToolOptions.abortPolicy` (abort as an
+  engine-enforced in-domain transition: leads the batch, real target, declared followers),
+  `HandoffSpec.modelRequestSchema` (typed terminal reason/context routes as configuration the engine
+  renders AND parses), `BoundedChoiceDef.renderRequest` / `renderResolution` (engine-rendered choice
+  offer/resume riding results as `read_back`), `choice_consumed` transcript visibility plus the
+  leading-resolve batch admission. Library suite 207 → 236.
+- **New reference `agent-design-principles.md`** — how a well-formed host agent divides
+  responsibility around the engine: twelve measured principles (mechanism-in-engine, language-only
+  prompt, transcript-only state, discovery-by-calling, engine-rendered consequence text, one prompt
+  authority per behaviour, configuration-owned payloads, safe-shape admission, engine-bounded
+  consequences, substance-not-phrasing fixtures, layered live measurement) and the five-question
+  port-mode audit. Indexed in the create-tool SKILL and wired into the workflow's prompt step.
+- **Migration `2.4.0-to-2.5.0.md`** — additive; verify-only transform (including the golden
+  re-verification note for projects that carried pre-release drafts of these capabilities) plus
+  per-capability adoption follow-ups.
+
+### Changed
+- `config.ts.template` / `tool-index.ts.template` comment blocks and the create-tool workflow teach
+  the new opts (`repeatReadBack`, `refuseProposal`, `abortPolicy`, `modelRequestSchema`, the choice
+  renderers); the workflow's verification step now expects 236 library tests.
+
 ## [0.24.0] — 2026-08-11
 
 Ships **agent-step library 2.4.0** (from 2.3.0): `deflect_aside`, the trigger-happy-handoff damper.

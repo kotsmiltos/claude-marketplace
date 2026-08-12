@@ -1029,6 +1029,260 @@ test("phase-2: abort_pending_input in a multi-step batch clears + allows next st
   assert.equal(flow!.name, "flow_b");
 });
 
+test("abortPolicy requires active state and one allow-listed follower", async () => {
+  const { opts, calls } = makeFlowOpts();
+  const policyOpts = {
+    ...opts,
+    abortPolicy: {
+      requireActive: true,
+      allowStandalone: false,
+      allowedFollowers: ["open_flow_b"] as const,
+    },
+  };
+
+  const inactive = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_b", params: {} },
+    ],
+    {} as S,
+  );
+  assert.equal(inactive.body.results[0].error, "abort_requires_active_input");
+  assert.equal(calls.openB, 0);
+
+  const active: S = {
+    currentFlow: { name: "flow_a", data: { challengeId: "ch-1" } },
+    awaitingInput: {
+      kind: "otp",
+      for_action: "validate_a_otp",
+      flow_ref: "flow_a",
+    },
+  };
+  const standalone = await runSteps(
+    policyOpts,
+    [{ action: "abort_pending_input", params: {} }],
+    active,
+  );
+  assert.equal(standalone.body.results[0].error, "abort_follower_required");
+
+  const forbidden = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_a", params: {} },
+    ],
+    active,
+  );
+  assert.equal(forbidden.body.results[0].error, "abort_follower_not_allowed");
+  assert.equal(calls.openA, 0);
+
+  const allowed = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_b", params: {} },
+    ],
+    active,
+  );
+  assert.equal(allowed.body.failed_at, undefined);
+  assert.equal(allowed.body.results[0].ok, true);
+  assert.equal(allowed.body.results[1].ok, true);
+  assert.equal(calls.openB, 1);
+  assert.equal(allowed.committed.currentFlow?.name, "flow_b");
+});
+
+test("abortPolicy pending-target allow-list refuses the whole batch before abort commits", async () => {
+  const { opts, calls } = makeFlowOpts();
+  const policyOpts = {
+    ...opts,
+    abortPolicy: {
+      requireActive: true,
+      allowStandalone: false,
+      allowedPendingTargets: ["validate_a_otp"] as const,
+      allowedFollowers: ["open_flow_b"] as const,
+    },
+  };
+  const wrongTarget: S = {
+    currentFlow: { name: "flow_a", data: { challengeId: "ch-1" } },
+    awaitingInput: {
+      kind: "otp",
+      for_action: "open_flow_a",
+      flow_ref: "flow_a",
+    },
+  };
+
+  const refused = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_b", params: {} },
+    ],
+    wrongTarget,
+  );
+  assert.equal(
+    refused.body.results[0].error,
+    "abort_pending_target_not_allowed",
+  );
+  assert.deepEqual(refused.body.results[0].awaiting, {
+    kind: "otp",
+    for_action: "open_flow_a",
+  });
+  assert.deepEqual(refused.committed, {});
+  assert.equal(calls.openB, 0);
+
+  const flowOnly = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_b", params: {} },
+    ],
+    { currentFlow: { name: "flow_a", data: {} } } as S,
+  );
+  assert.equal(
+    flowOnly.body.results[0].error,
+    "abort_pending_target_not_allowed",
+  );
+  assert.deepEqual(flowOnly.committed, {});
+  assert.equal(calls.openB, 0);
+
+  const allowedTarget: S = {
+    currentFlow: { name: "flow_a", data: { challengeId: "ch-1" } },
+    awaitingInput: {
+      kind: "otp",
+      for_action: "validate_a_otp",
+      flow_ref: "flow_a",
+    },
+  };
+  const allowed = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_b", params: {} },
+    ],
+    allowedTarget,
+  );
+  assert.equal(allowed.body.failed_at, undefined);
+  assert.equal(allowed.body.results[0].ok, true);
+  assert.deepEqual(allowed.body.results[0].aborted_awaiting, {
+    kind: "otp",
+    for_action: "validate_a_otp",
+  });
+  assert.equal(allowed.body.results[1].ok, true);
+  assert.equal(calls.openB, 1);
+});
+
+test("abortPolicy enforces abort-first and a maximum of one follower", async () => {
+  const { opts, calls } = makeFlowOpts();
+  const policyOpts = {
+    ...opts,
+    abortPolicy: {
+      allowStandalone: true,
+      allowedFollowers: ["open_flow_a", "open_flow_b"] as const,
+    },
+  };
+
+  const notFirst = await runSteps(
+    policyOpts,
+    [
+      { action: "finish_flow_a", params: {} },
+      { action: "abort_pending_input", params: {} },
+    ],
+    {} as S,
+  );
+  assert.equal(notFirst.body.results[0].error, "abort_must_be_first");
+
+  const tooMany = await runSteps(
+    policyOpts,
+    [
+      { action: "abort_pending_input", params: {} },
+      { action: "open_flow_a", params: {} },
+      { action: "open_flow_b", params: {} },
+    ],
+    {} as S,
+  );
+  assert.equal(tooMany.body.results[0].error, "abort_too_many_followers");
+  assert.deepEqual(calls, { openA: 0, validateA: 0, finishA: 0, openB: 0 });
+});
+
+test("abortPolicy is construction-validated and reflected in the model surface", () => {
+  const { opts } = makeFlowOpts();
+  assert.throws(
+    () =>
+      buildAgentStepTool({
+        ...opts,
+        abortPolicy: {
+          allowStandalone: false,
+          allowedFollowers: [] as const,
+        },
+      }),
+    /requires at least one allowedFollower/,
+  );
+  assert.throws(
+    () =>
+      buildAgentStepTool({
+        ...opts,
+        abortPolicy: {
+          // Runtime defense for untyped JavaScript/config input.
+          allowedFollowers: ["missing_action"],
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+    /unknown allowedFollower "missing_action"/,
+  );
+  assert.throws(
+    () =>
+      buildAgentStepTool({
+        ...opts,
+        abortPolicy: {
+          allowedPendingTargets: [] as const,
+        },
+      }),
+    /allowedPendingTargets must not be empty/,
+  );
+  assert.throws(
+    () =>
+      buildAgentStepTool({
+        ...opts,
+        abortPolicy: {
+          // Runtime defense for untyped JavaScript/config input.
+          allowedPendingTargets: ["missing_action"],
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+    /unknown allowedPendingTarget "missing_action"/,
+  );
+  assert.throws(
+    () =>
+      buildAgentStepTool({
+        ...opts,
+        abortPolicy: {
+          // Runtime defense for untyped JavaScript/config input.
+          allowedPendingTargets: ["validate_a_otp", "validate_a_otp"],
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+    /allowedPendingTargets contains duplicate actions/,
+  );
+
+  const tool = buildAgentStepTool({
+    ...opts,
+    abortPolicy: {
+      requireActive: true,
+      allowStandalone: false,
+      allowedPendingTargets: ["validate_a_otp"] as const,
+      allowedFollowers: ["open_flow_b"] as const,
+    },
+  });
+  assert.match(tool.description, /first, followed by exactly one allowed domain action/);
+  const wire = JSON.stringify(tool.schema);
+  assert.match(wire, /must be the first step/);
+  assert.match(wire, /open_flow_b/);
+  assert.match(wire, /must currently target/);
+  assert.match(wire, /validate_a_otp/);
+  assert.match(wire, /active flow or pending bounded choice alone does not qualify/);
+});
+
 test("phase-2: in-batch threading — open_flow_a + validate_a_otp in one batch", async () => {
   const { opts, calls } = makeFlowOpts({ validateOutcome: "ok" });
   // Step 0 opens the flow and seeds awaitingInput. Step 1 then sees it via
@@ -2576,4 +2830,65 @@ test("readBack: NOT rendered on the executing re-call — it is a proposal-only 
   const r = executed.body.results[0] as { needs_confirmation?: boolean; read_back?: string };
   assert.notEqual(r.needs_confirmation, true, "the same params execute on a later call");
   assert.equal(r.read_back, undefined);
+});
+
+// ─── ConfirmationOpts.refuseProposal ─────────────────────────────────────── //
+// Propose-time, state-aware refusal: a schema-valid proposal may still be
+// impossible given state (the canonical case: an empty capture probing for
+// carried identity that does not exist). The refusal answers on the FIRST
+// call — no gate is stored, no attempt is spent.
+
+function makeRefuseOpts(
+  refuseProposal: (
+    params: Record<string, unknown>,
+    state: unknown,
+  ) => ({ summary: string; error: string } & Record<string, unknown>) | null,
+): BuildAgentStepToolOptions<S, string, string, typeof baseSelectors> {
+  const base = makeOpts();
+  const cfg = makeConfig();
+  cfg.actions.change_status.controller!.requiresConfirmation = {
+    maxAttempts: 3,
+    refuseProposal,
+  };
+  return { ...base.opts, config: cfg };
+}
+
+test("refuseProposal: a returned body refuses on the FIRST call — no gate, no attempt spent", async () => {
+  const opts = makeRefuseOpts(() => ({
+    summary: "nothing to confirm",
+    error: "no_afm_source",
+  }));
+  const { body, committed } = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const r = body.results[0] as {
+    ok: boolean;
+    error?: string;
+    needs_confirmation?: boolean;
+  };
+  assert.equal(r.ok, false);
+  assert.equal(r.error, "no_afm_source");
+  assert.ok(!("needs_confirmation" in r), "a refused probe must not propose");
+  assert.equal(committed.awaitingInput ?? null, null, "no gate may be stored");
+});
+
+test("refuseProposal: null proceeds to a normal proposal; it sees parsed params and the state view", async () => {
+  let seenParams: unknown;
+  let seenState: unknown;
+  const opts = makeRefuseOpts((params, state) => {
+    seenParams = params;
+    seenState = state;
+    return null;
+  });
+  const { body } = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const r = body.results[0] as { needs_confirmation?: boolean };
+  assert.equal(r.needs_confirmation, true, "a null refusal proposes normally");
+  assert.deepEqual(seenParams, { newStatus: "lost" });
+  assert.deepEqual((seenState as S).customer, { code: "C1" });
 });

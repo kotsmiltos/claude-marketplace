@@ -16,6 +16,7 @@
 //      there, wired after the tool node behind the `handoffRequested` edge
 //      predicate.
 
+import type { z } from "zod";
 import { HandoffRequestSchema, type HandoffRequest, type LibraryManagedSlots } from "../state.js";
 
 /** Reserved action name auto-injected by the runner when
@@ -28,8 +29,9 @@ export const HANDOFF_ACTION = "request_handoff";
  *  library-managed slot already claims that name.) */
 export const HANDOFF_NODE = "resolve_handoff";
 
-/** Params the LLM provides to `request_handoff` — the handoff-slot schema
- *  itself. The action is a pure state transition with no external I/O. */
+/** Base/default params schema for `request_handoff`, and the trusted schema
+ * for the handoff state/effect contract. A host may narrow only the model
+ * actuator with `HandoffSpec.modelRequestSchema`; internal effects stay here. */
 export const handoffParamsSchema = HandoffRequestSchema;
 
 /** Handback signal emitted as `handoff_type` for each handoff reason — the
@@ -93,6 +95,14 @@ export interface HandoffSpec<T> {
    *  metadata for the receiving system; the platform composes the spoken
    *  closing"), or the schema contradicts the host prompt. */
   actionDescription?: string;
+  /** Optional narrower schema for the MODEL-FACING `request_handoff` params.
+   * It is used both to generate the wire schema and to parse that control at
+   * runtime, so exact reason/context route pairs can be configuration rather
+   * than prompt prose. Its output must still be a `HandoffRequest`.
+   *
+   * This does not replace `HandoffRequestSchema`: the library-managed state
+   * slot and trusted executor/config effects retain the base schema. */
+  modelRequestSchema?: z.ZodType<HandoffRequest>;
   /** The fixed envelope content for off_topic terminate mode — also the
    *  fallback when a delegate run fails. This is what the customer
    *  sees/hears. (completed / abandon don't use it: they speak the

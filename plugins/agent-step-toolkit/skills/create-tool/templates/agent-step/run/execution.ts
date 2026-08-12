@@ -157,21 +157,26 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     //     paths). A refused or malformed step must NOT burn the one-shot
     //     choice: `invalid_params` on a bad capture sends the model back to
     //     the caller with the choice still pending.
-    const consumePendingChoice = (): void => {
-      if (!choiceEnabled) return;
+    const consumePendingChoice = (): { choice: string; selection: "domain_input" } | null => {
+      if (!choiceEnabled) return null;
       const pendingChoice = getBoundedChoice(st.view);
-      if (pendingChoice?.status === "pending") {
-        // Preserve the resolved marker (no turn id — the caller's input
-        // itself is the resolution) so a later unsupported clarification
-        // cannot reopen the one-shot choice.
-        st.apply(
-          setBoundedChoicePatch<T>({
-            name: pendingChoice.name,
-            status: "resolved",
-            selection: "domain_input",
-          }),
-        );
-      }
+      if (pendingChoice?.status !== "pending") return null;
+      // Preserve the resolved marker (no turn id — the caller's input
+      // itself is the resolution) so a later unsupported clarification
+      // cannot reopen the one-shot choice.
+      st.apply(
+        setBoundedChoicePatch<T>({
+          name: pendingChoice.name,
+          status: "resolved",
+          selection: "domain_input",
+        }),
+      );
+      // The transition must be VISIBLE in the step result (`choice_consumed`):
+      // the transcript is the model's only authority for the choice status —
+      // engine state is never injected into the prompt — so a silent
+      // consumption would leave the model believing the choice is still
+      // pending.
+      return { choice: pendingChoice.name, selection: "domain_input" };
     };
 
     // ─── 2. Library-managed flow prereq — BEFORE confirm-mode resolution. A
@@ -231,20 +236,31 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         });
         break;
       }
+      // Propose-time state-aware refusal (ConfirmationOpts.refuseProposal):
+      // a schema-valid proposal may still be impossible given state (e.g. an
+      // empty capture probing for carried identity that does not exist). It
+      // refuses BEFORE anything commits — no gate, no attempt spent, and the
+      // pending bounded choice stays unburnt, exactly like `invalid_params`.
+      const proposeRefusal = action.confirmation?.refuseProposal(
+        params as Record<string, unknown>,
+        st.view,
+      );
+      if (proposeRefusal) {
+        fail({ action: step.action, ok: false, ...proposeRefusal });
+        break;
+      }
       // The step was accepted (params parsed) — the caller's input, not a
       // malformed capture, is what consumed any pending meta-choice.
-      consumePendingChoice();
+      const consumedChoice = consumePendingChoice();
       const maxAttempts =
         action.confirmation?.maxAttempts ?? CONFIRMATION_DEFAULTS.maxAttempts;
       const attemptsLeft = step.proposeAttemptsLeft ?? maxAttempts;
-      st.apply(
-        setConfirmationPatch<T>(
-          step.action,
-          params as Record<string, unknown>,
-          attemptsLeft,
-          maxAttempts,
-          currentCallerTurnId,
-        ),
+      const confirmationPatch = setConfirmationPatch<T>(
+        step.action,
+        params as Record<string, unknown>,
+        attemptsLeft,
+        maxAttempts,
+        currentCallerTurnId,
       );
       const summary =
         step.confirmMode === "propose"
@@ -256,7 +272,23 @@ export async function executeSteps<T extends LibraryManagedSlots>(
       // owns reporting them back; the host owns only the lexicon.
       const readBack = action.confirmation?.readBack(
         params as Record<string, unknown>,
-        st.view,
+        st.preview(confirmationPatch),
+      );
+      const hasReadBack = typeof readBack === "string" && readBack.length > 0;
+      // Commit exactly once. When repetition is enabled, persist the
+      // already-rendered bytes on the gate; the repeat control never calls the
+      // renderer again against potentially drifted host state.
+      st.apply(
+        action.confirmation?.repeatReadBack && hasReadBack
+          ? setConfirmationPatch<T>(
+              step.action,
+              params as Record<string, unknown>,
+              attemptsLeft,
+              maxAttempts,
+              currentCallerTurnId,
+              readBack,
+            )
+          : confirmationPatch,
       );
       results.push({
         action: step.action,
@@ -264,9 +296,8 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         summary,
         needs_confirmation: true,
         proposed_params: params as object,
-        ...(typeof readBack === "string" && readBack.length > 0
-          ? { read_back: readBack }
-          : {}),
+        ...(hasReadBack ? { read_back: readBack } : {}),
+        ...(consumedChoice ? { choice_consumed: consumedChoice } : {}),
         attempts_left: attemptsLeft,
       });
       lastSummary = summary;
@@ -360,7 +391,7 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     }
     // The step was accepted — only now does it count as the caller supplying
     // the domain input a pending meta-choice was suspended over.
-    consumePendingChoice();
+    const consumedChoice = consumePendingChoice();
 
     // ─── 11. Pageable self-paginate cache hit: re-page from the
     //     library-managed `pagedRead` slot WITHOUT calling the executor.
@@ -431,7 +462,12 @@ export async function executeSteps<T extends LibraryManagedSlots>(
       pageCachePatch = outcome.cachePatch as Partial<T> | null;
     }
 
-    results.push({ action: step.action, ok: result.ok, ...entryBody });
+    results.push({
+      action: step.action,
+      ok: result.ok,
+      ...(consumedChoice ? { choice_consumed: consumedChoice } : {}),
+      ...entryBody,
+    });
 
     // ─── a. invalidatesOnChange cascade — BEFORE stateUpdate, so the
     //     executor's own re-writes of the same downstream slots win over the

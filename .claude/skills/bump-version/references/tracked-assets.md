@@ -26,14 +26,14 @@ Top level (`skills/create-tool/templates/agent-step/`):
 - `runner.ts` — the thin public entry points (`buildAgentStepTool`, `runSteps`)
 - `messages.ts` — runner-emitted system `summary` strings (neutral English defaults; host-overridable via `BuildAgentStepToolOptions.messages`)
 - `define-config.ts`, `index.ts` (the public surface), `paginate.ts`, `capture.ts` (caller-digit capture primitives)
-- Tests: `runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `deflect-aside.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
+- Tests: `runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `deflect-aside.test.ts`, `repeat-confirmation.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
 - `VERSION` — rewrite to the new version string.
 
 Phase modules (internal layout; hosts import only from `index.ts`):
 - `compile/` — `validate.ts`, `plan.ts` (`BuildAgentStepToolOptions`), `schema.ts`, `describe.ts`, `state-schema.ts`
 - `run/` — `admission.ts`, `planning.ts`, `execution.ts`, `finalize.ts`, `batch-state.ts`, `value-equal.ts`
 - `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (also owns `resolveCallerTurnId`), `guard-latch.ts` (host guard latch over the `guardTurn` slot)
-- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`
+- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`, `repeat-confirmation.ts`
 - `handoff/` — `contract.ts`, `node.ts`, `delegate-client.ts`
 
 A source repo may carry an `UPSTREAM.md` (its own porting note) — do NOT copy it into the toolkit.
@@ -84,6 +84,7 @@ new template + a new import line in `tool-index.ts.template`).
 - `skills/create-tool/references/tool-directory-layout.md` — canonical `src/tools/<name>/` layout, per-file responsibility, naming rules, file-creation order, imports convention. Update when files are added/removed per action or the signatures in the per-file notes change.
 - `skills/create-tool/references/executor-patterns.md` — read vs mutation executor shapes; update when the executor signature or state-update shape changes.
 - `skills/create-tool/references/state-and-prompt-integration.md` — how `src/state.ts` / `src/prompt.ts` / `src/tools/index.ts` are patched; update if state wiring changes.
+- `skills/create-tool/references/agent-design-principles.md` — the host-architecture doctrine (mechanism-in-engine, prompt purity, transcript-only state, engine-rendered consequence text, …). Update when a library change adds/retires a mechanism the principles cite (e.g. a new control, renderer, or refusal hook).
 - `skills/create-tool/references/data-analysis-pattern.md` — the analyze-action recipe; embeds the executor/selector/verifier shapes and the `DatasetSource` wiring.
 - (Other references — `identity-patterns.md`, `read-tool-patterns.md`, `input-formats.md`, `project-bootstrap-structure.md`, `sandbox-contract.md`, `streaming-and-channel-contract.md` — update only if their examples encode a changed signature; `sandbox-contract.md` and `streaming-and-channel-contract.md` describe the local sandbox service and the channel middleware wire contract respectively, not the library, so a library bump rarely touches them.)
 

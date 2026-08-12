@@ -35,6 +35,16 @@ import type { HandoffRequest } from "../state.js";
 export interface BoundedChoiceDef {
   description: string;
   selections: readonly string[];
+  /** Render the exact caller-audible offer after the runner records this
+   *  choice as pending. A non-empty result is exposed as `read_back` on the
+   *  control result for the model to speak verbatim. The callback receives
+   *  the current in-batch state view, including the newly pending choice and
+   *  any suspended domain interaction underneath it. */
+  renderRequest?: (state: unknown) => string | undefined;
+  /** Render the exact caller-audible resume after the runner records a
+   *  nonterminal selection. A non-empty result is exposed as `read_back` on
+   *  the control result for the model to speak verbatim. */
+  renderResolution?: (selection: string, state: unknown) => string | undefined;
   /** Domain actions which may consume a pending choice because the caller
    *  supplied the exact detail the suspended question requested. Every other
    *  domain action remains locked until `resolve_bounded_choice` runs. */

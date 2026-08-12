@@ -166,6 +166,13 @@ export interface ActionDef<PrereqName extends string> {
 export interface ConfirmationOpts {
   maxAttempts?: number;
   lockdown?: boolean;
+  /** Persist a non-empty `readBack` rendering on the pending confirmation and
+   *  inject the built-in `repeat_pending_confirmation` control. The control
+   *  may return those exact stored bytes on a later caller turn without
+   *  confirming, executing, re-rendering, or spending an attempt. Default
+   *  `false`; enabling it without a non-empty rendering leaves that proposal
+   *  ineligible for repetition. */
+  repeatReadBack?: boolean;
   /** Render what the runner ACTUALLY recorded, for the model to speak back to
    *  the caller verbatim. Called when a proposal is stored; a non-empty return
    *  rides on the proposal body as `read_back` beside `proposed_params`.
@@ -185,6 +192,22 @@ export interface ConfirmationOpts {
    *  and threading one ripples through `ControllerHooks`/`ActionDef`; hosts cast
    *  their own state, exactly as executors do with their slices. */
   readBack?: (params: Record<string, unknown>, state: unknown) => string | undefined;
+  /** Propose-time, state-aware refusal. Runs on the propose/re-propose path
+   *  AFTER the params parsed and BEFORE anything is committed — no gate is
+   *  stored, no attempt is spent, and a pending bounded choice is NOT
+   *  consumed (the same non-burning semantics as `invalid_params`). Return a
+   *  result body (`summary` + `error`, plus any extra fields) to refuse the
+   *  proposal; return null/undefined to proceed.
+   *
+   *  For proposals whose validity depends on STATE, not shape: e.g. an empty
+   *  capture that proposes consuming identity carried from earlier in the
+   *  call — with nothing carried, the gate must answer immediately instead of
+   *  asking the caller to confirm a value that does not exist. Same
+   *  non-generic state contract as `readBack`. */
+  refuseProposal?: (
+    params: Record<string, unknown>,
+    state: unknown,
+  ) => ({ summary: string; error: string } & Record<string, unknown>) | null | undefined;
 }
 
 /** Per-action behavioural opts coordinated by the runner. Covers

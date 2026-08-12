@@ -24,6 +24,7 @@ export { defineConfig } from "./define-config.js";
 export {
   buildAgentStepTool,
   runSteps,
+  REPEAT_PENDING_CONFIRMATION_ACTION,
   REQUEST_BOUNDED_CHOICE_ACTION,
   RESOLVE_BOUNDED_CHOICE_ACTION,
 } from "./runner.js";
@@ -32,6 +33,7 @@ export type {
   RunResult,
   StateSchemaLike,
 } from "./runner.js";
+export type { AbortPolicy } from "./controls/contract.js";
 
 // The one-shot conversational-choice overlay: authoring types live with the
 // policy (interaction/bounded-choice.ts); the two controls are auto-injected

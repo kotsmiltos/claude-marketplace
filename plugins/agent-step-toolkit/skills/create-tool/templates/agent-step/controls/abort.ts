@@ -25,17 +25,76 @@ import {
 /** Reserved control name — always reserved, whatever the activation. */
 export const ABORT_ACTION = "abort_pending_input";
 
+function followerText(followers: readonly string[] | null): string {
+  if (followers === null) return "one declared domain action";
+  if (followers.length === 0) return "no domain action";
+  return followers.map((name) => `\`${name}\``).join(", ");
+}
+
+function pendingTargetText(targets: readonly string[]): string {
+  return targets.map((name) => `\`${name}\``).join(", ");
+}
+
+function policyDescription(ctx: Parameters<ControlAction["schemaVariant"]>[0]): string {
+  const policy = ctx.abortPolicy;
+  if (!policy) {
+    return (
+      "Abort whatever the customer is currently being asked for (confirmation, OTP, match, or pending bounded choice) and drop any active multi-turn flow. " +
+      "Idempotent — no-op when nothing is pending. Use when the customer pivots away from or explicitly cancels the in-progress flow."
+    );
+  }
+
+  const activeRule =
+    policy.allowedPendingTargets !== null
+      ? `Pending input must currently target ${pendingTargetText(policy.allowedPendingTargets)}; an active flow or pending bounded choice alone does not qualify.`
+      : policy.requireActive
+        ? "A confirmation/OTP/match, pending bounded choice, or multi-turn flow must currently be active."
+        : "It is idempotent when nothing is active.";
+  const allowed = followerText(policy.allowedFollowers);
+  let batchRule: string;
+  if (policy.allowStandalone) {
+    batchRule =
+      policy.allowedFollowers?.length === 0
+        ? "It must be the only step."
+        : `It may be the only step, or be followed by exactly ${allowed}.`;
+  } else {
+    batchRule = `It cannot stand alone and must be followed by exactly ${allowed}.`;
+  }
+  return (
+    "Abort the currently pending confirmation/OTP/match or bounded choice and drop any active multi-turn flow. " +
+    `It must be the first step. ${activeRule} ${batchRule}`
+  );
+}
+
+function policyDescriptionLine(
+  ctx: Parameters<ControlAction["descriptionLine"]>[0],
+): string {
+  const policy = ctx.abortPolicy;
+  if (!policy) {
+    return `- \`${ABORT_ACTION}\`: abort pending confirmation/OTP/match/choice input and drop the active flow (idempotent).`;
+  }
+  const active =
+    policy.allowedPendingTargets !== null
+      ? `; requires pending target ${pendingTargetText(policy.allowedPendingTargets)}`
+      : policy.requireActive
+        ? "; requires active input/flow"
+        : "";
+  const batch = policy.allowStandalone
+    ? policy.allowedFollowers?.length === 0
+      ? "sole step"
+      : "sole step or first before exactly one allowed domain action"
+    : "first, followed by exactly one allowed domain action";
+  return `- \`${ABORT_ACTION}\`: abort pending input/flow (${batch}${active}).`;
+}
+
 export const abortControl: ControlAction = {
   name: ABORT_ACTION,
   activeWhen: (ctx) => ctx.hasLifecycleOpts || ctx.boundedChoicesEnabled,
-  schemaVariant: () =>
+  schemaVariant: (ctx) =>
     z
       .object({ action: z.literal(ABORT_ACTION), params: z.object({}) })
-      .describe(
-        "Abort whatever the customer is currently being asked for (confirmation, OTP, match, or bounded choice) and drop any active multi-turn flow. Idempotent — no-op when nothing is pending. Use when the customer pivots away from or explicitly cancels the in-progress flow.",
-      ),
-  descriptionLine: () =>
-    `- \`${ABORT_ACTION}\`: abort pending confirmation/OTP/match/choice input and drop the active flow (idempotent).`,
+      .describe(policyDescription(ctx)),
+  descriptionLine: policyDescriptionLine,
   allowedDuringGateLockdown: true,
   allowedDuringChoicePending: true,
   sameTurnEscape: "sole",
@@ -50,10 +109,16 @@ export const abortControl: ControlAction = {
     const priorChoice = ctx.activation.boundedChoicesEnabled
       ? getBoundedChoice(state.view)
       : null;
+    // A resolved choice is a persistent one-shot marker, not pending caller
+    // input. Abort may clear only a choice which is still awaiting selection;
+    // preserving the resolved marker keeps repeat fallback effective after an
+    // in-flow correction/reselection.
+    const priorPendingChoice =
+      priorChoice?.status === "pending" ? priorChoice : null;
     const hadSomething =
-      priorAwaiting != null || priorFlow != null || priorChoice != null;
+      priorAwaiting != null || priorFlow != null || priorPendingChoice != null;
     if (hadSomething) {
-      state.apply(clearInteractionPatch<T>(ctx.activation.boundedChoicesEnabled));
+      state.apply(clearInteractionPatch<T>(priorPendingChoice != null));
     }
     const entry: StepResult = {
       action: ABORT_ACTION,
@@ -69,8 +134,8 @@ export const abortControl: ControlAction = {
     if (priorFlow) {
       entry.aborted_flow = priorFlow.name;
     }
-    if (priorChoice) {
-      entry.aborted_choice = priorChoice.name;
+    if (priorPendingChoice) {
+      entry.aborted_choice = priorPendingChoice.name;
     }
     return { entry, failed: false };
   },

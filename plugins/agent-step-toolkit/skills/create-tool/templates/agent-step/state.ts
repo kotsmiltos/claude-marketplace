@@ -49,6 +49,10 @@ export const AwaitingInputSchema = z.discriminatedUnion("kind", [
      *  consumers without message ids), in which case the same-turn guard is
      *  deliberately unavailable rather than guessing. */
     proposed_on_caller_turn_id: z.string().min(1).optional(),
+    /** Exact caller-audible rendering persisted only when the owning action
+     *  opts into repeatable read-back. The repeat control returns these stored
+     *  bytes; it never reconstructs the recap from params or current state. */
+    read_back: z.string().min(1).optional(),
   }),
   z.object({
     kind: z.literal("otp"),
