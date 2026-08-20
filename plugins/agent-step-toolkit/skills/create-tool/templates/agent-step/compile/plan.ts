@@ -14,10 +14,10 @@ import { z } from "zod";
 import type {
   ActionDef,
   AgentStepConfig,
-  ConfirmationOpts,
   ControllerHooks,
+  DictationAsk,
   ExecutorRegistry,
-  ExecutorResult,
+  VerdictDef,
   Selector,
   VerifierRegistry,
 } from "../types.js";
@@ -26,23 +26,20 @@ import type { SystemMessages } from "../messages.js";
 import { resolveSystemMessages } from "../messages.js";
 import { resolvePageable, type ResolvedPageable } from "../paginate.js";
 import {
-  deflectAsideActionDescription,
-  deflectAsideEnabled,
-  handoffParamsSchema,
   type HandoffSpec,
 } from "../handoff/contract.js";
-import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
 import {
   normalizeConfirmation,
-  repeatReadBackEnabled,
+  type NormalizedConfirmation,
 } from "../interaction/confirmation.js";
 import {
-  resolveAbortPolicy,
   type AbortPolicy,
   type ControlAction,
   type ControlActivation,
 } from "../controls/contract.js";
 import { activeControls } from "../controls/registry.js";
+import { composeActionDescription } from "./action-describe.js";
+import { buildControlActivation } from "./activation.js";
 import {
   buildMergerFromStateSchema,
   type PatchMerger,
@@ -84,12 +81,13 @@ export interface BuildAgentStepToolOptions<
   /** Optionally narrow the built-in abort control to an engine-enforced
    * in-domain transition. Omit for the legacy permissive/idempotent behavior. */
   abortPolicy?: AbortPolicy<Extract<keyof Selectors, string>>;
-  /** Opt into the library's one-shot bounded-choice overlay. This injects the
-   *  `request_bounded_choice` and `resolve_bounded_choice` controls without
-   *  adding domain actions or replacing a pending confirmation/OTP/match.
-   *  The host prompt decides WHEN the configured choice applies; the runner
-   *  owns its persisted pending/resolved state and repeat fallback. */
-  boundedChoices?: BoundedChoiceRegistry;
+  /** Opt into engine-owned escalation ladders (the `note_refusal` control):
+   *  the prompt's "once" rules — explain a refusal once, suggest the lookup
+   *  once — counted by the engine in the task-scoped `spentLadders` latch,
+   *  with exhaustion escalating atomically into each ladder's configured
+   *  handoff. Requires `handoff`. The host prompt decides only the semantic
+   *  classification (declined/unavailable vs question vs cancellation). */
+  ladders?: import("../controls/note-refusal.js").LadderRegistry;
   /** Resolve a stable identity for the latest caller turn. Three protections
    *  key on it: bounded-choice resolution records it (fails closed without
    *  one), the choice's offered-this-turn lock compares against it, and the
@@ -140,7 +138,10 @@ export interface BuildAgentStepToolOptions<
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnySelector = (state: any) => unknown;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AnyExecutor = (params: unknown, state: any) => Promise<ExecutorResult<any>>;
+export type AnyExecutor = (
+  params: unknown,
+  state: any,
+) => Promise<import("../types.js").DeclaredExecutorResult<any>>;
 
 /** One action with every per-action derivation resolved. */
 export interface CompiledAction {
@@ -150,13 +151,22 @@ export interface CompiledAction {
   prereqs: string[];
   controller: ControllerHooks | undefined;
   /** Normalized confirmation opts, or null when not confirm-gated. */
-  confirmation: Required<ConfirmationOpts> | null;
+  confirmation: NormalizedConfirmation | null;
   /** Normalized pagination spec, or null when not pageable. */
   pageable: ResolvedPageable | null;
   /** The params schema actually validated — the declared schema, plus
    *  `page`/`pageSize` when the action is pageable. */
   effectiveSchema: z.ZodTypeAny;
   invalidatesOnChange: Record<string, string[]>;
+  /** Standing asks keyed by verdict-or-error code — `{}` when none declared.
+   *  Includes the asks merged from declared verdict rows. */
+  asks: Record<string, DictationAsk>;
+  /** Declared verdict rows for the declarative executor return shape —
+   *  `{}` when none declared. */
+  verdicts: Record<string, VerdictDef>;
+  /** Bound on consecutive malformed captures, or null when unbounded (the
+   *  default). See {@link import("../types.js").CaptureBouncePolicy}. */
+  captureBounces: import("../types.js").CaptureBouncePolicy | null;
 }
 
 export interface CompiledPlan<T extends LibraryManagedSlots> {
@@ -206,27 +216,6 @@ function effectiveParamsSchema(action: ActionDef<string>): z.ZodTypeAny {
   return (schema as z.ZodObject<z.ZodRawShape>).extend(PAGE_PARAMS);
 }
 
-/** True if any action opts into a library-managed gate or flow lifecycle —
- *  activates the abort control. */
-function hasAnyLifecycleOpt(actions: Record<string, ActionDef<string>>): boolean {
-  for (const action of Object.values(actions)) {
-    const opt = action.controller;
-    if (!opt) continue;
-    if (
-      opt.requiresConfirmation ||
-      opt.requiresOtp ||
-      opt.issuesOtp ||
-      opt.startsFlow ||
-      opt.endsFlow ||
-      opt.requiresFlow ||
-      opt.requiresMatch ||
-      opt.startsMatchFor
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
 
 export function compilePlan<
   T extends LibraryManagedSlots,
@@ -238,26 +227,14 @@ export function compilePlan<
     throw new Error("agent-step: buildAgentStepTool requires `stateSchema`.");
   }
   const rawActions = opts.config.actions as Record<string, ActionDef<string>>;
-  const boundedChoices = opts.boundedChoices ?? {};
-  const repeatableConfirmationActions = Object.entries(rawActions)
-    .filter(([, action]) =>
-      repeatReadBackEnabled(action.controller?.requiresConfirmation),
-    )
-    .map(([name]) => name);
-  const activation: ControlActivation = {
-    hasLifecycleOpts: hasAnyLifecycleOpt(rawActions),
-    handoffEnabled: opts.handoff != null,
-    handoffActionDescription: opts.handoff?.actionDescription,
-    handoffModelRequestSchema:
-      opts.handoff?.modelRequestSchema ?? handoffParamsSchema,
-    abortPolicy: resolveAbortPolicy(opts.abortPolicy),
-    repeatableConfirmationActions,
-    boundedChoices,
-    boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
-    // Requires the handoff by construction — the repeat path escalates into it.
-    deflectAsideEnabled: deflectAsideEnabled(opts.handoff),
-    deflectAsideActionDescription: deflectAsideActionDescription(opts.handoff),
-  };
+  // ONE construction site for the activation (compile/activation.ts): every
+  // `xEnabled` flag is derived there, so plan and validate cannot fork.
+  const activation = buildControlActivation({
+    actions: rawActions,
+    handoff: opts.handoff,
+    abortPolicy: opts.abortPolicy,
+    ladders: opts.ladders,
+  });
   const controls = activeControls(activation);
   const controlNames = new Set(controls.map((c) => c.name));
   // The abort control executes as a graceful no-op even when inactive.
@@ -269,14 +246,24 @@ export function compilePlan<
     const def = rawActions[name];
     actions[name] = {
       name,
-      description: def.description,
+      // The schema variant's `.describe()` bytes: host semantic lead + the
+      // engine-derived mechanics tail (gate marker, glossed verdict index).
+      description: composeActionDescription(def),
       summary: def.summary,
       prereqs: def.prereqs,
       controller: def.controller,
-      confirmation: normalizeConfirmation(def.controller?.requiresConfirmation),
+      // The gate-contract context comes from the action itself, never the
+      // host spec — the composed contract cannot fork from the gate it rides.
+      confirmation: normalizeConfirmation(def.controller?.requiresConfirmation, {
+        action: name,
+        soleOnExecute: def.controller?.soleOnExecute === true,
+      }),
       pageable: resolvePageable(def.pageable),
       effectiveSchema: effectiveParamsSchema(def),
       invalidatesOnChange: def.invalidatesOnChange ?? {},
+      asks: { ...(def.asks ?? {}) },
+      verdicts: def.verdicts ?? {},
+      captureBounces: def.captureBounces ?? null,
     };
   }
 
@@ -285,9 +272,7 @@ export function compilePlan<
     toolLeadDescription: opts.config.tool.description,
     actions,
     actionOrder,
-    needsCallerTurnId:
-      activation.boundedChoicesEnabled ||
-      actionOrder.some((name) => actions[name].confirmation !== null),
+    needsCallerTurnId: actionOrder.some((name) => actions[name].confirmation !== null),
     selectors: opts.selectors as Record<string, AnySelector>,
     executors: opts.executors as Record<string, AnyExecutor>,
     verifiers: opts.verifiers,
@@ -300,6 +285,13 @@ export function compilePlan<
     backendFailureCodes: new Set<string>([
       "executor_error",
       ...(opts.backendFailureCodes ?? []),
+      // Derived from declared verdict rows: `backendFailure: true` marks the
+      // row's static `body.error` code (shape validated at construction).
+      ...actionOrder.flatMap((name) =>
+        Object.values(actions[name].verdicts)
+          .filter((row) => row.backendFailure)
+          .map((row) => row.body?.error as string),
+      ),
     ]),
     errorHandoffThreshold: opts.errorHandoffThreshold ?? ERROR_HANDOFF_THRESHOLD,
     onErrorThreshold: opts.onErrorThreshold,

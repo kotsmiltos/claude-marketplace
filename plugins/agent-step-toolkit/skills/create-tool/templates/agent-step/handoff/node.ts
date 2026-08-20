@@ -48,17 +48,15 @@ export function createHandoffNode<T extends LibraryManagedSlots>(spec: HandoffSp
     state: T,
     config: LangGraphRunnableConfig,
   ): Promise<Record<string, unknown>> => {
-    // The pending slot is the normal path (the model called `request_handoff`).
-    // When it is empty the FORCED guard applies: state already says the task is
-    // over but the model answered in plain text (`spec.forcedHandoff`). It is
-    // resolved HERE rather than by a node that writes the slot first, so the
-    // graph stays three nodes (model → tools → handoff) and the forced request
-    // is never written to state at all — no host graph code goes near the
-    // library-managed `handoff` slot, which is the rule 2.0.0 set for executors
-    // and hosts were dodging with a hand-rolled node. `forcedHandoffRequested`
-    // is the matching edge predicate calling the SAME pure function of state,
-    // so predicate and node cannot disagree.
-    const request = state.handoff ?? spec.forcedHandoff?.(state) ?? null;
+    // The pending slot is the ONLY source: the model's `request_handoff`, an
+    // executor's `request_handoff` effect, or the runner's auto-handoff — all
+    // three arm it before this node runs. The 2.3.0 `forcedHandoff` net
+    // ("state is terminal but nothing armed") was REMOVED in 3.0.0: the
+    // effects pattern makes that state unreachable — the executor that
+    // decides a terminal outcome arms the handoff atomically on the same
+    // verdict row — and input-derived terminality (a session doomed from
+    // turn 0) belongs to a first-turn probe executor, not a spec-side net.
+    const request = state.handoff ?? null;
     if (!request) return {};
     const writer = config.writer as ((chunk: unknown) => void) | undefined;
     const delegate =

@@ -12,6 +12,100 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [3.0.0] — 2026-08-19
+
+Major: **the authoring model goes declarative, and the engine takes over the model-facing language.**
+The turn-protocol, declarative-authoring and capture arcs measured on the reference voice host land
+together: every executor outcome becomes a declared verdict row the runner composes the wire body
+from; the engine now composes the action descriptions (gate marker first, no verdict index), the
+gate reply contracts, and the whole protocol prompt fragment hosts used to hand-roll (and fork); a
+non-locking `dictation` awaiting-kind records the standing question a verdict asked; engine-owned
+escalation ladders absorb the prompt's "once" rules, with `deflect_aside` folded onto the same
+latch; and capture re-ask loops are bounded by an engine counter. Three zero-host subsystems are
+removed outright (bounded choices, the guard latch, the forced-handoff net). State drops to six
+library slots with the metadata in one compile-key-locked table.
+Migration: [migrations/2.5.0-to-3.0.0.md](migrations/2.5.0-to-3.0.0.md).
+
+### Breaking
+- **The legacy executor return shape is removed from the public contract** — `Executor` returns only
+  `DeclaredExecutorResult` (`{ verdict, data?, stateUpdate?, effects?, resultExtras? }`) against the
+  action's declared `ActionDef.verdicts` rows; a verdict with no row fails loudly as
+  `executor_error`. `ExecutorResult` is no longer exported. Every downstream executor converts to
+  rows (the migration's convert-executors-to-rows transform is mandatory, per action, with a wire
+  byte-diff check — declaration order is wire order, so a converted action reproduces its historical
+  body bytes exactly).
+- **The bounded-choice subsystem is removed** (zero hosts; its jobs are expressed as ladders):
+  `REQUEST_BOUNDED_CHOICE_ACTION` / `RESOLVE_BOUNDED_CHOICE_ACTION`, `BoundedChoiceDef` /
+  `BoundedChoiceRegistry` / `BoundedChoiceSchema` / `BoundedChoice`,
+  `BuildAgentStepToolOptions.boundedChoices`, the `choice` cursor kind, `choice_consumed`, the
+  admission choice locks, and the choice message templates are all gone.
+- **`deflect_aside` is removed as a control** — the free-aside damper is now a configured ladder
+  (`HandoffSpec.deflectAside`, `DEFLECT_ASIDE_ACTION`, the `aside_deflected` template and the
+  `deflectedAside` slot are gone; the composed protocol's human-override clause deliberately keeps
+  its vestigial "or choice" bytes pending a re-measured scrub).
+- **`repeat_pending_confirmation` → `repeat_pending_question`** — the repeat control generalized to
+  the whole cursor; export renamed to `REPEAT_PENDING_QUESTION_ACTION`. The sole-step group's error
+  code keeps the historical `repeat_confirmation_must_be_sole_step` vocabulary (byte-pinned).
+- **`repeatReadBack` now REQUIRES `replyContract`** — validated at construction: a repeatable gate
+  routes re-asks through the repeat control, which the generic reply contract forbids.
+- **`HandoffSpec.forcedHandoff` / `forcedHandoffRequested` are removed** — the resolver reads only
+  the armed `handoff` slot; a terminal business outcome arms its handoff atomically via its verdict
+  row's `request_handoff` effect, so "terminal but nothing armed" is unreachable by construction.
+  Input-derived terminality converts to a first-turn probe action.
+- **`guardTurn` + the guard latch are removed** (`guardFiredOnTurn` / `markGuardFired`; zero users
+  family-wide). `resolveCallerTurnId` survives, extracted to `interaction/turn-identity.ts`.
+- **The verdict index left the composed action description** — descriptions are now
+  `<engine gate marker> <host semantic lead>`; results explain their own verdicts (the enumerated
+  index measured as 34% of the domain-action bytes while duplicating the per-turn `reason`s).
+- **Library state is six slots** — `awaitingInput`, `currentFlow`, `pagedRead`, `spentLadders`
+  (new), `handoff`, `errorCount`; `boundedChoice` / `deflectedAside` / `guardTurn` are gone from
+  every fragment, mask, and the task-scoped list.
+
+### Added
+- **Declared verdict rows** — `ActionDef.verdicts: Record<string, VerdictDef>`: per code — the `ok`
+  flag, the summary (static or a `(state, data)` renderer for language-keyed catalogs), body fields
+  composed in declaration order, static `stateUpdate` typed against the host state, row `effects`
+  applied ahead of the executor's, and `backendFailure` deriving the auto-handoff code list from the
+  declarations. `AgentStepConfig` / `ActionDef` thread the state type (`<ActionName, PrereqName, State>`).
+- **Standing asks / the `dictation` awaiting-kind** — `ActionDef.asks` keyed by verdict-or-error
+  code (`invalid_params` is a legal key); the batch's FINAL entry sets/clears the non-locking
+  record, stamped on the wire as `standing_ask` + `ask_contract` + engine-rendered `ask_text`
+  (`DictationAsk.render`; fixed asks measured 8/8 on the wire vs 2/8 from prompt memory).
+- **Escalation ladders + `note_refusal`** — `BuildAgentStepToolOptions.ladders` (requires
+  `handoff`): the prompt's "once" rules become engine-counted ladders in the task-scoped
+  `spentLadders` latch; a free use returns the ladder's instruction, exhaustion escalates atomically
+  into its configured handoff (an engine-only route — leave it out of `modelRequestSchema`). Shared
+  `climbLadder` core.
+- **`ActionDef.captureBounces { max, ladder }`** — consecutive `invalid_params` bounces counted
+  under `spentLadders["capture:<action>"]`, cleared by any successful parse, escalating through the
+  named ladder. `max: 2` is the measured knob.
+- **Engine-composed gate reply contracts** — `ConfirmationOpts.replyContract: GateContractSpec`
+  (+ exports `composeGateContract`, `GateContractContext`): the engine writes the frame clauses it
+  enforces around the host's measured reply categories; proposals carry the result as
+  `reply_contract` (generic template: the new `confirm_reply_contract` message).
+- **The engine-composed protocol prompt fragment** — `composeProtocolPrompt(ProtocolSurface)`:
+  tool-turn/speaking-turn, the reply/ask contracts, the gate handshake, read-back authority, and
+  handoff silence composed from the feature surface; hosts splice `{PROTOCOL}` and put domain
+  clauses on `toolTurnRules` (detached placement measured 0/4).
+- **`ConfirmationOpts.readBackDirective`** — per-proposal framing of the rendered `read_back`,
+  riding the wire as `read_back_directive` (+ the `read_back_directive_repeat` template).
+- **Capture builders** — `callerTextParam` (bounded caller-dictated text, count-free refinements),
+  `relayParam` (relay-only transcription field), `exactlyOneOf` (XOR refinement over optional params).
+- **`AGENT_STEP_SLOT_META`** — one metadata row per library slot; the internal mask, the task-scoped
+  list, and the new `agentStepRunnerOwnedSlots` are derived and compile-key-locked (adding a slot
+  without its table row fails the build). `compile/activation.ts` unifies the ControlActivation
+  construction. New message templates: `confirm_reply_contract`, `standing_ask_contract` (including
+  the repeated-value clause: a reply repeating an already-refused value still calls — the engine
+  counts those turns), `read_back_directive_repeat`.
+- New test suites: `capture-bounce`, `repeat-question`, `note-refusal`, `dictation`, `verdict-map`,
+  `action-describe`, `gate-contract`.
+
+### Changed
+- Model-facing composed bytes are a versioned contract: hosts pin the model-surface and wire-text
+  goldens; an upstream change to composed bytes owes a live re-measurement.
+- The canonical tool layout gains `names.ts` (types-only leaf) and per-action `action.ts`
+  declarations beside their executors, with `config.ts` a slim assembler.
+
 ## [2.5.0] — 2026-08-11
 
 Minor: **the confirmation gate hardens, and configuration keeps absorbing prompt prose.** A survey of

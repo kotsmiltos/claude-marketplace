@@ -57,9 +57,9 @@ sessionUserKey: withLangGraph(z.string().nullable(), {
 
 And remember: a default — even one reading an env var — does **not** fill state. The **caller must pass these fields in the invoke input on every run**; the launcher (CLI, server handler, scheduler) owns reading the environment/request and threading them in. A `sessionReady` verifier then just checks presence. If the field is caller-supplied and you want it coerced/validated at the invoke boundary (e.g. an unquoted JSON number → string), use `z.coerce.string().nullable()` and wire `AgentInputSchema` (below) into a hand-built `StateGraph`.
 
-## Library-managed slots (awaitingInput + currentFlow + boundedChoice + pagedRead + deflectedAside + handoff + errorCount + guardTurn)
+## Library-managed slots (awaitingInput + currentFlow + pagedRead + spentLadders + handoff + errorCount)
 
-`awaitingInput` / `currentFlow` are required whenever the new tool declares any lifecycle opt on a mutation (`requiresConfirmation`, `requiresOtp`, `issuesOtp`, `requiresMatch`, `startsMatchFor`, `startsFlow`, `endsFlow`, `requiresFlow`); `boundedChoice` whenever `boundedChoices` is configured; `pagedRead` whenever an action declares `pageable`; `handoff` / `errorCount` for the library handoff + auto-handoff guard; `deflectedAside` (2.4.0) whenever `HandoffSpec.deflectAside` is set. (Since library 2.0.0 `buildAgentStepTool` enforces this at construction: a state schema missing a channel for any slot the configuration writes throws.) `guardTurn` (2.3.0) is the one slot the RUNNER never writes — the host's model-input guards write it through `markGuardFired`, so it is never in that required set; it still arrives with the fragment. All arrive by **spreading the library's exported `agentStepZodShape` fragment** — never hand-declare them (the library's `state.ts` doc-comment forbids it; hand-rolled copies drift). Each slot in the fragment is already wrapped with `withLangGraph` carrying the runner's expected reducer/default:
+`awaitingInput` / `currentFlow` are required whenever the new tool declares any lifecycle opt on a mutation (`requiresConfirmation`, `requiresOtp`, `issuesOtp`, `requiresMatch`, `startsMatchFor`, `startsFlow`, `endsFlow`, `requiresFlow`) or any standing ask (`ActionDef.asks`); `pagedRead` whenever an action declares `pageable`; `spentLadders` (3.0.0) whenever `ladders` or any `captureBounces` is configured; `handoff` / `errorCount` for the library handoff + auto-handoff guard. (`buildAgentStepTool` enforces this at construction: a state schema missing a channel for any slot the configuration writes throws.) All arrive by **spreading the library's exported `agentStepZodShape` fragment** — never hand-declare them (the library's `state.ts` doc-comment forbids it; hand-rolled copies drift). Each slot in the fragment is already wrapped with `withLangGraph` carrying the runner's expected reducer/default:
 
 ```ts
 import { MessagesZodState, type ExtractStateType } from "@langchain/langgraph";
@@ -67,11 +67,11 @@ import { withLangGraph } from "@langchain/langgraph/zod";
 import { agentStepZodShape, agentStepInternalSlotMask } from "./agent-step/index.js";
 
 export const AgentStateSchema = MessagesZodState.extend({
-  ...agentStepZodShape,    // awaitingInput + currentFlow + boundedChoice + pagedRead + deflectedAside + handoff + errorCount + guardTurn, correct reducers
+  ...agentStepZodShape,    // awaitingInput + currentFlow + pagedRead + spentLadders + handoff + errorCount, correct reducers
   // … per-tool slots (withLangGraph) …
 });
 
-/** Value types nodes receive — tools import this to type selectors + ExecutorResult. */
+/** Value types nodes receive — tools import this to type selectors + DeclaredExecutorResult. */
 export type State = ExtractStateType<typeof AgentStateSchema>;
 ```
 
@@ -113,32 +113,38 @@ The order doesn't affect runtime correctness, but it's worth keeping consistent 
 <prompt_ts>
 ## src/prompt.ts
 
-Three places to extend, in this order:
+The MACHINERY text is engine-composed since 3.0.0 — the prompt keeps only domain semantics. Places to extend, in this order:
 
-### 1. SCOPE / OPERATING LOOP
+### 0. TURN PROTOCOL — the `{PROTOCOL}` splice (once per project)
+The turn/speech machinery (tool turn vs speaking turn, the reply/ask contracts, the gate handshake,
+READ-BACK authority, handoff silence) comes from `composeProtocolPrompt` (see `agent-step-api.md`
+`<composed_surface>`): `prompt.ts` composes the fragment from the tool's feature surface (config +
+ladders + handoff) and splices it at the `{PROTOCOL}` placeholder. When adding the FIRST tool, wire
+this splice (the bootstrap `prompt.ts` carries the commented scaffolding); when adding a later tool
+to a single-tool prompt, the fragment recomposes automatically from the updated config. Domain
+capture doctrines that must outrank the generic contracts go on `toolTurnRules` — never hand-written
+into the fragment's territory. Write NONE of the machinery text yourself.
+
+### 1. SCOPE
 If the new tool covers user intents the current prompt refuses, broaden SCOPE so they're not refused. Example: if cards-only refuses account inquiries, and you're adding accounts, drop the refusal clause.
 
 ### 2. ACTIONS section
-Per-action block. Use this exact shape (when the project already has a tool, lift the shape from its existing action blocks in `src/prompt.ts`):
+Per-action block — SEMANTIC content only: when to invoke the action and the business meaning of each
+verdict. The mechanics (params, the gate handshake, batching, result shape) are engine-composed — the
+schema's composed description and the wire contracts own them; restating them duplicates engine bytes:
 
 ```
-- `<action_name>` — params: `{ <field>, <field?> }`. <Optional flags/enum values>. Prereq: `<prereqName>` (or "none"). <One-paragraph summary of what it does, what verdicts/states it returns, what changes in session state.> Result body: `{ summary, <key>, <key>, ... }`.
+- `<action_name>` — <when to call it; how to recover from each verdict, in business terms>.
 ```
 
 Place the new tool's actions either in a new heading or appended to the existing ACTIONS list, whichever reads cleanly.
 
-### 3. MUTATION SAFETY (if confirm-required mutations exist)
-Extend the existing MUTATION SAFETY section. The runner enforces:
-- `soleStep` — strict: mutation must be alone in batch
-- `soleOnExecute` — relaxed: propose may ride as the LAST step of a multi-step batch; execute must be alone
-- `requiresConfirmation` — propose → execute lifecycle, lockdown while pending
-
-The prompt should teach the LLM:
-- Propose call returns `{ ok: true, needs_confirmation: true, proposed_params, attempts_left }` — recap, do NOT speak as if executed
-- Wait for affirmation in this turn; on the next turn re-issue with same params to execute
-- Drifted params re-propose and decrement `attempts_left`
-- On execute, read the executor's `postState` field to confirm the change landed
-- While pending, any other action returns `error: "pending_confirmation_locked"`; recover with `abort_pending_input` (auto-injected by library — clears `awaitingInput` AND `currentFlow` together) or re-issue the same mutation
+### 3. MUTATION SAFETY — mostly engine-owned now
+The propose → execute handshake, the reply classification while a gate pends, and the read-back
+authority ride the WIRE (the composed gate marker, `reply_contract`, `read_back` +
+`read_back_directive`) and the protocol fragment. The prompt keeps only the domain halves: which
+mutations exist, what the caller must consent TO in business terms, and any post-state reading rule
+(e.g. "read `postState` from the mutation's own result for the spoken confirmation").
 
 ### 4. FLOW NARRATIVE (if multi-turn flows exist — OTP, double-entry match)
 For each multi-turn flow, teach the LLM:
@@ -196,8 +202,8 @@ SCOPE
 
 ACTIONS
 +## Accounts
-+- `list_accounts` — params: `{}`. Prereq: `customerVerified`. Returns `{ accounts: [{ iban, category, balance? }] }`. Read-only.
-+- `fetch_balance` — params: `{ accountNumber }`. Prereq: `customerVerified`. Returns `{ balance, currency, asOf }`. Reads current balance for the named account.
++- `list_accounts` — call when the customer asks what accounts they hold. Read-only.
++- `fetch_balance` — call when the customer asks a balance for a specific account; a `not_found` verdict means the reference resolved to no account — offer the list.
 
 EXAMPLES
 +- Account read flow:

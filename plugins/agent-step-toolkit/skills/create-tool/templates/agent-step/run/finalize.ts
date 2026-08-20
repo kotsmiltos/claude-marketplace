@@ -28,7 +28,8 @@ import type { RunnerResultBody } from "../types.js";
 import type { HandoffRequest, LibraryManagedSlots } from "../state.js";
 import { formatMessage } from "../messages.js";
 import type { CompiledPlan } from "../compile/plan.js";
-import type { BatchState } from "./batch-state.js";
+import { askOfFinalEntry, dictationAfterBatch } from "../interaction/dictation.js";
+import { getAwaitingInput, getHandoff, type BatchState } from "./batch-state.js";
 import type { ExecutionOutcome } from "./execution.js";
 
 export interface RunResult<T> {
@@ -48,6 +49,45 @@ export function finalizeRun<T extends LibraryManagedSlots>(
     results: exec.results,
   };
   if (exec.failedAt !== undefined) body.failed_at = exec.failedAt;
+
+  // ─── Standing-ask lifecycle (`ActionDef.asks` → the `dictation` awaiting
+  //     kind): the batch's FINAL entry decides the standing question — set the
+  //     mapped ask, clear a serviced one, never disturb a live gate. Skipped
+  //     entirely on a handoff (the terminal cleanup already cleared the slot,
+  //     and a handed-back thread owes nothing). Applied through the same
+  //     direct-`committed` channel as the error counter below: the batch is
+  //     over, and `awaitingInput` is replace-on-write.
+  if (getHandoff(st.view) == null) {
+    const transition = dictationAfterBatch(plan, exec.results, getAwaitingInput(st.view));
+    if (transition !== undefined) {
+      const awaiting =
+        transition === null ? null : (transition as Record<string, unknown>).awaitingInput;
+      (st.committed as Record<string, unknown>).awaitingInput = awaiting;
+      // Make the recorded ask VISIBLE on the final entry — the transcript is
+      // the model's only authority for engine state (never injected into the
+      // prompt), so a silent record would leave the model unaware the system
+      // now expects this value.
+      const dictation = awaiting as { for_action?: string; param?: string } | null;
+      if (dictation?.for_action && dictation.param && body.results.length > 0) {
+        const lastIndex = body.results.length - 1;
+        // Host-rendered ask bytes, when the ask declares them: the model
+        // speaks `ask_text` exactly instead of reciting a catalog line from
+        // prompt memory (which measurably drifts).
+        const askText = askOfFinalEntry(plan, exec.results)?.render?.(st.view);
+        body.results[lastIndex] = {
+          ...body.results[lastIndex],
+          standing_ask: { action: dictation.for_action, param: dictation.param },
+          ...(typeof askText === "string" && askText.length > 0
+            ? { ask_text: askText }
+            : {}),
+          ask_contract: formatMessage(msgs.standing_ask_contract, {
+            action: dictation.for_action,
+            param: dictation.param,
+          }),
+        };
+      }
+    }
+  }
 
   const autoHandoffEnabled =
     plan.activation.handoffEnabled || plan.onErrorThreshold != null;
@@ -71,7 +111,14 @@ export function finalizeRun<T extends LibraryManagedSlots>(
             context: msgs.auto_handoff,
           } satisfies HandoffRequest;
         }
-        if (plan.activation.boundedChoicesEnabled) committedRec.boundedChoice = null;
+        // Latch clears at the threshold. Deliberately NOT a loop over
+        // agentStepTaskScopedSlots: writing null to a channel a minimal host
+        // never declared is a LangGraph error, so each clear stays gated on
+        // the feature that required the channel — and the resolver's
+        // task-scoped sweep (handoff/node.ts) is the loop-driven authority
+        // when a handoff path exists. The invariant that no task-scoped slot
+        // survives the resolved handback is pinned by test instead.
+        if (plan.activation.laddersEnabled) committedRec.spentLadders = null;
         plan.onErrorThreshold?.(committedRec, initialState);
         committedRec.errorCount = 0;
         // Platform delivers the wording: the host graph's handoff resolver

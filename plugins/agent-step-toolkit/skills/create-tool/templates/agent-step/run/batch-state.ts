@@ -17,11 +17,11 @@
 
 import type {
   AwaitingInput,
-  BoundedChoice,
   CurrentFlow,
   HandoffRequest,
   LibraryManagedSlots,
 } from "../state.js";
+import { agentStepRunnerOwnedSlots } from "../state.js";
 import type { PatchMerger } from "../compile/state-schema.js";
 
 export interface BatchState<T extends LibraryManagedSlots> {
@@ -61,10 +61,6 @@ export function getAwaitingInput<T>(view: Partial<T>): AwaitingInput | null {
 
 export function getCurrentFlow<T>(view: Partial<T>): CurrentFlow | null {
   return ((view as { currentFlow?: CurrentFlow | null }).currentFlow) ?? null;
-}
-
-export function getBoundedChoice<T>(view: Partial<T>): BoundedChoice | null {
-  return ((view as { boundedChoice?: BoundedChoice | null }).boundedChoice) ?? null;
 }
 
 export function getHandoff<T>(view: Partial<T>): HandoffRequest | null {
@@ -134,22 +130,43 @@ export function setAwaitingMatchPatch<T extends LibraryManagedSlots>(
   return { awaitingInput } as Partial<T>;
 }
 
+/** Record the standing ask: a verdict requested a fresh value from the
+ *  customer (`ActionDef.asks`). Non-locking — the record of the current
+ *  question and the interception target, not a gate. */
+export function setDictationPatch<T extends LibraryManagedSlots>(
+  forAction: string,
+  param: string,
+  expects: "digits" | "text",
+  flowRef?: string,
+): Partial<T> {
+  const awaitingInput: AwaitingInput = {
+    kind: "dictation",
+    for_action: forAction,
+    param,
+    expects,
+    ...(flowRef ? { flow_ref: flowRef } : {}),
+  };
+  return { awaitingInput } as Partial<T>;
+}
+
 /** Drop the pending input gate only — the flow (if any) survives. */
 export function clearAwaitingInputPatch<T extends LibraryManagedSlots>(): Partial<T> {
   return { awaitingInput: null } as Partial<T>;
 }
 
-/** Drop the transient interaction slots together: the pending gate, the
- *  active flow, and (when the host opted into bounded choices) the choice
- *  overlay. Used by the unified abort control, terminal handoffs, flow end,
- *  and the `abort_flow` effect. */
-export function clearInteractionPatch<T extends LibraryManagedSlots>(
-  clearBoundedChoice: boolean,
-): Partial<T> {
+/** Clear the gate cursor. */
+export function clearGatePatch<T extends LibraryManagedSlots>(): Partial<T> {
+  return { awaitingInput: null } as Partial<T>;
+}
+
+
+/** Drop the transient interaction state together: the cursor and the active
+ *  flow. Used by the unified abort control, terminal handoffs, flow end, and
+ *  the `abort_flow` effect. */
+export function clearInteractionPatch<T extends LibraryManagedSlots>(): Partial<T> {
   return {
     awaitingInput: null,
     currentFlow: null,
-    ...(clearBoundedChoice ? { boundedChoice: null } : {}),
   } as Partial<T>;
 }
 
@@ -162,25 +179,17 @@ export function setCurrentFlowPatch<T extends LibraryManagedSlots>(
   return { currentFlow: flow } as Partial<T>;
 }
 
-/** Write the bounded-choice overlay (pending or resolved). */
-export function setBoundedChoicePatch<T extends LibraryManagedSlots>(
-  choice: BoundedChoice,
-): Partial<T> {
-  return { boundedChoice: choice } as Partial<T>;
-}
-
 /** The terminal-handoff transition, shared by the built-in `request_handoff`
- *  control, the executor-level `request_handoff` effect, and the bounded
- *  choice's repeat fallback: abandon EVERY transient runner slot that could
+ *  control and the executor-level `request_handoff` effect: abandon EVERY
+ *  transient runner slot that could
  *  otherwise resume stale work if this graph thread is routed back to later —
- *  the pending interaction + owning flow + choice overlay, and the independent
- *  pageable-read cache — and set the `handoff` slot for the resolver node. */
+ *  the pending interaction + owning flow, and the independent pageable-read
+ *  cache — and set the `handoff` slot for the resolver node. */
 export function requestHandoffPatch<T extends LibraryManagedSlots>(
   request: HandoffRequest,
-  clearBoundedChoice: boolean,
 ): Partial<T> {
   return {
-    ...clearInteractionPatch<T>(clearBoundedChoice),
+    ...clearInteractionPatch<T>(),
     pagedRead: null,
     handoff: { reason: request.reason, context: request.context },
   } as Partial<T>;
@@ -190,23 +199,12 @@ export function requestHandoffPatch<T extends LibraryManagedSlots>(
 
 /** The slots the runner owns. An executor's `stateUpdate` may not write them —
  *  library transitions go through typed `ExecutorEffect`s so the runner can
- *  coordinate them (cleanup, ordering, overlay clearing).
+ *  coordinate them (cleanup, ordering, gate clearing).
  *
- *  This is deliberately NOT the whole of `agentStepInternalSlotMask`: that mask
- *  lists every library slot, while this list is only the RUNNER-owned subset.
- *  `guardTurn` is the difference — it is a library slot but it is written by the
- *  HOST's model-input guards through `markGuardFired`, never by the runner, so
- *  guarding executors against it would ban nothing the runner coordinates. Add
- *  a slot here only when the runner itself transitions it. */
-const LIBRARY_MANAGED_KEYS = [
-  "awaitingInput",
-  "currentFlow",
-  "boundedChoice",
-  "pagedRead",
-  "deflectedAside",
-  "handoff",
-  "errorCount",
-] as const;
+ *  Derived from the slot table (`AGENT_STEP_SLOT_META.runnerOwned`). Every
+ *  current slot is runner-owned; the flag exists because history proved the
+ *  exception class (the retired `guardTurn` was host-written). */
+const LIBRARY_MANAGED_KEYS = agentStepRunnerOwnedSlots;
 
 /** Throws on a `stateUpdate` that touches a library-managed slot. A loud
  *  programmer error, not a runtime refusal: the executor code is wrong, and

@@ -16,32 +16,50 @@
 import type { ConfirmationOpts } from "../types.js";
 import type { AwaitingInput } from "../state.js";
 import type { CompiledAction } from "../compile/plan.js";
+import type { GateContractContext } from "../compile/gate-contract.js";
+import { composeGateContract } from "../compile/gate-contract.js";
 import { valueEqual } from "../run/value-equal.js";
+
+/** The compiled confirmation opts: every field filled, and `replyContract`
+ *  always the wire STRING — a declared {@link GateContractSpec} is composed
+ *  at construction, so the run pipeline never sees the spec form. */
+export type NormalizedConfirmation = Omit<Required<ConfirmationOpts>, "replyContract"> & {
+  replyContract: string;
+};
 
 /** Applied when `requiresConfirmation: true` is set bare (no opts object) and
  *  as the fill-in for any field omitted from an explicit opts object. */
-export const CONFIRMATION_DEFAULTS: Required<ConfirmationOpts> = {
+export const CONFIRMATION_DEFAULTS: NormalizedConfirmation = {
   maxAttempts: 3,
   lockdown: true,
   repeatReadBack: false,
   // No read-back by default: a host that does not render one keeps handing the
   // model raw `proposed_params`, exactly as before this option existed.
   readBack: () => undefined,
+  // No framing directive by default: the read-back is spoken byte-for-byte
+  // under the host prompt's single authority sentence.
+  readBackDirective: () => undefined,
   // No propose-time refusal by default: every schema-valid proposal stores.
   refuseProposal: () => null,
+  // Empty = the runner's generic reply-contract template governs the gate.
+  replyContract: "",
 };
 
 export function normalizeConfirmation(
   v: boolean | ConfirmationOpts | undefined,
-): Required<ConfirmationOpts> | null {
+  ctx: GateContractContext,
+): NormalizedConfirmation | null {
   if (!v) return null;
   if (v === true) return { ...CONFIRMATION_DEFAULTS };
+  const spec = v.replyContract;
   return {
     maxAttempts: v.maxAttempts ?? CONFIRMATION_DEFAULTS.maxAttempts,
     lockdown: v.lockdown ?? CONFIRMATION_DEFAULTS.lockdown,
     repeatReadBack: v.repeatReadBack ?? CONFIRMATION_DEFAULTS.repeatReadBack,
     readBack: v.readBack ?? CONFIRMATION_DEFAULTS.readBack,
+    readBackDirective: v.readBackDirective ?? CONFIRMATION_DEFAULTS.readBackDirective,
     refuseProposal: v.refuseProposal ?? CONFIRMATION_DEFAULTS.refuseProposal,
+    replyContract: spec ? composeGateContract(spec, ctx) : CONFIRMATION_DEFAULTS.replyContract,
   };
 }
 

@@ -21,19 +21,19 @@ The embedded runner. Replaced byte-for-byte from the new source; never hand-merg
 the library is a TREE (five phase-module subdirectories) — replace recursively, not per-file.
 
 Top level (`skills/create-tool/templates/agent-step/`):
-- `types.ts` — the authoring contracts (`ExecutorResult` / `ExecutorEffect`, `ActionDef`, `ControllerHooks`, registries)
-- `state.ts` — the library-managed slot schemas + spreadable fragments (`agentStepZodShape`, `agentStepStateSpec`, `agentStepInternalSlotMask`)
+- `types.ts` — the authoring contracts (`VerdictDef` / `DeclaredExecutorResult` / `ExecutorEffect`, `ActionDef` (verdicts/asks/captureBounces), `ControllerHooks`, `ConfirmationOpts` (+ `GateContractSpec`), `DictationAsk`, registries)
+- `state.ts` — the library-managed slot schemas + the slot table (`AGENT_STEP_SLOT_META`) + spreadable fragments (`agentStepZodShape`, `agentStepStateSpec`) and derived views (`agentStepInternalSlotMask`, `agentStepTaskScopedSlots`, `agentStepRunnerOwnedSlots`)
 - `runner.ts` — the thin public entry points (`buildAgentStepTool`, `runSteps`)
-- `messages.ts` — runner-emitted system `summary` strings (neutral English defaults; host-overridable via `BuildAgentStepToolOptions.messages`)
-- `define-config.ts`, `index.ts` (the public surface), `paginate.ts`, `capture.ts` (caller-digit capture primitives)
-- Tests: `runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `deflect-aside.test.ts`, `repeat-confirmation.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
+- `messages.ts` — runner-emitted system `summary` strings + model-facing wire contracts (neutral English defaults; host-overridable via `BuildAgentStepToolOptions.messages`)
+- `define-config.ts`, `index.ts` (the public surface), `paginate.ts`, `capture.ts` (caller capture primitives incl. text/relay/XOR builders)
+- Tests: `runner.test.ts`, `handoff.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `capture-bounce.test.ts`, `repeat-question.test.ts`, `note-refusal.test.ts`, `dictation.test.ts`, `verdict-map.test.ts`, `action-describe.test.ts`, `gate-contract.test.ts`, `zod-state.test.ts` (isolation test: merger derived from a Zod state schema)
 - `VERSION` — rewrite to the new version string.
 
 Phase modules (internal layout; hosts import only from `index.ts`):
-- `compile/` — `validate.ts`, `plan.ts` (`BuildAgentStepToolOptions`), `schema.ts`, `describe.ts`, `state-schema.ts`
-- `run/` — `admission.ts`, `planning.ts`, `execution.ts`, `finalize.ts`, `batch-state.ts`, `value-equal.ts`
-- `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `bounded-choice.ts` (also owns `resolveCallerTurnId`), `guard-latch.ts` (host guard latch over the `guardTurn` slot)
-- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `bounded-choice.ts`, `deflect-aside.ts`, `repeat-confirmation.ts`
+- `compile/` — `validate.ts`, `plan.ts` (`BuildAgentStepToolOptions`), `activation.ts`, `schema.ts`, `describe.ts`, `action-describe.ts`, `gate-contract.ts`, `protocol.ts`, `state-schema.ts`
+- `run/` — `admission.ts`, `planning.ts`, `execution.ts` (verdict-row normalization), `finalize.ts` (standing-ask lifecycle), `batch-state.ts`, `value-equal.ts`
+- `interaction/` — `confirmation.ts`, `otp.ts`, `match.ts`, `flow.ts`, `dictation.ts`, `turn-identity.ts` (owns `resolveCallerTurnId`)
+- `controls/` — `contract.ts`, `registry.ts`, `abort.ts`, `request-handoff.ts`, `repeat-question.ts`, `note-refusal.ts` (+ `climbLadder`)
 - `handoff/` — `contract.ts`, `node.ts`, `delegate-client.ts`
 
 A source repo may carry an `UPSTREAM.md` (its own porting note) — do NOT copy it into the toolkit.
@@ -50,14 +50,16 @@ What `/create-tool` writes into `src/tools/<name>/`. These spell out the executo
 signatures and the wire-up, so any change to the executor signature, the registries, or
 `buildAgentStepTool`'s options ripples here.
 
-- `skills/create-tool/templates/config.ts.template`
+- `skills/create-tool/templates/names.ts.template` — the types-only ActionName/PrereqName leaf
+- `skills/create-tool/templates/action.ts.template` — the per-action declaration (schema, verdict rows, asks, captureBounces, controller); encodes `VerdictDef`/`DictationAsk`/`ConfirmationOpts` authoring
+- `skills/create-tool/templates/config.ts.template` — the assembler
 - `skills/create-tool/templates/tool-index.ts.template`  — the `buildAgentStepTool({...})` call + registries
 - `skills/create-tool/templates/state-selector.ts.template` — the per-action `getSlice` + `Slice` shape
 - `skills/create-tool/templates/executor-read.ts.template`
 - `skills/create-tool/templates/executor-read-paginated.ts.template` — encodes the `pageable` contract (runner-injected page params, `items` envelope)
 - `skills/create-tool/templates/executor-mutation.ts.template`
-- `skills/create-tool/templates/executor-handoff.ts.template` — channel-handoff executor; mirrors `ExecutorResult` and the `soleStep` controller opt, writes the bootstrap `pendingHandoff` slot
-- `skills/create-tool/templates/executor-analysis.ts.template`, `analysis-vm.ts.template`, `datasets.ts.template`, `verifier-data-loaded.ts.template` — the data-analysis scaffold; mirror the `ExecutorResult` / `Verifier` / selector shapes
+- `skills/create-tool/templates/executor-handoff.ts.template` — channel-handoff executor; mirrors `DeclaredExecutorResult` and the `soleStep` controller opt, writes the bootstrap `pendingHandoff` slot
+- `skills/create-tool/templates/executor-analysis.ts.template`, `analysis-vm.ts.template`, `datasets.ts.template`, `verifier-data-loaded.ts.template` — the data-analysis scaffold; mirror the `DeclaredExecutorResult` / verdict-row / `Verifier` / selector shapes
 - `skills/create-tool/templates/verifier.ts.template`
 - `skills/create-tool/templates/tool-test-setup.ts.template` — wires `toolOpts` (config + registries) mirroring `index.ts`
 - `skills/create-tool/templates/tool-sandbox-test.ts.template` — calls `runSteps(toolOpts, steps, state)` directly, so it mirrors that public entry point's signature and the result-body shape it asserts on. (`prompt-input-test.ts.template` imports only from the shared harness, so the Tier-3 harness templates cover it.)
@@ -80,7 +82,7 @@ new template + a new import line in `tool-index.ts.template`).
 
 <tier name="4_reference_docs">
 ## Tier 4 — Reference docs (hand-edit; these ARE the written contract)
-- `skills/create-tool/references/agent-step-api.md` — the canonical contract: runner signature, type listings (`Executor`, `ExecutorRegistry`, `Verifier`, `ActionDef`, `ControllerHooks`, `ExecutorResult`, lifecycle), construction-time checks. The highest-fidelity doc; update it for ANY public-surface change.
+- `skills/create-tool/references/agent-step-api.md` — the canonical contract: runner signature, type listings (`Executor`, `ExecutorRegistry`, `Verifier`, `ActionDef`, `VerdictDef`, `DeclaredExecutorResult`, `ControllerHooks`, `GateContractSpec`, `DictationAsk`, lifecycle), the engine-composed model surface, construction-time checks. The highest-fidelity doc; update it for ANY public-surface change.
 - `skills/create-tool/references/tool-directory-layout.md` — canonical `src/tools/<name>/` layout, per-file responsibility, naming rules, file-creation order, imports convention. Update when files are added/removed per action or the signatures in the per-file notes change.
 - `skills/create-tool/references/executor-patterns.md` — read vs mutation executor shapes; update when the executor signature or state-update shape changes.
 - `skills/create-tool/references/state-and-prompt-integration.md` — how `src/state.ts` / `src/prompt.ts` / `src/tools/index.ts` are patched; update if state wiring changes.

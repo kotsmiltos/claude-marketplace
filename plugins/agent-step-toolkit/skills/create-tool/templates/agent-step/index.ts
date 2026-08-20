@@ -6,7 +6,6 @@
 
 export type {
   ExecutorEffect,
-  ExecutorResult,
   Executor,
   ExecutorRegistry,
   Selector,
@@ -16,17 +15,21 @@ export type {
   ActionDef,
   ControllerHooks,
   ConfirmationOpts,
+  DeclaredExecutorResult,
+  DictationAsk,
+  GateContractSpec,
+  VerdictDef,
   AgentStepConfig,
   StepResult,
   RunnerResultBody,
 } from "./types.js";
+export { composeGateContract } from "./compile/gate-contract.js";
+export type { GateContractContext } from "./compile/gate-contract.js";
 export { defineConfig } from "./define-config.js";
 export {
   buildAgentStepTool,
   runSteps,
-  REPEAT_PENDING_CONFIRMATION_ACTION,
-  REQUEST_BOUNDED_CHOICE_ACTION,
-  RESOLVE_BOUNDED_CHOICE_ACTION,
+  REPEAT_PENDING_QUESTION_ACTION,
 } from "./runner.js";
 export type {
   BuildAgentStepToolOptions,
@@ -34,14 +37,6 @@ export type {
   StateSchemaLike,
 } from "./runner.js";
 export type { AbortPolicy } from "./controls/contract.js";
-
-// The one-shot conversational-choice overlay: authoring types live with the
-// policy (interaction/bounded-choice.ts); the two controls are auto-injected
-// when `BuildAgentStepToolOptions.boundedChoices` is provided.
-export type {
-  BoundedChoiceDef,
-  BoundedChoiceRegistry,
-} from "./interaction/bounded-choice.js";
 
 // Runner-emitted system `summary` strings. Neutral English defaults live in the
 // library; a host overrides them via `BuildAgentStepToolOptions.messages` (e.g.
@@ -55,18 +50,18 @@ export type { SystemMessages } from "./messages.js";
 export {
   AwaitingInputSchema,
   CurrentFlowSchema,
-  BoundedChoiceSchema,
   PagedCacheSchema,
   HandoffRequestSchema,
   agentStepStateSpec,
   agentStepZodShape,
   agentStepInternalSlotMask,
+  AGENT_STEP_SLOT_META,
   agentStepTaskScopedSlots,
+  agentStepRunnerOwnedSlots,
 } from "./state.js";
 export type {
   AwaitingInput,
   CurrentFlow,
-  BoundedChoice,
   HandoffRequest,
   LibraryManagedSlots,
 } from "./state.js";
@@ -84,7 +79,6 @@ export {
   HANDBACK_SIGNALS,
   handoffParamsSchema,
   handoffRequested,
-  forcedHandoffRequested,
 } from "./handoff/contract.js";
 export type {
   HandoffSpec,
@@ -93,20 +87,28 @@ export type {
 } from "./handoff/contract.js";
 export { createHandoffNode } from "./handoff/node.js";
 
-// The trigger-happy-handoff damper (`HandoffSpec.deflectAside`): one free
-// in-place deflection of an out-of-scope aside per task; a repeat escalates
-// atomically into the `off_topic` handback. See controls/deflect-aside.ts.
-export {
-  DEFLECT_ASIDE_ACTION,
-  DEFLECT_ASIDE_ACTION_DESCRIPTION,
-} from "./controls/deflect-aside.js";
+// Engine-owned escalation ladders (journey-engine G7): configured "once"
+// counters (`BuildAgentStepToolOptions.ladders`) behind the `note_refusal`
+// control; exhaustion escalates atomically into each ladder's configured
+// handoff. See controls/note-refusal.ts.
+export { NOTE_REFUSAL_ACTION } from "./controls/note-refusal.js";
+
+// The engine-composed protocol prompt fragment: the machinery text hosts
+// splice into their system prompt instead of hand-rolling it. See
+// compile/protocol.ts for the ownership boundary.
+export { composeProtocolPrompt } from "./compile/protocol.js";
+export type { ProtocolSurface } from "./compile/protocol.js";
+export type {
+  EscalationLadder,
+  LadderRegistry,
+  SpentLadders,
+} from "./controls/note-refusal.js";
 
 // Caller-turn identity + the turn-scoped guard latch. `resolveCallerTurnId` is
 // the library's own definition of "the current caller turn" (host hook, else
 // the latest human message id) — the same identity the confirmation gate and
 // the bounded-choice control use. Exported so hosts stop re-deriving it.
-export { resolveCallerTurnId } from "./interaction/bounded-choice.js";
-export { guardFiredOnTurn, markGuardFired } from "./interaction/guard-latch.js";
+export { resolveCallerTurnId } from "./interaction/turn-identity.js";
 
 // Read-pagination primitives. Pure, domain-agnostic helpers for tool read
 // executors — the runner does not use them. A tool's list reads use these to
@@ -136,7 +138,14 @@ export {
   digitsOnly,
   digitsOnlyDeep,
   callerDigits,
+  callerTextParam,
+  relayParam,
+  exactlyOneOf,
   digitGroupsParam,
   digitCandidatesParam,
 } from "./capture.js";
-export type { DigitGroupsParamOpts, DigitCandidatesParamOpts } from "./capture.js";
+export type {
+  CallerTextParamOpts,
+  DigitGroupsParamOpts,
+  DigitCandidatesParamOpts,
+} from "./capture.js";

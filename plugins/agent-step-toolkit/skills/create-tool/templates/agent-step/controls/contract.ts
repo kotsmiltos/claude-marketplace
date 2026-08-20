@@ -27,7 +27,6 @@ import type { StepResult } from "../types.js";
 import type { HandoffRequest, LibraryManagedSlots } from "../state.js";
 import type { SystemMessages } from "../messages.js";
 import type { BatchState } from "../run/batch-state.js";
-import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
 
 /** Optional host policy for the built-in `abort_pending_input` control.
  *
@@ -94,20 +93,16 @@ export interface ControlActivation {
   /** `null` preserves the legacy permissive abort mechanics. */
   abortPolicy: ResolvedAbortPolicy | null;
   /** Confirm-gated domain actions which opted into exact stored read-back
-   *  repetition. Non-empty activates `repeat_pending_confirmation`; the
-   *  control still verifies that the current gate belongs to one of these
-   *  actions and actually carries a rendered read-back. */
+   *  repetition. Non-empty activates `repeat_pending_question` (which also
+   *  activates when any bounded choice has a `renderRequest`); the control
+   *  still verifies that the current gate belongs to one of these actions
+   *  and actually carries a rendered read-back. */
   repeatableConfirmationActions: readonly string[];
-  boundedChoices: BoundedChoiceRegistry;
-  boundedChoicesEnabled: boolean;
-  /** The `deflect_aside` control (HandoffSpec.deflectAside, requires handoff):
-   *  one free in-place deflection of a social aside per task before an
-   *  off_topic handback fires. */
-  deflectAsideEnabled: boolean;
-  /** Host override for the `deflect_aside` schema-variant description
-   *  (HandoffSpec.deflectAside object form) — the deflect twin of
-   *  `handoffActionDescription` above. */
-  deflectAsideActionDescription?: string;
+  /** Configured escalation ladders (the `note_refusal` control, requires
+   *  handoff): engine-owned "once" counters whose exhaustion escalates
+   *  atomically into the ladder's configured handoff. */
+  ladders: import("./note-refusal.js").LadderRegistry;
+  laddersEnabled: boolean;
 }
 
 /** Runtime context a control's `execute` receives. Narrow on purpose: a
@@ -154,8 +149,6 @@ export interface ControlAction {
   descriptionLine(ctx: ControlActivation): string;
   /** May lead a batch while a confirmation/OTP/match gate lockdown is active. */
   allowedDuringGateLockdown: boolean;
-  /** May lead a batch while a bounded choice is pending. */
-  allowedDuringChoicePending: boolean;
   /** How the control escapes the resolved-choice same-turn lock: as the
    *  batch's ONLY step (`"sole"`), as its FIRST step (`"first"`), or not at
    *  all (`"none"`). */

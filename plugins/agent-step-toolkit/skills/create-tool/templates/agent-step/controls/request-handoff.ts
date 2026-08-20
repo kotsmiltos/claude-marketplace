@@ -33,7 +33,6 @@ export const requestHandoffControl: ControlAction = {
   descriptionLine: () =>
     `- \`${HANDOFF_ACTION}\`: hand the conversation off instead of answering (sole step, no prereqs).`,
   allowedDuringGateLockdown: true,
-  allowedDuringChoicePending: true,
   sameTurnEscape: "first",
   exclusivityGroup: "handoff",
   execute<T extends LibraryManagedSlots>(
@@ -64,7 +63,7 @@ export const requestHandoffControl: ControlAction = {
       return { entry, failed: true };
     }
     state.apply(
-      requestHandoffPatch<T>(request, ctx.activation.boundedChoicesEnabled),
+      requestHandoffPatch<T>(request),
     );
     const summary = formatMessage(msgs.handoff_requested, { reason: request.reason });
     const entry: StepResult = {

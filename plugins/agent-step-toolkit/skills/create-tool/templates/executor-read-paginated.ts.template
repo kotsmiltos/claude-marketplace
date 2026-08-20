@@ -2,25 +2,25 @@
 //
 // Paginated read executor (library `pageable`). Use for an action that returns
 // a LARGE or unbounded list (search, browse, history). You do NOT page by hand:
-// declare `pageable` on the action (config, below) and the runner does the rest —
-// it injects `page`/`pageSize` params, slices your result, and emits a uniform
-// envelope { page, pageSize, totalCount, totalPages, hasMore, items, fromCache }.
-// In SELF mode it also caches the full set in the library-managed `pagedRead`
-// slot, so a same-query re-page skips this executor entirely.
+// declare `pageable` on the action (action.ts, below) and the runner does the
+// rest — it injects `page`/`pageSize` params, slices your result, and emits a
+// uniform envelope { page, pageSize, totalCount, totalPages, hasMore, items,
+// fromCache }. In SELF mode it also caches the full set in the library-managed
+// `pagedRead` slot, so a same-query re-page skips this executor entirely.
 //
 // Two modes (set on the action's `pageable`):
-//   - SELF (`pageable: true`)        — return the FULL set in `resultBody.items`;
+//   - SELF (`pageable: true`)        — return the FULL set as `items`;
 //     the runner slices + caches it. Use when the backend returns everything.
 //   - DELEGATE (`pageable: "delegate"`) — the backend pages; read the injected
-//     `page`/`pageSize` from params, return that page in `resultBody.items` plus
-//     `resultBody.totalCount`. The runner wraps it (no cache).
+//     `page`/`pageSize` from params, return that page as `items` plus
+//     `totalCount`. The runner wraps it (no cache).
 //
 // This template shows SELF mode (the common case). DELEGATE variant at the bottom.
 
 import { postBackend } from "../../backend/client.js";
 import { {{TOOL_NAME}}Env } from "../../backend/env.js";
 import type { State } from "../../../../state.js";
-import type { ExecutorResult } from "../../../../agent-step/index.js";
+import type { DeclaredExecutorResult } from "../../../../agent-step/index.js";
 import type { Slice } from "./stateSelector.js";
 
 interface Params {
@@ -38,7 +38,7 @@ interface Row {
 export async function {{EXECUTOR_FN_NAME}}(
   rawParams: unknown,
   state: Slice,
-): Promise<ExecutorResult<State>> {
+): Promise<DeclaredExecutorResult<State>> {
   const p = rawParams as Params;
 
   // Fetch the FULL set. The runner slices it into the requested page and caches
@@ -55,30 +55,30 @@ export async function {{EXECUTOR_FN_NAME}}(
   // (Optional) sort into a STABLE order so page boundaries are deterministic:
   // rows.sort((a, b) => /* … */);
 
-  // Return the FULL set in `items`. The runner REPLACES `items` with the page
-  // and adds { page, pageSize, totalCount, totalPages, hasMore, fromCache }.
-  // Any OTHER fields you return (summary, domain headlines) are preserved on
-  // every page, including cache hits. Do NOT slice or count here.
+  // Return the FULL set via `resultExtras.items` (extras land on the composed
+  // body after the row's declared fields). The runner REPLACES `items` with
+  // the page and adds { page, pageSize, totalCount, totalPages, hasMore,
+  // fromCache }. The row's summary and any other declared fields are preserved
+  // on every page, including cache hits. Do NOT slice or count here.
   return {
-    resultBody: {
-      summary: `{{HUMAN_READABLE_SUMMARY}}`,
-      items: rows,
-    },
-    ok: true,
+    verdict: "ok",
+    resultExtras: { items: rows },
   };
 }
 
-// ─── config.ts ──────────────────────────────────────────────────────────────
+// ─── action.ts ──────────────────────────────────────────────────────────────
 //   Declare this action `pageable` with a z.object params schema (the runner
-//   merges page/pageSize in — a non-object schema throws at construction):
+//   merges page/pageSize in — a non-object schema throws at construction),
+//   and give it an `ok` row whose summary describes the set:
 //
-//     {{ACTION_NAME}}: {
-//       description: "… Returns one page; re-call with page:n+1 for more.",
-//       paramsSchema: z.object({ /* {{FILTER_FIELDS}} */ }),
-//       prereqs: [...],
-//       pageable: true,            // SELF: executor returns the full set
-//       // pageable: "delegate",   // DELEGATE: backend pages (variant below)
-//       // pageable: { mode: true, pageSize: 20, maxPageSize: 100 },  // tune sizes
+//     description: "… Returns one page; re-call with page:n+1 for more.",
+//     paramsSchema: z.object({ /* {{FILTER_FIELDS}} */ }),
+//     prereqs: [...],
+//     pageable: true,            // SELF: executor returns the full set
+//     // pageable: "delegate",   // DELEGATE: backend pages (variant below)
+//     // pageable: { mode: true, pageSize: 20, maxPageSize: 100 },  // tune sizes
+//     verdicts: {
+//       ok: { ok: true, summary: "{{HUMAN_READABLE_SUMMARY}}", body: { verdict: "ok" } },
 //     },
 //
 // ─── state.ts ───────────────────────────────────────────────────────────────
@@ -94,6 +94,6 @@ export async function {{EXECUTOR_FN_NAME}}(
 //   interface Params { /* filters */ page?: number; pageSize?: number }
 //   const page = p.page ?? 1, pageSize = p.pageSize ?? 10;
 //   const resp = await postBackend(..., { /* filters */ page, pageSize });
-//   return { resultBody: { summary, items: resp.payload.items ?? [],
-//                          totalCount: resp.payload.total ?? 0 }, ok: true };
-//   // config: pageable: "delegate"
+//   return { verdict: "ok", resultExtras: { items: resp.payload.items ?? [],
+//                                           totalCount: resp.payload.total ?? 0 } };
+//   // action.ts: pageable: "delegate"

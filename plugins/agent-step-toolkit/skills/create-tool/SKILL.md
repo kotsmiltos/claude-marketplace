@@ -16,7 +16,7 @@ This skill builds a new domain tool that plugs into the **existing** `src/agent-
 
 **3. Mutations carry their own pre-check and post-read.** The library does not wrap reads around mutations. A mutation executor (e.g. `change_status`) reads card/account state before writing, decides whether to refuse based on that pre-state, performs the write, then re-reads after the write — and returns `preState` and `postState` fields in its result body. The library enforces only the batch-shape opts (`soleStep` / `soleOnExecute`) and the lifecycle gates (`requiresConfirmation`, `requiresOtp`, `requiresMatch`, `requiresFlow`).
 
-**4. Library-managed state slots are off-limits to executors.** `awaitingInput`, `currentFlow`, `boundedChoice`, `pagedRead`, `deflectedAside`, `handoff`, and `errorCount` are written by the runner in response to per-action opts (`requiresConfirmation` / `issuesOtp` / `requiresOtp` / `startsMatchFor` / `requiresMatch` / `startsFlow` / `endsFlow` / `requiresFlow`), to the executor's typed `effects` (`request_handoff`, `merge_flow_data`, `otp_issued`, `clear_awaiting_input`, `abort_flow`), to the built-in controls (`deflect_aside` (2.4.0) latches `deflectedAside`), and — for `errorCount` — to the auto-handoff guard (`backendFailureCodes` / `errorHandoffThreshold` / `onErrorThreshold`; see `agent-step-api.md` `<auto_handoff>`). Executors must never put these slots in `stateUpdate` — since library 2.0.0 the runner throws if they do. The library owns an eighth slot, `guardTurn` (2.3.0), which is deliberately NOT in that guard: it is written by the HOST's model-input guards through `markGuardFired`, never coordinated by the runner.
+**4. Library-managed state slots are off-limits to executors.** `awaitingInput`, `currentFlow`, `pagedRead`, `spentLadders`, `handoff`, and `errorCount` are written by the runner in response to per-action opts (`requiresConfirmation` / `issuesOtp` / `requiresOtp` / `startsMatchFor` / `requiresMatch` / `startsFlow` / `endsFlow` / `requiresFlow` / `asks` / `captureBounces`), to typed `effects` on verdict rows or executor returns (`request_handoff`, `merge_flow_data`, `otp_issued`, `clear_awaiting_input`, `abort_flow`), to the built-in controls (`note_refusal` (3.0.0) counts the `spentLadders` once-latch), and — for `errorCount` — to the auto-handoff guard (`backendFailureCodes` / `backendFailure` rows / `errorHandoffThreshold` / `onErrorThreshold`; see `agent-step-api.md` `<auto_handoff>`). Executors must never put these slots in `stateUpdate` — the runner throws if they do.
 
 **5. Plan before writing.** Always produce a written plan first: action list, params schemas, prereqs per action, mutation opts (confirmation / OTP / match / flow), new state slots needed, new prompt fragments needed. Get user confirmation. THEN write files. Never start with file writes — the plan is the cheap review surface.
 
@@ -70,21 +70,23 @@ What do you want to do?
 **Tool directory layout (canonical):**
 ```
 src/tools/<name>/
-├── config.ts                              # defineConfig({ tool, actions }); export type ActionName — lifecycle opts inline on ActionDef.controller
+├── names.ts                               # ActionName / PrereqName type unions (types-only leaf)
+├── config.ts                              # defineConfig({ tool, actions }) — assembles the per-action declarations
 ├── index.ts                               # buildAgentStepTool wire-up (selectors + executors + verifiers, keyed by action name)
+├── actions/<action_name>/action.ts        # one per action; the DECLARATION — schema, description (semantic lead), verdict rows, asks, controller
 ├── actions/<action_name>/stateSelector.ts # one per action; exports getSlice + Slice (projects state → slice)
-├── actions/<action_name>/executor.ts      # one per action; receives the slice
+├── actions/<action_name>/executor.ts      # one per action; receives the slice, NAMES a declared verdict
 ├── verifiers/<prereq-name>.ts             # one per prereq; exports record
 ├── backend/env.ts                    # per-tool env constants
 ├── backend/client.ts                 # postBackend helper (or whatever protocol)
-└── shared/                           # cross-action helpers (e.g. resolve-X.ts)
+└── shared/                           # cross-action helpers (e.g. resolve-X.ts, rows.ts)
 ```
 
 **Graph-level wiring touched:**
 ```
 src/state.ts            # add per-tool state slots (awaitingInput + currentFlow are already there)
 src/tools/index.ts      # one-line tool registration
-src/prompt.ts           # ACTIONS + (if mutations) MUTATION SAFETY + (if multi-turn) FLOW NARRATIVE
+src/prompt.ts           # {PROTOCOL} splice (composeProtocolPrompt) + SCOPE + semantic ACTIONS + (if multi-turn) FLOW NARRATIVE
 ```
 
 **Tests scaffolded per tool (built on the shared `src/test-harness/`):**
@@ -108,7 +110,7 @@ The sandbox tests can't run without it. If a new tool calls a backend the sandbo
 
 **Keeping journey state coherent:** when an action writes an upstream slot that downstream journey state depends on, declare `invalidatesOnChange` on that action (in `config.ts`) so the runner clears the stale downstream slots when the upstream value actually changes — don't re-clear them by hand in an executor. See the `<invalidates_on_change>` section of `agent-step-api.md`.
 
-**Reserved names — do NOT use as action names:** `abort_pending_input`.
+**Reserved names — do NOT use as action names:** `abort_pending_input` (always reserved), plus `request_handoff`, `note_refusal`, and `repeat_pending_question` whenever the feature that injects them is configured (`handoff` / `ladders` / any action's `repeatReadBack`). Declaring one throws at construction — see `agent-step-api.md` `<conventions>` §3.
 
 **Construction-time errors mean misconfig.** If the dev server crashes at startup with `agent-step: ...`, the config/registries don't match. Read the message; it names the missing piece.
 </quick_reference>
@@ -153,12 +155,14 @@ All in `templates/`:
 - `project/test-harness-sandbox.ts.template`, `project/test-harness-prompt-input.ts.template`, `project/test-harness-index.ts.template`
 
 **Agent-step library** (verbatim copy by bootstrap — the ENTIRE `agent-step/` tree, recursively; no substitution):
-- Top level: `agent-step/types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `capture.ts`, `index.ts` + the test suites (`runner.test.ts`, `handoff.test.ts`, `bounded-choice.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `guard-latch.test.ts`, `deflect-aside.test.ts`, `repeat-confirmation.test.ts`, `zod-state.test.ts`)
+- Top level: `agent-step/types.ts`, `state.ts`, `runner.ts`, `messages.ts`, `define-config.ts`, `paginate.ts`, `capture.ts`, `index.ts` + the test suites (`runner.test.ts`, `handoff.test.ts`, `hardening.test.ts`, `paginate.test.ts`, `capture.test.ts`, `capture-bounce.test.ts`, `repeat-question.test.ts`, `note-refusal.test.ts`, `dictation.test.ts`, `verdict-map.test.ts`, `action-describe.test.ts`, `gate-contract.test.ts`, `zod-state.test.ts`)
 - Phase modules (internal layout; hosts import only from `index.ts`): `agent-step/compile/`, `agent-step/run/`, `agent-step/interaction/`, `agent-step/controls/`, `agent-step/handoff/` — see `references/project-bootstrap-structure.md` for the per-file inventory
 - `agent-step/VERSION` — the library version marker. Bumped by `/bump-version` when the embedded copy is refreshed; read by `/pull-library` to upgrade a downstream project's vendored copy. Travels into every bootstrapped project at `src/agent-step/VERSION`.
 
 **Tool scaffold** (used by create-tool.md):
-- `config.ts.template`, `tool-index.ts.template`, `verifier.ts.template`
+- `names.ts.template` (the types-only ActionName/PrereqName leaf)
+- `action.ts.template` (per-action declaration — schema, verdict rows, asks, captureBounces, controller)
+- `config.ts.template` (the assembler), `tool-index.ts.template`, `verifier.ts.template`
 - `state-selector.ts.template` (per-action `stateSelector.ts` — `getSlice` + `Slice`)
 - `executor-read.ts.template`, `executor-mutation.ts.template`
 - `executor-read-paginated.ts.template` (large/list read via the library `pageable` opt — runner injects page/pageSize, slices, and caches in the `pagedRead` slot)

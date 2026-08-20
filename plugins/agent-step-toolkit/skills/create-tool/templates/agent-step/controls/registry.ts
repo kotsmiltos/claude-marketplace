@@ -2,7 +2,7 @@
 //
 // The ordered control registry. ORDER IS MODEL-FACING SURFACE: it fixes the
 // sequence of injected schema variants and description lines (abort → handoff
-// → repeat confirmation → bounded-choice request → bounded-choice resolve).
+// → repeat question → bounded-choice request → bounded-choice resolve).
 // Do not reorder without re-verifying the model-facing golden.
 //
 // Exclusivity groups are likewise evaluated in their declared order at
@@ -15,27 +15,20 @@ import type { ControlAction, ControlActivation, ExclusivityGroup } from "./contr
 import { abortControl, ABORT_ACTION } from "./abort.js";
 import { requestHandoffControl } from "./request-handoff.js";
 import {
-  repeatPendingConfirmationControl,
-  REPEAT_PENDING_CONFIRMATION_ACTION,
-} from "./repeat-confirmation.js";
-import {
-  requestBoundedChoiceControl,
-  resolveBoundedChoiceControl,
-  REQUEST_BOUNDED_CHOICE_ACTION,
-  RESOLVE_BOUNDED_CHOICE_ACTION,
-} from "./bounded-choice.js";
-import { deflectAsideControl, DEFLECT_ASIDE_ACTION } from "./deflect-aside.js";
+  repeatPendingQuestionControl,
+  REPEAT_PENDING_QUESTION_ACTION,
+} from "./repeat-question.js";
+import { noteRefusalControl, NOTE_REFUSAL_ACTION } from "./note-refusal.js";
 import { HANDOFF_ACTION } from "../handoff/contract.js";
 
 export const CONTROL_REGISTRY: readonly ControlAction[] = [
   abortControl,
   requestHandoffControl,
-  repeatPendingConfirmationControl,
-  requestBoundedChoiceControl,
-  resolveBoundedChoiceControl,
+  repeatPendingQuestionControl,
   // Appended LAST deliberately: injection order is model-facing surface, and
   // the damper must not shift the four established variants.
-  deflectAsideControl,
+  // Same rule: each later addition appends after the established variants.
+  noteRefusalControl,
 ];
 
 export const EXCLUSIVITY_GROUPS: readonly ExclusivityGroup[] = [
@@ -50,8 +43,11 @@ export const EXCLUSIVITY_GROUPS: readonly ExclusivityGroup[] = [
       formatMessage(msgs.handoff_must_be_sole_step, { action: foundAction }),
   },
   {
+    // Group name and error code keep the historical "confirmation" vocabulary
+    // deliberately (byte-pinned engine codes); the control repeats whatever
+    // the cursor holds — see repeat-question.ts.
     name: "repeat-confirmation",
-    memberNames: [REPEAT_PENDING_CONFIRMATION_ACTION],
+    memberNames: [REPEAT_PENDING_QUESTION_ACTION],
     errorCode: "repeat_confirmation_must_be_sole_step",
     // A recap is a read-only turn boundary. Mixing domain work into the same
     // batch could turn the caller's clarification into confirmation.
@@ -59,22 +55,13 @@ export const EXCLUSIVITY_GROUPS: readonly ExclusivityGroup[] = [
       `"${foundAction}" must be the only step in the batch.`,
   },
   {
-    name: "bounded-choice",
-    memberNames: [REQUEST_BOUNDED_CHOICE_ACTION, RESOLVE_BOUNDED_CHOICE_ACTION],
-    errorCode: "bounded_choice_must_be_sole_step",
-    // Both controls are meta-transitions: a same-batch domain call could
-    // otherwise turn "continue" into consent for a suspended mutation.
-    summary: (foundAction: string) =>
-      `"${foundAction}" must be the only step in the batch.`,
-  },
-  {
-    name: "deflect",
-    memberNames: [DEFLECT_ASIDE_ACTION],
-    errorCode: "deflect_must_be_sole_step",
-    // The deflection answers a turn where the caller pivoted AWAY from the
-    // task — a same-batch domain step would mean the model both deflected and
-    // kept working, and on the repeat path the step escalates into a handoff,
-    // which abandons the turn (same incoherence as the handoff group).
+    name: "ladder",
+    memberNames: [NOTE_REFUSAL_ACTION],
+    errorCode: "note_refusal_must_be_sole_step",
+    // The turn answers a refusal, not a value — a same-batch domain step
+    // would mean the model both recorded the refusal and kept working, and on
+    // the exhausted path the step escalates into a handoff, which abandons
+    // the turn (same incoherence as the deflect group).
     summary: (foundAction: string) =>
       `"${foundAction}" must be the only step in the batch.`,
   },
@@ -94,7 +81,5 @@ export function reservedControlNames(ctx: ControlActivation): string[] {
 
 export {
   ABORT_ACTION,
-  REPEAT_PENDING_CONFIRMATION_ACTION,
-  REQUEST_BOUNDED_CHOICE_ACTION,
-  RESOLVE_BOUNDED_CHOICE_ACTION,
+  REPEAT_PENDING_QUESTION_ACTION,
 };

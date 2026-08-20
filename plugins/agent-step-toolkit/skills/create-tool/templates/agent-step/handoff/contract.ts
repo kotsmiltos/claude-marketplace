@@ -149,20 +149,6 @@ export interface HandoffSpec<T> {
     state: T,
     request: HandoffRequest,
   ) => Record<string, unknown> | undefined;
-  /** Derive a handoff from state when the MODEL ended a turn without one — the
-   *  "don't dead-end the caller" guard. Return `undefined` for the normal case
-   *  (no forced transition). Consumed by `forcedHandoffRequested` on the model
-   *  node's conditional edge and by `createHandoffNode`, which resolves the
-   *  request directly — there is no separate node and the forced request is
-   *  never written to state.
-   *
-   *  Keep it a pure function of state. It runs on turns where the model chose
-   *  to answer in plain text, so anything it decides must be derivable without
-   *  reading the caller's words. NOTE the failure mode this replaces: a host
-   *  graph that re-derives a forced handback from a TERMINAL slot fires it again
-   *  on every later turn of the same call unless that slot is listed in
-   *  `clearsOnHandback` — the caller is then bounced with no way out. */
-  forcedHandoff?: (state: T) => HandoffRequest | undefined;
   /** Host DOMAIN slots to null when a task-ENDING handback resolves — i.e.
    *  `completed` / `abandon` in terminate mode. Never applied to `off_topic`
    *  (a topic-change aside must stay resumable: the caller can come straight
@@ -193,69 +179,10 @@ export interface HandoffSpec<T> {
    *  thread id gives it memory, not history — the first delegated turn knows
    *  only what this input carries). */
   delegateInput?: (state: T, request: HandoffRequest) => Record<string, unknown>;
-  /** Opt into the `deflect_aside` control: the trigger-happy-handoff damper.
-   *  An aside mid-task that NO configured agent serves (weather, small talk —
-   *  a re-route buys the caller nothing but a lost turn) gets ONE free
-   *  in-place deflection per task: the runner latches the task-scoped
-   *  `deflectedAside` slot, leaves every pending gate intact, and instructs
-   *  the model to decline in one sentence and repeat its pending question in
-   *  the same turn. A SECOND deflection request in the same task escalates
-   *  atomically into the `off_topic` handback (the aside rides as its
-   *  `context`), so a persistent pivot still re-routes deterministically —
-   *  one-shot, like the bounded-choice overlay.
-   *
-   *  The model still owns the classification (a topic another configured
-   *  agent may serve keeps signalling `off_topic` directly; only chit-chat is
-   *  deflected), and a misjudgement is benign in both directions: a wrongly
-   *  deflected in-scope ask hands off one turn later on persistence, a
-   *  wrongly handed-off aside is exactly the pre-control behaviour. The
-   *  prompt must teach the split — see the `deflect_aside` action
-   *  description.
-   *
-   *  `true` (or `{}`) enables the control with its domain-neutral default
-   *  description; the object form's `actionDescription` replaces the LLM-facing
-   *  description attached to the schema variant — the same override
-   *  `actionDescription` above provides for `request_handoff` — so a host can
-   *  state its own classification policy (which topics other agents serve)
-   *  in the model's own terms. */
-  deflectAside?: boolean | { actionDescription?: string };
-}
-
-/** True when `spec` opts into the `deflect_aside` control (either form).
- *  Shared by compile/plan.ts and compile/validate.ts so activation and
- *  channel validation cannot diverge. Requires the handoff by construction —
- *  the repeat path escalates into it. */
-export function deflectAsideEnabled(
-  spec: { deflectAside?: boolean | { actionDescription?: string } } | null | undefined,
-): boolean {
-  return spec != null && !!spec.deflectAside;
-}
-
-/** The host override for the `deflect_aside` LLM-facing description, when the
- *  object form carries one. */
-export function deflectAsideActionDescription(
-  spec: { deflectAside?: boolean | { actionDescription?: string } } | null | undefined,
-): string | undefined {
-  const d = spec?.deflectAside;
-  return typeof d === "object" && d != null ? d.actionDescription : undefined;
 }
 
 /** Edge predicate for the host graph's conditional edge after its tool node:
  *  `handoffRequested(state) ? HANDOFF_NODE : <model node>`. */
 export function handoffRequested(state: LibraryManagedSlots): boolean {
   return state.handoff != null;
-}
-
-/** Edge predicate for the FORCED handoff: true when no handoff is pending (the
- *  model ended the turn without one) yet `spec.forcedHandoff` derives one from
- *  state. Wire it on the model node's conditional edge, ahead of END:
- *  `forcedHandoffRequested(state, spec) ? HANDOFF_NODE : END`. The resolver
- *  then re-derives the same request from the same pure function, so the graph
- *  needs no arming node and the slot is never written. */
-export function forcedHandoffRequested<T extends LibraryManagedSlots>(
-  state: T,
-  spec: HandoffSpec<T>,
-): boolean {
-  if (state.handoff != null) return false;
-  return spec.forcedHandoff?.(state) != null;
 }

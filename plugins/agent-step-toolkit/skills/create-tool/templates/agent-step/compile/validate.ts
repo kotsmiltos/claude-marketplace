@@ -9,18 +9,13 @@
 
 import type { z } from "zod";
 import type { ActionDef } from "../types.js";
+import { buildControlActivation, type ActivationInputs } from "./activation.js";
 import {
-  deflectAsideEnabled,
   handoffParamsSchema,
-  type HandoffSpec,
 } from "../handoff/contract.js";
 import type { HandoffRequest } from "../state.js";
-import type { BoundedChoiceRegistry } from "../interaction/bounded-choice.js";
-import { repeatReadBackEnabled } from "../interaction/confirmation.js";
 import {
-  resolveAbortPolicy,
   type AbortPolicy,
-  type ControlActivation,
 } from "../controls/contract.js";
 import { reservedControlNames } from "../controls/registry.js";
 import { channelsOf, type StateSchemaLike } from "./state-schema.js";
@@ -38,7 +33,7 @@ export interface ValidatableOptions {
     modelRequestSchema?: z.ZodType<HandoffRequest>;
   };
   abortPolicy?: AbortPolicy<string>;
-  boundedChoices?: BoundedChoiceRegistry;
+  ladders?: import("../controls/note-refusal.js").LadderRegistry;
   onErrorThreshold?: unknown;
 }
 
@@ -50,6 +45,9 @@ export interface ValidatableOptions {
 function requiredManagedChannels(opts: ValidatableOptions): string[] {
   const required = new Set<string>();
   for (const action of Object.values(opts.config.actions)) {
+    if (action.asks && Object.keys(action.asks).length > 0) {
+      required.add("awaitingInput");
+    }
     const c = action.controller;
     if (!c) {
       if (action.pageable) required.add("pagedRead");
@@ -69,20 +67,17 @@ function requiredManagedChannels(opts: ValidatableOptions): string[] {
     }
     if (action.pageable) required.add("pagedRead");
   }
-  if (Object.keys(opts.boundedChoices ?? {}).length > 0) {
-    required.add("boundedChoice");
-  }
   if (opts.handoff != null) {
     required.add("handoff");
   }
   if (opts.handoff != null || opts.onErrorThreshold != null) {
     required.add("errorCount");
   }
-  // The deflect_aside latch: without this channel the runner's write is
-  // silently discarded, so the free deflection never spends and the
+  // The once-latch record (the ladders): without this channel the runner's
+  // write is silently discarded, so a free use never spends and the
   // escalation NEVER fires.
-  if (deflectAsideEnabled(opts.handoff as HandoffSpec<unknown> | undefined)) {
-    required.add("deflectedAside");
+  if (Object.keys(opts.ladders ?? {}).length > 0) {
+    required.add("spentLadders");
   }
   return [...required];
 }
@@ -105,7 +100,7 @@ export function validateConfig(opts: ValidatableOptions): void {
         `\`agentStepZodShape\` (Zod) into the host state schema.`,
     );
   }
-  const boundedChoices = opts.boundedChoices ?? {};
+  const ladders = opts.ladders ?? {};
   const configuredHandoffSchema = opts.handoff?.modelRequestSchema as unknown;
   if (
     configuredHandoffSchema !== undefined &&
@@ -117,16 +112,40 @@ export function validateConfig(opts: ValidatableOptions): void {
   ) {
     throw new Error("agent-step: handoff.modelRequestSchema must be a Zod schema.");
   }
-  const effectiveHandoffSchema =
-    configuredHandoffSchema === undefined
-      ? handoffParamsSchema
-      : (configuredHandoffSchema as z.ZodType<HandoffRequest>);
   const actionNames = Object.keys(config.actions);
-  const repeatableConfirmationActions = actionNames.filter((name) =>
-    repeatReadBackEnabled(
-      config.actions[name].controller?.requiresConfirmation,
-    ),
-  );
+  // Shared construction (compile/activation.ts); conservativeLifecycle keeps
+  // the reserved-name set independent of the lifecycle analysis below.
+  const activation = buildControlActivation({
+    actions: config.actions as Record<string, import("../types.js").ActionDef<string>>,
+    handoff: opts.handoff as ActivationInputs<string>["handoff"],
+    abortPolicy: opts.abortPolicy,
+    ladders: opts.ladders,
+    conservativeLifecycle: true,
+  });
+  const repeatableConfirmationActions = activation.repeatableConfirmationActions;
+  // A repeatable gate's taxonomy is incompatible with the generic reply
+  // contract: the generic template ends "anything else → make no call and
+  // re-ask", while the repeat control exists precisely so the re-ask is a
+  // TOOL CALL returning the stored bytes (measured 2026-08-14: at a repeatable
+  // consent gate governed by the generic contract, the model made no call on a
+  // clarification and executed on side-speech). Fail construction rather than
+  // silently inherit the wrong contract.
+  for (const name of repeatableConfirmationActions) {
+    const opts = config.actions[name].controller?.requiresConfirmation;
+    const contract =
+      typeof opts === "object" ? opts.replyContract : undefined;
+    // A GateContractSpec always composes non-empty (the composer validates its
+    // own fields), so presence is the whole check.
+    if (contract == null) {
+      throw new Error(
+        `agent-step: action "${name}" enables repeatReadBack but declares no ` +
+          `replyContract. A repeatable gate routes re-asks through the repeat ` +
+          `control, which the generic reply contract forbids ("make no call"); ` +
+          `declare the gate's own reply taxonomy in ` +
+          `requiresConfirmation.replyContract.`,
+      );
+    }
+  }
 
   const rawAbortPolicy = opts.abortPolicy as unknown;
   if (
@@ -211,20 +230,6 @@ export function validateConfig(opts: ValidatableOptions): void {
     }
   }
 
-  const activation: ControlActivation = {
-    // Reserved names don't depend on lifecycle opts (the abort name is always
-    // reserved); pass a conservative value.
-    hasLifecycleOpts: true,
-    handoffEnabled: opts.handoff != null,
-    handoffModelRequestSchema: effectiveHandoffSchema,
-    abortPolicy: resolveAbortPolicy(opts.abortPolicy),
-    repeatableConfirmationActions,
-    boundedChoices,
-    boundedChoicesEnabled: Object.keys(boundedChoices).length > 0,
-    deflectAsideEnabled: deflectAsideEnabled(
-      opts.handoff as HandoffSpec<unknown> | undefined,
-    ),
-  };
 
   // `abort_pending_input` is always reserved. `request_handoff` is reserved
   // ONLY when the library handoff is opted into — a tool that does NOT pass
@@ -291,64 +296,110 @@ export function validateConfig(opts: ValidatableOptions): void {
         );
       }
     }
+    // Declared verdict rows (`ActionDef.verdicts`): the summary is required
+    // by type; backendFailure marks a code that must exist statically; a
+    // row's ask must not double-declare a key `asks` already owns.
+    for (const [code, row] of Object.entries(action.verdicts ?? {})) {
+      if (typeof code !== "string" || code.trim().length === 0) {
+        throw new Error(`agent-step: action "${a}" has a verdicts entry with an empty code.`);
+      }
+      if (row.backendFailure && typeof row.body?.error !== "string") {
+        throw new Error(
+          `agent-step: action "${a}" verdicts["${code}"] sets backendFailure but body.error is not a static string — the failure counter matches on that code.`,
+        );
+      }
+    }
+    // Standing asks: every mapped target must exist, and the named capture
+    // param must be a declared field of the target's params schema — a typo
+    // here would synthesize calls the target cannot parse.
+    for (const [code, ask] of Object.entries(action.asks ?? {})) {
+      if (typeof code !== "string" || code.trim().length === 0) {
+        throw new Error(`agent-step: action "${a}" has an asks entry with an empty code.`);
+      }
+      const target = config.actions[ask.action];
+      if (!target) {
+        throw new Error(
+          `agent-step: action "${a}" asks["${code}"] targets unknown action "${ask.action}".`,
+        );
+      }
+      if (ask.expects !== "digits" && ask.expects !== "text") {
+        throw new Error(
+          `agent-step: action "${a}" asks["${code}"] has invalid expects "${String(ask.expects)}".`,
+        );
+      }
+      const shape = (target.paramsSchema as { shape?: Record<string, unknown> }).shape;
+      if (shape && !(ask.param in shape)) {
+        throw new Error(
+          `agent-step: action "${a}" asks["${code}"] names param "${ask.param}" which is not declared on "${ask.action}".`,
+        );
+      }
+    }
   }
   if (actionNames.length === 0) {
     throw new Error("agent-step: at least one action must be defined.");
   }
 
-  for (const [name, choice] of Object.entries(boundedChoices)) {
+
+  // Capture-bounce bounds (ActionDef.captureBounces): the engine's only defence
+  // against an unbounded re-ask loop on a malformed capture. Validated here so
+  // a typo'd ladder name fails at construction rather than on the Nth bounce of
+  // a live call.
+  for (const [name, action] of Object.entries(opts.config.actions)) {
+    const policy = (action as { captureBounces?: { max?: unknown; ladder?: unknown } })
+      .captureBounces;
+    if (policy === undefined) continue;
+    if (!Number.isInteger(policy.max) || (policy.max as number) < 1) {
+      throw new Error(
+        `agent-step: action "${name}" needs captureBounces.max as an integer ≥ 1.`,
+      );
+    }
+    if (typeof policy.ladder !== "string" || !(policy.ladder in ladders)) {
+      throw new Error(
+        `agent-step: action "${name}" has captureBounces.ladder "${String(
+          policy.ladder,
+        )}" which is not a configured ladder.`,
+      );
+    }
+  }
+
+  if (Object.keys(ladders).length > 0 && opts.handoff == null) {
+    throw new Error(
+      "agent-step: ladders require handoff — every ladder escalates into one.",
+    );
+  }
+  for (const [name, ladder] of Object.entries(ladders)) {
     if (name.trim().length === 0) {
-      throw new Error("agent-step: bounded-choice names must be non-empty.");
+      throw new Error("agent-step: ladder names must be non-empty.");
     }
-    if (choice.description.trim().length === 0) {
+    if (ladder.description.trim().length === 0) {
       throw new Error(
-        `agent-step: bounded choice "${name}" is missing a non-empty description.`,
+        `agent-step: ladder "${name}" is missing a non-empty description.`,
       );
     }
-    const selections = choice.selections.map((selection) => selection.trim());
-    if (selections.length === 0 || selections.some((selection) => selection.length === 0)) {
+    if (ladder.instruction.trim().length === 0) {
       throw new Error(
-        `agent-step: bounded choice "${name}" requires at least one non-empty selection.`,
+        `agent-step: ladder "${name}" is missing a non-empty instruction.`,
       );
     }
-    if (new Set(selections).size !== selections.length) {
+    if (
+      ladder.maxFreeUses !== undefined &&
+      (!Number.isInteger(ladder.maxFreeUses) || ladder.maxFreeUses < 1)
+    ) {
       throw new Error(
-        `agent-step: bounded choice "${name}" contains duplicate selections.`,
+        `agent-step: ladder "${name}" needs maxFreeUses ≥ 1 when set.`,
       );
     }
-    for (const action of choice.directInputActions ?? []) {
-      if (!config.actions[action]) {
-        throw new Error(
-          `agent-step: bounded choice "${name}" lists unknown directInputAction "${action}".`,
-        );
-      }
-    }
-    if (choice.onRepeatHandoff && !opts.handoff) {
+    // Deliberately the LIBRARY contract, not the host's model schema: an
+    // escalation route is engine-only by design — a host may (and should)
+    // remove it from the model-requestable routes entirely, so the engine
+    // holds the only path to it.
+    const parsed = handoffParamsSchema.safeParse(ladder.onExhaust);
+    if (!parsed.success) {
       throw new Error(
-        `agent-step: bounded choice "${name}" configures onRepeatHandoff but handoff is not enabled.`,
+        `agent-step: ladder "${name}" has an invalid onExhaust: ${parsed.error.issues
+          .map((issue) => issue.message)
+          .join("; ")}`,
       );
-    }
-    if (choice.onRepeatHandoff) {
-      // A configured repeat fallback must be one of the same routes the model
-      // is allowed to request. The base schema remains the trusted state/effect
-      // contract, but accepting a broader fallback here would make the host's
-      // advertised route allow-list internally inconsistent.
-      const parsed = effectiveHandoffSchema.safeParse(choice.onRepeatHandoff);
-      const canonical = parsed.success
-        ? handoffParamsSchema.safeParse(parsed.data)
-        : null;
-      if (!parsed.success || !canonical?.success) {
-        const issues = !parsed.success
-          ? parsed.error.issues
-          : canonical && !canonical.success
-            ? canonical.error.issues
-            : [];
-        throw new Error(
-          `agent-step: bounded choice "${name}" has an invalid onRepeatHandoff: ${issues
-            .map((issue) => issue.message)
-            .join("; ")}`,
-        );
-      }
     }
   }
 }

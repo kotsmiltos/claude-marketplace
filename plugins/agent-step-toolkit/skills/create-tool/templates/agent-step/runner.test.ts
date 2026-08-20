@@ -43,7 +43,7 @@ const testStateAnnotation = Annotation.Root({
   }),
 });
 
-type ActionName = "verify_customer" | "verify_card" | "fetch_card_status" | "change_status";
+type ActionName = "verify_customer" | "verify_card" | "fetch_status" | "change_status";
 type PrereqName = "customerVerified" | "cardVerified";
 
 function makeConfig() {
@@ -54,22 +54,63 @@ function makeConfig() {
         description: "verify the customer",
         paramsSchema: z.object({ code: z.string() }),
         prereqs: [],
+        verdicts: {
+          ok: {
+            ok: true,
+            summary: "customer ok",
+            body: { verdict: "ok", code: (d: Record<string, unknown>) => d.code },
+          },
+          customer_not_found: {
+            ok: false,
+            summary: "no customer",
+            body: { verdict: "customer_not_found" },
+          },
+        },
       },
       verify_card: {
         description: "verify the card",
         paramsSchema: z.object({ pan: z.string() }),
         prereqs: ["customerVerified"],
+        verdicts: {
+          ok: {
+            ok: true,
+            summary: "card ok",
+            body: { verdict: "ok", pan: (d: Record<string, unknown>) => d.pan },
+          },
+          card_not_found: {
+            ok: false,
+            summary: "no card",
+            body: { verdict: "card_not_found" },
+          },
+        },
       },
-      fetch_card_status: {
+      fetch_status: {
         description: "read card status",
         paramsSchema: z.object({}),
         prereqs: ["cardVerified"],
+        verdicts: {
+          // Body fields beyond the summary arrive via `resultExtras` (the
+          // fixture's status value is mock-shaped, not enumerable here).
+          status: { ok: true, summary: (_s, d) => String(d.summary) },
+        },
       },
       change_status: {
         description: "change card status",
         paramsSchema: z.object({ newStatus: z.string() }),
         prereqs: ["cardVerified"],
         controller: { soleStep: true },
+        verdicts: {
+          mutated: {
+            ok: true,
+            summary: "mutated",
+            body: { success: true, newStatus: (d: Record<string, unknown>) => d.newStatus },
+          },
+          mutation_failed: {
+            ok: false,
+            summary: "mutation failed",
+            body: { success: false, newStatus: (d: Record<string, unknown>) => d.newStatus },
+          },
+        },
       },
     },
   });
@@ -78,12 +119,12 @@ function makeConfig() {
 interface Calls {
   verifyCustomer: number;
   verifyCard: number;
-  fetchCardStatus: number;
+  fetchStatus: number;
   changeStatus: number;
 }
 
 interface MockOpts {
-  fetchCardStatusValue?: { state?: string; summary?: string };
+  fetchStatusValue?: { state?: string; summary?: string };
   changeOk?: boolean;
   cardOk?: boolean;
   customerOk?: boolean;
@@ -98,29 +139,22 @@ interface MockOpts {
 const baseSelectors = {
   verify_customer: (s: S) => s,
   verify_card: (s: S) => s,
-  fetch_card_status: (s: S) => s,
+  fetch_status: (s: S) => s,
   change_status: (s: S) => s,
 };
 
 function makeOpts(
   mock: MockOpts = {},
 ): { opts: BuildAgentStepToolOptions<S, string, string, typeof baseSelectors>; calls: Calls } {
-  const calls: Calls = { verifyCustomer: 0, verifyCard: 0, fetchCardStatus: 0, changeStatus: 0 };
+  const calls: Calls = { verifyCustomer: 0, verifyCard: 0, fetchStatus: 0, changeStatus: 0 };
   const executors: ExecutorRegistry<S, typeof baseSelectors> = {
     verify_customer: async (params) => {
       calls.verifyCustomer++;
       const ok = mock.customerOk ?? true;
       const code = (params as { code: string }).code;
       return ok
-        ? {
-            resultBody: { summary: "customer ok", verdict: "ok", code },
-            stateUpdate: { customer: { code } },
-            ok: true,
-          }
-        : {
-            resultBody: { summary: "no customer", verdict: "customer_not_found" },
-            ok: false,
-          };
+        ? { verdict: "ok", data: { code }, stateUpdate: { customer: { code } } }
+        : { verdict: "customer_not_found" };
     },
     verify_card: async (params) => {
       calls.verifyCard++;
@@ -128,31 +162,21 @@ function makeOpts(
       const ok = mock.cardOk ?? true;
       const pan = (params as { pan: string }).pan;
       return ok
-        ? {
-            resultBody: { summary: "card ok", verdict: "ok", pan },
-            stateUpdate: { card: { pan } },
-            ok: true,
-          }
-        : {
-            resultBody: { summary: "no card", verdict: "card_not_found" },
-            ok: false,
-          };
+        ? { verdict: "ok", data: { pan }, stateUpdate: { card: { pan } } }
+        : { verdict: "card_not_found" };
     },
-    fetch_card_status: async () => {
-      calls.fetchCardStatus++;
-      const fv = mock.fetchCardStatusValue ?? { state: "active", summary: "state active" };
-      return { resultBody: fv, ok: true };
+    fetch_status: async () => {
+      calls.fetchStatus++;
+      const { summary, ...rest } =
+        mock.fetchStatusValue ?? { state: "active", summary: "state active" };
+      return { verdict: "status", data: { summary }, resultExtras: rest };
     },
     change_status: async (params) => {
       calls.changeStatus++;
       const ok = mock.changeOk ?? true;
       return {
-        resultBody: {
-          summary: ok ? "mutated" : "mutation failed",
-          success: ok,
-          newStatus: (params as { newStatus: string }).newStatus,
-        },
-        ok,
+        verdict: ok ? "mutated" : "mutation_failed",
+        data: { newStatus: (params as { newStatus: string }).newStatus },
       };
     },
   };
@@ -250,17 +274,17 @@ test("batched ok — three steps, state threaded between", async () => {
     [
       { action: "verify_customer", params: { code: "C1" } },
       { action: "verify_card", params: { pan: "P1" } },
-      { action: "fetch_card_status", params: {} },
+      { action: "fetch_status", params: {} },
     ],
     EMPTY,
   );
   assert.equal(body.failed_at, undefined);
   assert.equal(body.results.length, 3);
-  assert.equal(body.results[2].action, "fetch_card_status");
+  assert.equal(body.results[2].action, "fetch_status");
   assert.equal(body.results[2].ok, true);
   assert.equal(calls.verifyCustomer, 1);
   assert.equal(calls.verifyCard, 1);
-  assert.equal(calls.fetchCardStatus, 1);
+  assert.equal(calls.fetchStatus, 1);
   assert.deepEqual(committed.customer, { code: "C1" });
   assert.deepEqual(committed.card, { pan: "P1" });
 });
@@ -269,13 +293,13 @@ test("prereq missing → denial, no execution", async () => {
   const { opts, calls } = makeOpts();
   const { body, committed } = await runSteps(
     opts,
-    [{ action: "fetch_card_status", params: {} }],
+    [{ action: "fetch_status", params: {} }],
     EMPTY,
   );
   assert.equal(body.failed_at, 0);
   assert.equal(body.results[0].ok, false);
   assert.equal(body.results[0].error, "card_not_verified");
-  assert.equal(calls.fetchCardStatus, 0);
+  assert.equal(calls.fetchStatus, 0);
   assert.deepEqual(committed, {});
 });
 
@@ -306,7 +330,7 @@ test("mutation alone → single result, executor handles verification itself", a
   assert.equal(body.results[0].action, "change_status");
   assert.equal(body.results[0].ok, true);
   assert.equal(calls.changeStatus, 1);
-  assert.equal(calls.fetchCardStatus, 0, "library no longer wraps; executor does its own reads");
+  assert.equal(calls.fetchStatus, 0, "library no longer wraps; executor does its own reads");
   assert.deepEqual(committed, {});
 });
 
@@ -316,7 +340,7 @@ test("mutation with extra step → refusal, no execution", async () => {
   const { body } = await runSteps(
     opts,
     [
-      { action: "fetch_card_status", params: {} },
+      { action: "fetch_status", params: {} },
       { action: "change_status", params: { newStatus: "lost" } },
     ],
     seeded,
@@ -324,7 +348,7 @@ test("mutation with extra step → refusal, no execution", async () => {
   assert.equal(body.failed_at, 0);
   assert.equal(body.results.length, 1);
   assert.equal(body.results[0].error, "mutation_must_be_sole_step");
-  assert.equal(calls.fetchCardStatus, 0);
+  assert.equal(calls.fetchStatus, 0);
   assert.equal(calls.changeStatus, 0);
 });
 
@@ -335,14 +359,14 @@ test("short-circuit on non-ok step", async () => {
     [
       { action: "verify_customer", params: { code: "C1" } },
       { action: "verify_card", params: { pan: "P1" } },
-      { action: "fetch_card_status", params: {} },
+      { action: "fetch_status", params: {} },
     ],
     EMPTY,
   );
   assert.equal(body.results.length, 2);
   assert.equal(body.results[1].ok, false);
   assert.equal(body.failed_at, 1);
-  assert.equal(calls.fetchCardStatus, 0);
+  assert.equal(calls.fetchStatus, 0);
   // Cumulative commit: customer update lands even though later step failed.
   assert.deepEqual(committed.customer, { code: "C1" });
   assert.equal(committed.card, undefined);
@@ -391,7 +415,7 @@ test("confirm-required: first call proposes; no executor, awaiting set, needs_co
   );
   // No executors run — not change, not fetch
   assert.equal(calls.changeStatus, 0);
-  assert.equal(calls.fetchCardStatus, 0);
+  assert.equal(calls.fetchStatus, 0);
   // awaitingInput set in committed update
   const awaiting = (committed as { awaitingInput?: AwaitingInput }).awaitingInput;
   assert.ok(awaiting && awaiting.kind === "confirmation");
@@ -430,7 +454,7 @@ test("confirm-required: same-params re-call executes; pending cleared atomically
   // Execute mode: the mutation runs as a single step; the executor handles
   // any internal verification on its own.
   assert.equal(calls.changeStatus, 1);
-  assert.equal(calls.fetchCardStatus, 0, "no library-driven wrap reads");
+  assert.equal(calls.fetchStatus, 0, "no library-driven wrap reads");
   // Pending explicitly cleared in committed
   assert.equal(
     (committed as { awaitingInput?: AwaitingInput | null }).awaitingInput,
@@ -459,7 +483,7 @@ test("confirm-required: drifted-params re-call re-proposes and decrements", asyn
     seeded,
   );
   assert.equal(calls.changeStatus, 0);
-  assert.equal(calls.fetchCardStatus, 0);
+  assert.equal(calls.fetchStatus, 0);
   const awaiting = (committed as { awaitingInput?: AwaitingInput }).awaitingInput;
   assert.ok(awaiting && awaiting.kind === "confirmation");
   if (awaiting && awaiting.kind === "confirmation") {
@@ -515,10 +539,10 @@ test("confirm-required: lockdown refuses unrelated actions", async () => {
   };
   const { body, committed } = await runSteps(
     opts,
-    [{ action: "fetch_card_status", params: {} }],
+    [{ action: "fetch_status", params: {} }],
     seeded,
   );
-  assert.equal(calls.fetchCardStatus, 0);
+  assert.equal(calls.fetchStatus, 0);
   // No state changes (committed should not touch pendingConfirmation).
   assert.equal(
     (committed as { pendingConfirmation?: unknown }).pendingConfirmation,
@@ -700,9 +724,9 @@ function makeFlowOpts(mock?: {
   const executors: ExecutorRegistry<S, typeof flowSelectors> = {
     open_flow_a: async () => {
       calls.openA++;
+      // The challenge id is call-dependent, so the effects stay on the return.
       return {
-        ok: true,
-        resultBody: { summary: "flow A opened", otp_sent: true },
+        verdict: "opened",
         effects: [
           { type: "merge_flow_data", data: { challengeId: `ch-${calls.openA}`, mobile_masked: "***1234" } },
           { type: "otp_issued" },
@@ -713,45 +737,23 @@ function makeFlowOpts(mock?: {
       calls.validateA++;
       switch (mock?.validateOutcome) {
         case "wrong":
-          return { ok: false, resultBody: { summary: "wrong code", error: "otp_invalid" } };
+          return { verdict: "otp_invalid" };
         case "timeout":
-          return {
-            ok: false,
-            resultBody: { summary: "code expired", error: "otp_timeout" },
-            effects: [{ type: "clear_awaiting_input" }],
-          };
+          return { verdict: "otp_timeout" };
         case "lock":
-          return {
-            ok: false,
-            resultBody: { summary: "locked", error: "otp_locked" },
-            effects: [{ type: "abort_flow" }],
-          };
+          return { verdict: "otp_locked" };
         case "ok":
         default:
-          return {
-            ok: true,
-            resultBody: { summary: "otp validated", otp_valid: true },
-            effects: [{ type: "merge_flow_data", data: { otpValidated: true } }],
-          };
+          return { verdict: "validated" };
       }
     },
     finish_flow_a: async () => {
       calls.finishA++;
-      return {
-        ok: true,
-        resultBody: { summary: "flow A finished", success: true },
-      };
+      return { verdict: "finished" };
     },
     open_flow_b: async () => {
       calls.openB++;
-      return {
-        ok: true,
-        resultBody: { summary: "flow B opened" },
-        effects: [
-          { type: "merge_flow_data", data: { challengeId: "ch-b" } },
-          { type: "otp_issued" },
-        ],
-      };
+      return { verdict: "opened" };
     },
   };
   const verifiers: VerifierRegistry<S> = {};
@@ -766,6 +768,9 @@ function makeFlowOpts(mock?: {
           startsFlow: { name: "flow_a" },
           issuesOtp: { consumer_action: "validate_a_otp" },
         },
+        verdicts: {
+          opened: { ok: true, summary: "flow A opened", body: { otp_sent: true } },
+        },
       },
       validate_a_otp: {
         description: "validate OTP for flow A",
@@ -774,6 +779,27 @@ function makeFlowOpts(mock?: {
         controller: {
           requiresOtp: true,
           requiresFlow: "flow_a",
+        },
+        verdicts: {
+          otp_invalid: { ok: false, summary: "wrong code", body: { error: "otp_invalid" } },
+          otp_timeout: {
+            ok: false,
+            summary: "code expired",
+            body: { error: "otp_timeout" },
+            effects: [{ type: "clear_awaiting_input" }],
+          },
+          otp_locked: {
+            ok: false,
+            summary: "locked",
+            body: { error: "otp_locked" },
+            effects: [{ type: "abort_flow" }],
+          },
+          validated: {
+            ok: true,
+            summary: "otp validated",
+            body: { otp_valid: true },
+            effects: [{ type: "merge_flow_data", data: { otpValidated: true } }],
+          },
         },
       },
       finish_flow_a: {
@@ -784,6 +810,9 @@ function makeFlowOpts(mock?: {
           requiresFlow: "flow_a",
           endsFlow: true,
         },
+        verdicts: {
+          finished: { ok: true, summary: "flow A finished", body: { success: true } },
+        },
       },
       open_flow_b: {
         description: "open flow B",
@@ -792,6 +821,16 @@ function makeFlowOpts(mock?: {
         controller: {
           startsFlow: { name: "flow_b" },
           issuesOtp: { consumer_action: "validate_a_otp" },
+        },
+        verdicts: {
+          opened: {
+            ok: true,
+            summary: "flow B opened",
+            effects: [
+              { type: "merge_flow_data", data: { challengeId: "ch-b" } },
+              { type: "otp_issued" },
+            ],
+          },
         },
       },
     },
@@ -1377,6 +1416,9 @@ function makeSoeOpts(): {
         description: "read",
         paramsSchema: z.object({}),
         prereqs: [],
+        verdicts: {
+          read: { ok: true, summary: "read" },
+        },
       },
       mutate_thing: {
         description: "mutate",
@@ -1386,24 +1428,24 @@ function makeSoeOpts(): {
           soleOnExecute: true,
           requiresConfirmation: { maxAttempts: 3 },
         },
+        verdicts: {
+          mutated: {
+            ok: true,
+            summary: "mutated",
+            body: { success: true, v: (d: Record<string, unknown>) => d.v },
+          },
+        },
       },
     },
   });
   const executors: ExecutorRegistry<SoeS, typeof soeSelectors> = {
     read_thing: async () => {
       calls.read++;
-      return { resultBody: { summary: "read" }, ok: true };
+      return { verdict: "read" };
     },
     mutate_thing: async (params) => {
       calls.mutate++;
-      return {
-        resultBody: {
-          summary: "mutated",
-          success: true,
-          v: (params as { v: string }).v,
-        },
-        ok: true,
-      };
+      return { verdict: "mutated", data: { v: (params as { v: string }).v } };
     },
   };
   const verifiers: VerifierRegistry<SoeS> = {};
@@ -1568,6 +1610,9 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
         paramsSchema: z.object({}),
         prereqs: [],
         controller: { startsFlow: { name: "myflow" } },
+        verdicts: {
+          opened: { ok: true, summary: "flow opened" },
+        },
       },
       capture_value: {
         description: "capture the first entry",
@@ -1576,6 +1621,9 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
         controller: {
           requiresFlow: "myflow",
           startsMatchFor: { consumer_action: "commit_value" },
+        },
+        verdicts: {
+          captured: { ok: true, summary: "captured" },
         },
       },
       commit_value: {
@@ -1587,6 +1635,20 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
           requiresMatch: { capturer: "capture_value", maxAttempts: 3 },
           endsFlow: true,
         },
+        verdicts: {
+          match_mismatch: {
+            ok: false,
+            summary: "did not match",
+            body: { verdict: "match_mismatch" },
+          },
+          backend_failed: {
+            ok: false,
+            summary: "backend refused",
+            body: { error: "backend_failed" },
+            effects: [{ type: "abort_flow" }],
+          },
+          committed: { ok: true, summary: "committed", body: { success: true } },
+        },
       },
       issue_otp: {
         description: "issue an OTP for the flow",
@@ -1596,22 +1658,32 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
           requiresFlow: "myflow",
           issuesOtp: { consumer_action: "commit_value" },
         },
+        verdicts: {
+          issued: {
+            ok: true,
+            summary: "otp issued",
+            body: { otp_sent: true },
+            effects: [
+              { type: "merge_flow_data", data: { challengeId: "ch-1" } },
+              { type: "otp_issued" },
+            ],
+          },
+        },
       },
     },
   });
   const executors: ExecutorRegistry<MatchS, typeof matchSelectors> = {
     open_flow: async () => {
       calls.open++;
-      return { resultBody: { summary: "flow opened" }, ok: true };
+      return { verdict: "opened" };
     },
     capture_value: async (params) => {
       calls.capture++;
       const v = (params as { v: string }).v;
       // store the captured value in flow data — the consumer will compare
       return {
-        resultBody: { summary: "captured" },
+        verdict: "captured",
         effects: [{ type: "merge_flow_data", data: { captured: v } }],
-        ok: true,
       };
     },
     commit_value: async (params, state) => {
@@ -1620,37 +1692,13 @@ function makeMatchOpts(mock: MatchMockOpts = {}): {
       const stored = (state.currentFlow?.data as { captured?: string } | undefined)
         ?.captured;
       const outcome = mock.forceCommit ?? (v === stored ? "match" : "mismatch");
-      if (outcome === "mismatch") {
-        return {
-          resultBody: {
-            summary: "did not match",
-            verdict: "match_mismatch",
-          },
-          ok: false,
-        };
-      }
-      if (outcome === "backend_failed") {
-        return {
-          resultBody: { summary: "backend refused", error: "backend_failed" },
-          effects: [{ type: "abort_flow" }],
-          ok: false,
-        };
-      }
-      return {
-        resultBody: { summary: "committed", success: true },
-        ok: true,
-      };
+      if (outcome === "mismatch") return { verdict: "match_mismatch" };
+      if (outcome === "backend_failed") return { verdict: "backend_failed" };
+      return { verdict: "committed" };
     },
     issue_otp: async () => {
       calls.issue++;
-      return {
-        resultBody: { summary: "otp issued", otp_sent: true },
-        effects: [
-          { type: "merge_flow_data", data: { challengeId: "ch-1" } },
-          { type: "otp_issued" },
-        ],
-        ok: true,
-      };
+      return { verdict: "issued" };
     },
   };
   return {
@@ -1960,11 +2008,17 @@ function makeInvalidateOpts(): BuildAgentStepToolOptions<
           invalidatesOnChange: {
             pan: ["amount", "amountCollected", "matchedTx"],
           },
+          verdicts: {
+            ok: { ok: true, summary: "card set", body: { verdict: "ok" } },
+          },
         },
         set_amount: {
           description: "set the amount",
           paramsSchema: z.object({ amount: z.number() }),
           prereqs: [],
+          verdicts: {
+            ok: { ok: true, summary: "amount set", body: { verdict: "ok" } },
+          },
         },
       },
     }),
@@ -1972,18 +2026,16 @@ function makeInvalidateOpts(): BuildAgentStepToolOptions<
     selectors: invSelectors,
     executors: {
       set_card: async (params) => ({
-        resultBody: { summary: "card set", verdict: "ok" },
+        verdict: "ok",
         stateUpdate: { pan: (params as { pan: string }).pan },
-        ok: true,
       }),
       set_amount: async (params) => ({
-        resultBody: { summary: "amount set", verdict: "ok" },
+        verdict: "ok",
         stateUpdate: {
           amount: (params as { amount: number }).amount,
           amountCollected: true,
           matchedTx: "TX-" + (params as { amount: number }).amount,
         },
-        ok: true,
       }),
     },
     verifiers: {},
@@ -2104,6 +2156,9 @@ test("invalidatesOnChange: executor's own writes to downstream slots win over th
           invalidatesOnChange: {
             amount: ["matchedTx"],
           },
+          verdicts: {
+            ok: { ok: true, summary: "ok", body: { verdict: "ok" } },
+          },
         },
       },
     }),
@@ -2113,9 +2168,8 @@ test("invalidatesOnChange: executor's own writes to downstream slots win over th
       set_amount: async (params) => {
         const p = params as { amount: number; tx: string };
         return {
-          resultBody: { summary: "ok", verdict: "ok" },
+          verdict: "ok",
           stateUpdate: { amount: p.amount, matchedTx: p.tx },
-          ok: true,
         };
       },
     },
@@ -2152,7 +2206,7 @@ test("composed tool description indexes actions by summary, not full description
         paramsSchema: z.object({ pan: z.string() }),
         prereqs: ["customerVerified"],
       },
-      fetch_card_status: {
+      fetch_status: {
         description: "read card status",
         paramsSchema: z.object({}),
         prereqs: ["cardVerified"],
@@ -2207,6 +2261,15 @@ function makeAhOpts(
         description: "call a backend that may fail",
         paramsSchema: z.object({ mode: z.string(), code: z.string().optional() }),
         prereqs: [],
+        verdicts: {
+          // The error code is test-parametrized, so it rides `data`.
+          failed: {
+            ok: false,
+            summary: "failed",
+            body: { error: (d: Record<string, unknown>) => d.code },
+          },
+          ok: { ok: true, summary: "ok" },
+        },
       },
     },
   });
@@ -2214,8 +2277,8 @@ function makeAhOpts(
     call_backend: async (raw) => {
       const p = raw as { mode: string; code?: string };
       if (p.mode === "throw") throw new Error("backend exploded");
-      if (p.mode === "verdict") return { resultBody: { summary: "failed", error: p.code }, ok: false };
-      return { resultBody: { summary: "ok" }, ok: true };
+      if (p.mode === "verdict") return { verdict: "failed", data: { code: p.code } };
+      return { verdict: "ok" };
     },
   };
   return {
@@ -2394,15 +2457,22 @@ function makeGatedAhOpts(
         paramsSchema: z.object({ mode: z.string(), code: z.string().optional() }),
         prereqs: [],
         controller: { requiresConfirmation: { maxAttempts: 3 } },
+        verdicts: {
+          failed: {
+            ok: false,
+            summary: "failed",
+            body: { error: (d: Record<string, unknown>) => d.code },
+          },
+          ok: { ok: true, summary: "ok" },
+        },
       },
     },
   });
   const executors: ExecutorRegistry<GatedAHState, typeof gatedAhSelectors> = {
     call_backend: async (raw) => {
       const p = raw as { mode: string; code?: string };
-      if (p.mode === "verdict")
-        return { resultBody: { summary: "failed", error: p.code }, ok: false };
-      return { resultBody: { summary: "ok" }, ok: true };
+      if (p.mode === "verdict") return { verdict: "failed", data: { code: p.code } };
+      return { verdict: "ok" };
     },
   };
   return {
@@ -2498,7 +2568,7 @@ test("system messages: templated summaries interpolate placeholders and honor ov
   };
   const lockedRun = await runSteps(
     { ...locked.opts, messages: { lockdown_confirmation: "LOCKED {action} via {abort_action}" } },
-    [{ action: "fetch_card_status", params: {} }],
+    [{ action: "fetch_status", params: {} }],
     lockedSeed,
   );
   assert.equal(lockedRun.body.results[0].summary, "LOCKED change_status via abort_pending_input");
@@ -2569,11 +2639,17 @@ function makeNormOpts(): {
             }),
             prereqs: [],
             controller: { requiresConfirmation: { maxAttempts: 3 }, soleOnExecute: true },
+            verdicts: {
+              set: { ok: true, summary: "digits set" },
+            },
           },
           read_digits: {
             description: "plain read",
             paramsSchema: z.object({}),
             prereqs: [],
+            verdicts: {
+              read: { ok: true, summary: "read" },
+            },
           },
         },
       }),
@@ -2583,12 +2659,11 @@ function makeNormOpts(): {
         set_digits: async (params) => {
           calls.set++;
           return {
-            resultBody: { summary: "digits set" },
+            verdict: "set",
             stateUpdate: { digits: (params as { digits: string }).digits },
-            ok: true,
           };
         },
-        read_digits: async () => ({ resultBody: { summary: "read" }, ok: true }),
+        read_digits: async () => ({ verdict: "read" }),
       },
       verifiers: {},
     },
@@ -2718,6 +2793,9 @@ test("invalidatesOnChange: fresh-but-value-equal OBJECT re-write does NOT clear 
           paramsSchema: z.object({ code: z.string() }),
           prereqs: [],
           invalidatesOnChange: { holder: ["derived"] },
+          verdicts: {
+            set: { ok: true, summary: "holder set" },
+          },
         },
       },
     }),
@@ -2725,7 +2803,7 @@ test("invalidatesOnChange: fresh-but-value-equal OBJECT re-write does NOT clear 
     selectors: objSelectors,
     executors: {
       set_holder: async (params) => ({
-        resultBody: { summary: "holder set" },
+        verdict: "set",
         stateUpdate: { holder: { code: (params as { code: string }).code } },
         ok: true,
       }),
@@ -2830,6 +2908,102 @@ test("readBack: NOT rendered on the executing re-call — it is a proposal-only 
   const r = executed.body.results[0] as { needs_confirmation?: boolean; read_back?: string };
   assert.notEqual(r.needs_confirmation, true, "the same params execute on a later call");
   assert.equal(r.read_back, undefined);
+});
+
+// ─── ConfirmationOpts.readBackDirective ──────────────────────────────────── //
+// The framing for the rendered bytes rides the proposal as
+// `read_back_directive` — only ever beside a non-empty `read_back`.
+
+test("readBackDirective: rides the proposal beside read_back; never without one", async () => {
+  const base = makeOpts();
+  const cfg = makeConfig();
+  cfg.actions.change_status.controller!.requiresConfirmation = {
+    maxAttempts: 3,
+    readBack: (params) => `heard ${String(params.newStatus)}`,
+    readBackDirective: () => "FRAME: append one short confirm question.",
+  };
+  const { body } = await runSteps(
+    { ...base.opts, config: cfg },
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const r = body.results[0] as { read_back?: string; read_back_directive?: string };
+  assert.equal(r.read_back, "heard lost");
+  assert.equal(r.read_back_directive, "FRAME: append one short confirm question.");
+
+  // Without a rendered read_back the directive has nothing to frame.
+  const cfg2 = makeConfig();
+  cfg2.actions.change_status.controller!.requiresConfirmation = {
+    maxAttempts: 3,
+    readBackDirective: () => "FRAME: never emitted.",
+  };
+  const bare = await runSteps(
+    { ...base.opts, config: cfg2 },
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const b = bare.body.results[0] as Record<string, unknown>;
+  assert.ok(!("read_back_directive" in b), "no read_back → no directive");
+});
+
+// ─── ConfirmationOpts.replyContract ──────────────────────────────────────── //
+// A per-action override of the generic reply contract riding proposal bodies.
+// A gate whose taxonomy outranks the generic one (a permanent closure with
+// third-party-speech and re-selection classes) carries its OWN complete
+// contract; every other action keeps the runner template.
+
+test("replyContract: a non-empty override replaces the generic contract on propose AND re-propose", async () => {
+  const base = makeOpts();
+  const cfg = makeConfig();
+  cfg.actions.change_status.controller!.requiresConfirmation = {
+    maxAttempts: 3,
+    replyContract: {
+      subject: "this closure question",
+      subjectNoun: "closure question",
+      executesLabel: "the closure",
+      categories: ["HOST CATEGORY: classify per the closure taxonomy."],
+    },
+  };
+  const opts = { ...base.opts, config: cfg };
+  const first = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const proposed = first.body.results[0] as { reply_contract?: string };
+  assert.ok(
+    proposed.reply_contract?.includes("HOST CATEGORY: classify per the closure taxonomy."),
+    `the host category must ride the composed contract: ${proposed.reply_contract}`,
+  );
+  assert.ok(
+    proposed.reply_contract?.startsWith("The caller's NEXT reply answers this closure question."),
+    "the engine frame leads the composed contract",
+  );
+  // A correction re-proposes; the override is the gate's sole authority there too.
+  const pending = { ...SEEDED, ...(first.committed as Partial<S>) } as S;
+  const second = await runSteps(
+    opts,
+    [{ action: "change_status", params: { newStatus: "stolen" } }],
+    pending,
+  );
+  const reproposed = second.body.results[0] as { reply_contract?: string };
+  assert.equal(reproposed.reply_contract, proposed.reply_contract);
+});
+
+test("replyContract: omitted keeps the runner's generic template — hosts without one are unaffected", async () => {
+  const base = makeOpts();
+  const cfg = makeConfig();
+  cfg.actions.change_status.controller!.requiresConfirmation = { maxAttempts: 3 };
+  const { body } = await runSteps(
+    { ...base.opts, config: cfg },
+    [{ action: "change_status", params: { newStatus: "lost" } }],
+    SEEDED,
+  );
+  const r = body.results[0] as { reply_contract?: string };
+  assert.ok(
+    r.reply_contract?.includes('re-call "change_status" with exactly the proposed params'),
+    `the generic template must govern: ${r.reply_contract}`,
+  );
 });
 
 // ─── ConfirmationOpts.refuseProposal ─────────────────────────────────────── //

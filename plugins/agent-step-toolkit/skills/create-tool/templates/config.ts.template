@@ -1,128 +1,32 @@
 // FILE: src/tools/{{TOOL_NAME}}/config.ts
 //
-// Pure data. Action declarations. The runner cross-references this against
-// the executors / verifiers registries at construction time.
+// Pure data, ASSEMBLED here: each action's declaration lives beside the
+// executor that names its verdicts (actions/<name>/action.ts); this file only
+// collects them. The runner cross-references the assembled config against the
+// executors / verifiers registries at construction time.
+//
+// The tool description is ONE semantic sentence — the engine composes the
+// mechanics (batching, result shape, the gate handshake, the turn protocol)
+// into the action descriptions and the protocol prompt fragment
+// (`composeProtocolPrompt`); restating them here duplicates engine bytes.
 
-import { z } from "zod";
+import type { State } from "../../state.js";
 import { defineConfig } from "../../agent-step/index.js";
+import type { ActionName, PrereqName } from "./names.js";
 
-// Exported: the tool's index.ts imports `ActionName` to type the selector
-// registry (`satisfies SelectorRegistry<State, ActionName>`).
-export type ActionName =
-  | "{{ACTION_1}}"
-  | "{{ACTION_2}}"
-  | "{{ACTION_3}}";
+import { {{ACTION_1_CAMEL}}Action } from "./actions/{{ACTION_1}}/action.js";
+import { {{ACTION_2_CAMEL}}Action } from "./actions/{{ACTION_2}}/action.js";
+import { {{ACTION_3_CAMEL}}Action } from "./actions/{{ACTION_3}}/action.js";
 
-type PrereqName = "{{PREREQ_1}}" | "{{PREREQ_2}}";
-
-// Multi-turn flow names (only needed if any action declares startsFlow/endsFlow/requiresFlow).
-// const {{FLOW_NAME_CONST}} = "{{flow_name}}";
-
-export const {{TOOL_NAME}}Config = defineConfig<ActionName, PrereqName>({
+export const {{TOOL_NAME}}Config = defineConfig<ActionName, PrereqName, State>({
   tool: {
     name: "{{TOOL_NAME}}_agent_step",
     description:
-      "Run one or more {{TOOL_NAME}} action steps in order. Each step is `{ action, params }`. The runner resolves prereqs against session state, executes sequentially threading state updates between steps, and short-circuits on the first non-ok step. Result body is `{ summary, results: StepResult[], failed_at? }` where each StepResult is `{ action, ok, ...payload }`.",
+      "Run ordered {{TOOL_NAME}} workflow steps. Later steps see earlier state updates; execution stops at the first non-ok result.",
   },
   actions: {
-    {{ACTION_1}}: {
-      description:
-        "{{ACTION_1_LLM_DESCRIPTION}}",
-      paramsSchema: z.object({
-        // {{ACTION_1_PARAMS}}
-      }),
-      prereqs: [{{ACTION_1_PREREQS}}],
-    },
-    {{ACTION_2}}: {
-      description:
-        "{{ACTION_2_LLM_DESCRIPTION}}",
-      paramsSchema: z.object({
-        // {{ACTION_2_PARAMS}}
-      }),
-      prereqs: [{{ACTION_2_PREREQS}}],
-      // Optional: reset downstream slots when this action re-collects a watched
-      // slot with a DIFFERENT value (non-null → changed). First-time set and
-      // same-value writes do NOT fire. Targets must accept `null` as "unset".
-      // invalidatesOnChange: {
-      //   {{WATCHED_SLOT}}: ["{{DOWNSTREAM_SLOT_A}}", "{{DOWNSTREAM_SLOT_B}}"],
-      // },
-    },
-    {{ACTION_3}}: {
-      description:
-        "Confirm-required mutation. May ride as the LAST step of a propose batch (e.g. `[verify_x, verify_y, {{ACTION_3}}]`); once a confirmation is pending, the execute re-call must be the only step in the batch. First call proposes (returns `{ needs_confirmation, proposed_params, attempts_left }`, no execution). Re-call with same params after the customer affirms executes — the executor internally re-reads {{ENTITY}} status after the write to confirm the change landed; the post-read state appears in the result as `postState`. Re-call with drifted params re-proposes and decrements `attempts_left`. While pending, unrelated actions return `pending_confirmation_locked`; the LLM may also call `abort_pending_input` (library-injected) to drop the gate.",
-      paramsSchema: z.object({
-        // {{ACTION_3_PARAMS}}
-      }),
-      prereqs: [{{ACTION_3_PREREQS}}],
-      // Lifecycle opts live INLINE on the action under `controller` — there is
-      // no separate top-level `mutations` map.
-      controller: {
-        // `soleOnExecute` allows propose / re-propose to ride as the LAST step
-        // of a multi-step batch (so `[verify_customer, verify_card, mutate]`
-        // works in one tool call on the propose turn), while execute mode must
-        // be the only step in the batch. Use the strict `soleStep: true`
-        // instead if the mutation must never share a batch, regardless of mode.
-        soleOnExecute: true,
-        // requiresConfirmation opts:
-        //   maxAttempts — re-propose budget before the gate exhausts (default 3; almost always right).
-        //   lockdown    — defaults to true (unrelated batches refused while pending); leave it true.
-        //   readBack    — (state, params) => string, rendering what the RUNNER actually recorded so
-        //                 the model speaks it back verbatim instead of paraphrasing `proposed_params`.
-        //                 Add it whenever the params carry caller-dictated digits; pair it with a
-        //                 prompt rule to speak `read_back` when present, or the field is inert.
-        //   repeatReadBack — persist the readBack rendering on the gate and inject the sole-step
-        //                 `repeat_pending_confirmation` control: a "pardon?" turn returns the EXACT
-        //                 stored bytes without confirming, re-rendering, or spending an attempt.
-        //                 Add it to high-stakes recaps the caller may ask to hear again.
-        //   refuseProposal — (params, state) => result body | null: propose-time, STATE-aware refusal
-        //                 (no gate stored, no attempt spent, pending bounded choice not consumed).
-        //                 For proposals whose validity depends on state, not shape.
-        // There is deliberately NO TTL — the runner times nothing out. Stale
-        // gates clear via `abort_pending_input` or executor effects.
-        requiresConfirmation: { maxAttempts: 3 },
-      },
-    },
+    {{ACTION_1}}: {{ACTION_1_CAMEL}}Action,
+    {{ACTION_2}}: {{ACTION_2_CAMEL}}Action,
+    {{ACTION_3}}: {{ACTION_3_CAMEL}}Action,
   },
 });
-
-// ─── Other lifecycle opts available on `ActionDef.controller` (use as needed) ─── //
-//
-// Declare these inline on the action, inside its `controller: { … }` block.
-//
-// Multi-turn flow lifecycle (one flow at a time; library enforces flow mutex):
-//   startsFlow:    { name: "{{flow_name}}" }     — opens the flow on `ok`.
-//   requiresFlow:  "{{flow_name}}"               — refuse unless flow matches.
-//   endsFlow:      true                           — clears flow + awaitingInput on `ok`.
-//
-// SCA / OTP gating (library never counts OTP attempts; backend is authoritative):
-//   issuesOtp:     { consumer_action: "confirm_otp" }
-//                                                 — executor reports the `otp_issued` effect;
-//                                                   library sets awaitingInput=otp for the
-//                                                   named consumer.
-//   requiresOtp:   true                           — refuse unless awaitingInput.kind="otp"
-//                                                   for this action; auto-clears on `ok`.
-//
-// Double-entry verification (PIN repeat, password repeat, security answer):
-//   startsMatchFor:{ consumer_action: "commit_x" }
-//                                                 — capturer stores the first entry; library
-//                                                   sets awaitingInput=match for the consumer.
-//   requiresMatch: { capturer: "propose_x", maxAttempts: 3 }
-//                                                 — consumer receives the repeat; library
-//                                                   decrements attempts on `verdict: "match_mismatch"`,
-//                                                   aborts the flow on exhaustion, auto-clears on `ok`.
-//
-// Downstream-slot invalidation is NOT a controller opt — it is the separate
-// per-action `invalidatesOnChange` field shown on {{ACTION_2}} above.
-//
-// Read pagination is ALSO a top-level ActionDef field (not a controller opt):
-//   pageable: true          — self-paginate (executor returns the FULL set in
-//                             resultBody.items; the runner slices + caches it in
-//                             the library `pagedRead` slot, skipping the executor
-//                             on a same-query re-page).
-//   pageable: "delegate"    — backend pages (executor reads injected page/pageSize,
-//                             returns the page + resultBody.totalCount).
-//   pageable: { mode: true, pageSize, maxPageSize }  — tune page sizes.
-// The runner injects `page`/`pageSize` params and emits a uniform envelope. A
-// pageable action's paramsSchema MUST be a z.object. See executor-read-paginated.
-//
-// See `references/agent-step-api.md` for the full lifecycle table.

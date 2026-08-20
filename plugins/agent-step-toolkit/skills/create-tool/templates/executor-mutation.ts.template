@@ -1,15 +1,17 @@
 // FILE: src/tools/{{TOOL_NAME}}/actions/{{ACTION_NAME}}/executor.ts
 //
-// Mutation executor. Handles its own pre-check and post-read internally.
+// Mutation executor. Handles its own pre-check and post-read internally, and
+// NAMES each outcome's verdict — summaries, doctrine, error codes, and any
+// terminal handoff live in the action's declared `verdicts` rows (see
+// ./action.ts), so the wire body can never fork from the declaration.
 // The library only manages the propose → execute lifecycle around this
 // executor; on execute mode this executor is invoked once with the matching
-// params. Library will NOT auto-wrap with preWrap/postWrap reads.
+// params.
 
 import { postBackend } from "../../backend/client.js";
 import { {{TOOL_NAME}}Env } from "../../backend/env.js";
-// import { tryResolve{{ENTITY}} } from "../../shared/resolve-{{entity}}.js"; // if needed
 import type { State } from "../../../../state.js";
-import type { ExecutorResult } from "../../../../agent-step/index.js";
+import type { DeclaredExecutorResult } from "../../../../agent-step/index.js";
 import type { Slice } from "./stateSelector.js";
 
 interface {{ACTION_PARAMS_TYPE}} {
@@ -31,29 +33,23 @@ async function read{{ENTITY}}State({{ENTITY_ID}}: string): Promise<string> {
 
 // `state` is the SLICE this action's stateSelector returned — not the whole
 // state. Read only what the selector handed you. The result's `stateUpdate`,
-// though, may still patch any host slot (ExecutorResult<State>).
+// though, may still patch any host slot (DeclaredExecutorResult<State>).
 export async function {{EXECUTOR_FN_NAME}}(
   rawParams: unknown,
   state: Slice,
-): Promise<ExecutorResult<State>> {
+): Promise<DeclaredExecutorResult<State>> {
   const p = rawParams as {{ACTION_PARAMS_TYPE}};
-
-  // (Optional) Resolve the target entity from state + params.
-  // const entity = tryResolve{{ENTITY}}(state, p.{{LOOKUP_FIELD}});
-  // if ("error" in entity) {
-  //   return { resultBody: { summary: entity.summary, error: entity.error }, ok: false };
-  // }
 
   // ─── Pre-read: decide whether the mutation should happen ──────────────── //
   const preState = await read{{ENTITY}}State(/* entity.id */ "{{ENTITY_ID_VALUE}}");
   if ({{REFUSE_CONDITION}}) {
+    // Row `mutation_blocked` carries the static summary/error; the observed
+    // pre-state rides `data` for the row's function fields, and
+    // `resultExtras` appends raw fields after the declared body.
     return {
-      resultBody: {
-        summary: `{{ENTITY}} is already ${preState}; mutation refused.`,
-        error: "mutation_blocked_{{BLOCKING_REASON}}",
-        preState,
-      },
-      ok: false,
+      verdict: "mutation_blocked",
+      data: { preState },
+      resultExtras: { preState },
     };
   }
 
@@ -70,12 +66,8 @@ export async function {{EXECUTOR_FN_NAME}}(
   const success = resp?.payload?.success === true;
   if (!success) {
     return {
-      resultBody: {
-        summary: "{{ENTITY}} change did not persist.",
-        success: false,
-        preState,
-      },
-      ok: false,
+      verdict: "write_failed",
+      resultExtras: { preState },
     };
   }
 
@@ -83,13 +75,10 @@ export async function {{EXECUTOR_FN_NAME}}(
   const postState = await read{{ENTITY}}State(/* entity.id */ "{{ENTITY_ID_VALUE}}");
 
   return {
-    resultBody: {
-      summary: `{{ENTITY}} change persisted; new state: ${postState}.`,
-      success: true,
-      // {{NEW_VALUE_FIELDS}}
-      preState,
-      postState,
-    },
-    ok: true,
+    verdict: "ok",
+    data: { postState },
+    // stateUpdate: { {{OUTCOME_SLOT}}: ... },  // dynamic writes only — static
+    //                                          // ones belong on the row
+    resultExtras: { preState, postState },
   };
 }

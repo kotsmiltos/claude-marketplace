@@ -133,6 +133,62 @@ export const digitGroupsParam = (opts: DigitGroupsParamOpts) =>
     )
     .describe(opts.describe);
 
+/** Options for `callerTextParam`. */
+export interface CallerTextParamOpts {
+  /** Minimum/maximum TRIMMED length. Bounds are a refinement — header rule 1
+   *  applies to text exactly as to digits: `.min`/`.max` would surface to the
+   *  model as `minLength`/`maxLength`, a precondition for CALLING a value the
+   *  tool already judges itself. */
+  min: number;
+  max: number;
+  /** COUNT-FREE refinement messages (header rule 2). */
+  shortMessage: string;
+  longMessage: string;
+  /** REQUIRED model-facing description — see `DigitGroupsParamOpts`. */
+  describe: string;
+}
+
+/** A caller-dictated TEXT capture (a spoken name, a free-form answer): the
+ *  text analogue of `callerDigits`. Trim + bounded length as a REFINEMENT
+ *  with count-free messages — every voice host was re-deriving this rule by
+ *  hand next to the digit builders. */
+export const callerTextParam = (opts: CallerTextParamOpts) =>
+  z
+    .string()
+    .trim()
+    .superRefine((v, ctx) => {
+      if (v.length < opts.min) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: opts.shortMessage,
+        });
+      } else if (v.length > opts.max) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: opts.longMessage });
+      }
+    })
+    .describe(opts.describe);
+
+/** A relay-only transcription field: the caller's exact words, OPTIONAL,
+ *  passed through for the SYSTEM to classify — the model never translates,
+ *  normalizes, or invents them. Mechanically just a described optional
+ *  string; the builder exists so the authoring surface NAMES the intent
+ *  (stenographer field) instead of each host re-deriving it. */
+export const relayParam = (describe: string) => z.string().optional().describe(describe);
+
+/** An exactly-one-of selector for a params object (XOR over optional
+ *  fields), as a REFINEMENT so the model-facing JSON Schema stays a plain
+ *  object (header rule 1) and a bad shape bounces as recoverable
+ *  `invalid_params` on the propose path. Apply as
+ *  `z.object({...}).superRefine(exactlyOneOf(["a", "b"], message))`. */
+export const exactlyOneOf =
+  (fields: readonly string[], message: string) =>
+  (value: Record<string, unknown>, ctx: z.RefinementCtx): void => {
+    const present = fields.filter((f) => value[f] !== undefined).length;
+    if (present !== 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+  };
+
 /** Options for `digitCandidatesParam`. */
 export interface DigitCandidatesParamOpts {
   /** Shape of ONE candidate digit string (e.g. `/^\d{4,19}$/u`). */

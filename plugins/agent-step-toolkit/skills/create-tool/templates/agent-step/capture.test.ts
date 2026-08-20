@@ -9,10 +9,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
+import { toJsonSchema } from "@langchain/core/utils/json_schema";
 import {
   digitsOnly,
   digitsOnlyDeep,
   callerDigits,
+  callerTextParam,
+  relayParam,
+  exactlyOneOf,
   digitGroupsParam,
   digitCandidatesParam,
 } from "./capture.js";
@@ -161,4 +165,49 @@ test("digitCandidatesParam: maxCandidates is honored when overridden", () => {
     "4444",
     "5555",
   ]);
+});
+
+// ── The field kinds added 2026-08-15 (owner declarative-authoring pass):
+// callerTextParam (the missing text analogue), relayParam, exactlyOneOf ────
+
+test("callerTextParam: trim + bounded length as a refinement with count-free messages", () => {
+  const field = callerTextParam({
+    min: 2,
+    max: 10,
+    shortMessage: "too short capture",
+    longMessage: "too long capture",
+    describe: "a spoken name",
+  });
+  assert.equal(field.parse("  Νίκος  "), "Νίκος");
+  assert.equal(field.safeParse("a").error?.issues[0].message, "too short capture");
+  assert.equal(
+    field.safeParse("abcdefghijk").error?.issues[0].message,
+    "too long capture",
+  );
+  const json = JSON.stringify(toJsonSchema(field));
+  assert.doesNotMatch(json, /minLength|maxLength/, "bounds must stay refinements");
+  assert.match(json, /a spoken name/);
+});
+
+test("relayParam: optional described passthrough string", () => {
+  const field = relayParam("exact caller words");
+  assert.equal(field.parse(undefined), undefined);
+  assert.equal(field.parse("την πιστωτική"), "την πιστωτική");
+  assert.equal(field.safeParse(3).success, false);
+  assert.match(JSON.stringify(toJsonSchema(field)), /exact caller words/);
+});
+
+test("exactlyOneOf: XOR refinement invisible to the JSON schema", () => {
+  const schema = z
+    .object({ a: z.string().optional(), b: z.string().optional() })
+    .superRefine(exactlyOneOf(["a", "b"], "pass exactly one of a / b"));
+  assert.equal(schema.safeParse({ a: "x" }).success, true);
+  assert.equal(schema.safeParse({ b: "y" }).success, true);
+  assert.equal(schema.safeParse({}).error?.issues[0].message, "pass exactly one of a / b");
+  assert.equal(
+    schema.safeParse({ a: "x", b: "y" }).error?.issues[0].message,
+    "pass exactly one of a / b",
+  );
+  const json = JSON.stringify(toJsonSchema(schema));
+  assert.doesNotMatch(json, /oneOf|anyOf.*required/, "the XOR stays out of the model schema");
 });

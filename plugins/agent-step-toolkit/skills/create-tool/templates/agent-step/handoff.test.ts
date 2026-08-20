@@ -9,14 +9,13 @@ import { buildAgentStepTool, runSteps, type BuildAgentStepToolOptions } from "./
 import {
   HANDOFF_ACTION,
   handoffRequested,
-  forcedHandoffRequested,
   type HandoffSpec,
 } from "./handoff/contract.js";
 import { createHandoffNode } from "./handoff/node.js";
+import { agentStepTaskScopedSlots } from "./state.js";
 import type { ExecutorRegistry, VerifierRegistry } from "./types.js";
 import type {
   AwaitingInput,
-  BoundedChoice,
   CurrentFlow,
   HandoffRequest,
 } from "./state.js";
@@ -26,8 +25,8 @@ interface S {
   thing?: string | null;
   awaitingInput?: AwaitingInput | null;
   currentFlow?: CurrentFlow | null;
-  boundedChoice?: BoundedChoice | null;
   pagedRead?: PagedCache<unknown> | null;
+  spentLadders?: Record<string, number> | null;
   handoff?: HandoffRequest | null;
   errorCount?: number | null;
 }
@@ -41,7 +40,6 @@ const testStateAnnotation = Annotation.Root({
   thing: Annotation<string | null>(replaceNull<string>()),
   awaitingInput: Annotation<AwaitingInput | null>(replaceNull<AwaitingInput>()),
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
-  boundedChoice: Annotation<BoundedChoice | null>(replaceNull<BoundedChoice>()),
   pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
   errorCount: Annotation<number | null>(replaceNull<number>()),
@@ -50,19 +48,25 @@ const testStateAnnotation = Annotation.Root({
 type ActionName = "read_thing" | "change_thing";
 
 function makeConfig() {
-  return defineConfig<ActionName, never>({
+  return defineConfig<ActionName, never, S>({
     tool: { name: "test_tool", description: "test tool" },
     actions: {
       read_thing: {
         description: "read the thing",
         paramsSchema: z.object({}),
         prereqs: [],
+        verdicts: {
+          ok: { ok: true, summary: "thing read", body: { value: "x" } },
+        },
       },
       change_thing: {
         description: "change the thing",
         paramsSchema: z.object({ v: z.string() }),
         prereqs: [],
         controller: { requiresConfirmation: true },
+        verdicts: {
+          ok: { ok: true, summary: "thing changed", stateUpdate: { thing: "y" } },
+        },
       },
     },
   });
@@ -73,7 +77,7 @@ const selectors = {
   change_thing: (s: S) => s,
 };
 
-function makeOpts(withHandoff: boolean, withBoundedChoices = false): {
+function makeOpts(withHandoff: boolean): {
   opts: BuildAgentStepToolOptions<S, string, string, typeof selectors>;
   calls: { read: number; change: number };
 } {
@@ -81,11 +85,11 @@ function makeOpts(withHandoff: boolean, withBoundedChoices = false): {
   const executors: ExecutorRegistry<S, typeof selectors> = {
     read_thing: async () => {
       calls.read++;
-      return { resultBody: { summary: "thing read", value: "x" }, ok: true };
+      return { verdict: "ok" };
     },
     change_thing: async () => {
       calls.change++;
-      return { resultBody: { summary: "thing changed" }, stateUpdate: { thing: "y" }, ok: true };
+      return { verdict: "ok" };
     },
   };
   const verifiers: VerifierRegistry<S> = {};
@@ -101,16 +105,6 @@ function makeOpts(withHandoff: boolean, withBoundedChoices = false): {
       executors,
       verifiers,
       ...(withHandoff ? { handoff } : {}),
-      ...(withBoundedChoices
-        ? {
-            boundedChoices: {
-              unsupported_information: {
-                description: "unsupported factual clarification",
-                selections: ["continue"],
-              },
-            },
-          }
-        : {}),
     },
     calls,
   };
@@ -162,7 +156,7 @@ test("request_handoff with an invalid reason fails param validation", async () =
 });
 
 test("request_handoff atomically abandons pending interaction, flow, and page state", async () => {
-  const { opts } = makeOpts(true, true);
+  const { opts } = makeOpts(true);
   const initial: S = {
     awaitingInput: {
       kind: "confirmation",
@@ -173,7 +167,6 @@ test("request_handoff atomically abandons pending interaction, flow, and page st
       flow_ref: "change_flow",
     },
     currentFlow: { name: "change_flow", data: { proposed: "y" } },
-    boundedChoice: { name: "unsupported_information", status: "pending" },
     pagedRead: {
       key: "read_thing",
       signature: "{}",
@@ -187,42 +180,10 @@ test("request_handoff atomically abandons pending interaction, flow, and page st
   assert.deepEqual(committed.handoff, { reason: "off_topic", context: "wants a transfer" });
   assert.equal(committed.awaitingInput, null);
   assert.equal(committed.currentFlow, null);
-  assert.equal(committed.boundedChoice, null);
   assert.equal(committed.pagedRead, null);
 });
 
-test("feature-disabled handoff leaves an unrelated boundedChoice-shaped host slot untouched", async () => {
-  const { opts } = makeOpts(true);
-  const initial: S = {
-    boundedChoice: { name: "host_domain_choice", status: "pending" },
-  };
-  const { body, committed } = await runSteps(opts, [HANDOFF_STEP], initial);
-  assert.equal(body.results[0].ok, true);
-  assert.equal(committed.boundedChoice, undefined);
-});
 
-test("feature-disabled domain execution neither reads nor rewrites a boundedChoice-shaped host slot", async () => {
-  const { opts, calls } = makeOpts(true);
-  // getCallerTurnId MAY be consulted here (the config carries a confirm-gated
-  // action, whose same-turn protection keys on the turn identity) — but the
-  // bounded-choice machinery itself must stay fully inert: the pending-shaped
-  // host slot is neither read (no lockdown fires) nor rewritten.
-  const withoutFeature = {
-    ...opts,
-    getCallerTurnId: () => "turn-1",
-  };
-  const initial: S = {
-    boundedChoice: { name: "host_domain_choice", status: "pending" },
-  };
-  const { body, committed } = await runSteps(
-    withoutFeature,
-    [{ action: "read_thing", params: {} }],
-    initial,
-  );
-  assert.equal(body.results[0].ok, true);
-  assert.equal(calls.read, 1);
-  assert.equal(committed.boundedChoice, undefined);
-});
 
 test("caller-turn hook is never consulted when no feature needs it", async () => {
   const { opts } = makeOpts(true);
@@ -303,13 +264,14 @@ test("config may define its own request_handoff when the handoff opt is absent",
           description: "scaffold-mechanism outbound handoff (own action)",
           paramsSchema: z.object({}),
           prereqs: [],
+          verdicts: { ok: { ok: true, summary: "handed off" } },
         },
       },
     },
     selectors: { ...selectors, [HANDOFF_ACTION]: (s: S) => s },
     executors: {
       ...opts.executors,
-      [HANDOFF_ACTION]: async () => ({ resultBody: {}, ok: true }),
+      [HANDOFF_ACTION]: async () => ({ verdict: "ok" }),
     },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -328,13 +290,14 @@ test("config defining request_handoff is rejected at construction", () => {
           description: "imposter",
           paramsSchema: z.object({}),
           prereqs: [],
+          verdicts: { ok: { ok: true, summary: "handed off" } },
         },
       },
     },
     selectors: { ...selectors, [HANDOFF_ACTION]: (s: S) => s },
     executors: {
       ...opts.executors,
-      [HANDOFF_ACTION]: async () => ({ resultBody: {}, ok: true }),
+      [HANDOFF_ACTION]: async () => ({ verdict: "ok" }),
     },
   };
   assert.throws(
@@ -728,8 +691,8 @@ const BUSY_STATE: S & { outcome?: string | null; pointer?: string | null } = {
     max_attempts: 3,
   },
   currentFlow: { name: "change_flow", data: { proposed: "y" } },
-  boundedChoice: { name: "unsupported_information", status: "pending" },
   pagedRead: { key: "read_thing", signature: "{}", rows: ["stale"], extras: {} },
+  spentLadders: { required_detail: 1 },
   errorCount: 2,
   outcome: "already_active",
   pointer: "card-1",
@@ -746,7 +709,17 @@ test("handoff node clears library task-scoped slots + declared domain slots on c
     { ...BUSY_STATE, handoff: { reason: "completed", context: "done" } },
     nodeConfig(events),
   );
-  for (const slot of ["awaitingInput", "currentFlow", "boundedChoice", "pagedRead", "errorCount"]) {
+  // Iterate the LIBRARY's own task-scoped list, not a hand copy: a slot added
+  // to the table joins this assertion automatically, so "task-scoped but
+  // missed by the resolver's sweep" cannot happen silently. (BUSY_STATE must
+  // populate every listed slot — the loop below also asserts that, so the
+  // fixture cannot rot into asserting null → null.)
+  for (const slot of agentStepTaskScopedSlots) {
+    assert.notEqual(
+      (BUSY_STATE as Record<string, unknown>)[slot],
+      undefined,
+      `fixture gap: BUSY_STATE must populate task-scoped slot "${slot}"`,
+    );
     assert.equal(update[slot], null, `${slot} must be cleared`);
   }
   assert.equal(update.outcome, null, "declared domain slot must be cleared");
@@ -819,118 +792,6 @@ test("a spec without clearsOnHandback clears only the library's own slots", asyn
   );
   assert.equal(update.awaitingInput, null);
   assert.equal(update.outcome, undefined, "an undeclared domain slot is never touched");
-});
-
-// ─── forced handoff (2.3.0) ───────────────────────────────────────────────── //
-//
-// The "don't dead-end the caller" guard: the model ended its turn in plain text
-// while state already says the task is over. The RESOLVER derives the request
-// itself, so a host wires `forcedHandoffRequested` straight at HANDOFF_NODE and
-// keeps a three-node graph. Before 2.3.0 this needed a fourth node whose only
-// job was to write the slot the resolver would read back one superstep later.
-
-const FORCED_SPEC: HandoffSpec<typeof BUSY_STATE> = {
-  offTopic: { mode: "terminate" },
-  terminateMessage: "Transferring you now.",
-  clearsOnHandback: ["outcome", "pointer"],
-  forcedHandoff: (state) =>
-    state.outcome === "already_active"
-      ? { reason: "completed", context: "internal — never spoken" }
-      : undefined,
-  resolveClosingMessage: () => "No activation needed.",
-};
-
-test("forced: the resolver derives the request when no slot is pending", async () => {
-  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
-  const events: unknown[] = [];
-  const update = await node({ ...BUSY_STATE, handoff: null }, nodeConfig(events));
-
-  // Indistinguishable from a model-requested handback — same envelope, same
-  // events, same clears. That equivalence is the whole point: the forced path
-  // must not be a second, subtly different resolution.
-  const [message] = update.messages as AIMessage[];
-  assert.equal(message.content, "No activation needed.");
-  assert.deepEqual(message.additional_kwargs, {
-    is_handoff: true,
-    handoff_type: "completed",
-    handoff_reason: "internal — never spoken",
-    handoff_metadata: {
-      service_type: "completed",
-      success_message: "No activation needed.",
-    },
-  });
-  assert.deepEqual(
-    (events as { type: string }[]).map((e) => e.type),
-    ["handoff", "handoff_complete"],
-  );
-  assert.equal(update.outcome, null, "a forced handback still ends the task");
-  assert.equal(update.pointer, null);
-  assert.equal(update.handoff, null);
-});
-
-test("forced: a PENDING slot always wins — the guard never overrides the model", async () => {
-  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
-  const update = await node(
-    // State would force `completed`, but the model explicitly asked to abandon.
-    { ...BUSY_STATE, handoff: { reason: "abandon", context: "caller gave up" } },
-    nodeConfig([]),
-  );
-  const [message] = update.messages as AIMessage[];
-  assert.equal(message.additional_kwargs.handoff_type, "abandon");
-  assert.equal(message.additional_kwargs.handoff_reason, "caller gave up");
-});
-
-test("forced: nothing pending and nothing derivable → the node is inert", async () => {
-  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
-  const events: unknown[] = [];
-  const update = await node(
-    { ...BUSY_STATE, outcome: null, handoff: null },
-    nodeConfig(events),
-  );
-  // No message, no clears, and — critically — NO control-plane event: a client
-  // must not see a `handoff` signal on a turn that was not a handoff.
-  assert.deepEqual(update, {});
-  assert.deepEqual(events, []);
-});
-
-test("forced: resolveHandoffType still decides the signal on the derived request", async () => {
-  const node = createHandoffNode<typeof BUSY_STATE>({
-    ...FORCED_SPEC,
-    // The hook derives `completed`; state says this one escalates.
-    resolveHandoffType: () => "abandon",
-  });
-  const events: unknown[] = [];
-  const update = await node({ ...BUSY_STATE, handoff: null }, nodeConfig(events));
-  const [message] = update.messages as AIMessage[];
-  assert.equal(message.additional_kwargs.handoff_type, "abandon");
-  assert.equal(
-    (message.additional_kwargs.handoff_metadata as { service_type: string }).service_type,
-    "abandon",
-  );
-  // The control-plane event agrees — it is emitted after the override, which is
-  // the invariant the old host-side wrapper broke.
-  assert.equal((events[0] as { reason: string }).reason, "abandon");
-});
-
-test("forced: the edge predicate and the resolver cannot disagree", async () => {
-  const node = createHandoffNode<typeof BUSY_STATE>(FORCED_SPEC);
-  for (const state of [
-    { ...BUSY_STATE, handoff: null },
-    { ...BUSY_STATE, outcome: null, handoff: null },
-  ]) {
-    const routes = forcedHandoffRequested(state, FORCED_SPEC);
-    const update = await node(state, nodeConfig([]));
-    assert.equal(
-      routes,
-      "messages" in update,
-      "the predicate routes to the node exactly when the node resolves something",
-    );
-  }
-  // A pending slot is the OTHER predicate's business — the forced one declines
-  // it, so a host cannot double-route the same handoff.
-  const pending = { ...BUSY_STATE, handoff: { reason: "completed" as const, context: "c" } };
-  assert.equal(forcedHandoffRequested(pending, FORCED_SPEC), false);
-  assert.equal(handoffRequested(pending), true);
 });
 
 // ─── resolveHandoffMetadata ───────────────────────────────────────────────── //

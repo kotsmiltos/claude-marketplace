@@ -48,11 +48,18 @@
 // step, whatever `ok` was.
 
 import { z } from "zod";
-import type { ExecutorEffect, StepResult } from "../types.js";
+import type {
+  DeclaredExecutorResult,
+  ExecutorEffect,
+  ExecutorResult,
+  StepResult,
+  VerdictDef,
+} from "../types.js";
 import type { LibraryManagedSlots } from "../state.js";
 import { formatMessage } from "../messages.js";
-import type { CompiledPlan } from "../compile/plan.js";
+import type { CompiledAction, CompiledPlan } from "../compile/plan.js";
 import { CONTROL_REGISTRY } from "../controls/registry.js";
+import { climbLadder } from "../controls/note-refusal.js";
 import type { ControlRunContext } from "../controls/contract.js";
 import {
   applyPagination,
@@ -70,15 +77,14 @@ import { refuseWrongFlow, flowAfterOkStep } from "../interaction/flow.js";
 import {
   assertDomainOnlyStateUpdate,
   clearAwaitingInputPatch,
+  clearGatePatch,
   clearInteractionPatch,
   getAwaitingInput,
-  getBoundedChoice,
   getCurrentFlow,
   getHandoff,
   requestHandoffPatch,
   setAwaitingMatchPatch,
   setAwaitingOtpPatch,
-  setBoundedChoicePatch,
   setConfirmationPatch,
   setCurrentFlowPatch,
   type BatchState,
@@ -102,7 +108,6 @@ export async function executeSteps<T extends LibraryManagedSlots>(
   currentCallerTurnId: string | undefined,
 ): Promise<ExecutionOutcome> {
   const { msgs, activation } = plan;
-  const choiceEnabled = activation.boundedChoicesEnabled;
   const results: StepResult[] = [];
   let failedAt: number | undefined;
   let lastSummary = "";
@@ -124,6 +129,99 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     results.push(entry);
     lastSummary = entry.summary as string;
     failedAt = results.length - 1;
+  };
+
+  // ─── Capture-bounce bound (ActionDef.captureBounces) ──────────────────────
+  //     The `invalid_params` bounce is deliberately FREE: no gate is stored, no
+  //     confirmation attempt is spent, no executor runs — that is what keeps a
+  //     caller-capture shape rule out of the model's JSON Schema. The cost is
+  //     that no other counter in the pipeline can see it (the gate's
+  //     `attemptsLeft` needs a stored gate, `errorCount` needs a verdict, a
+  //     host tracker needs the executor), so an unbounded policy re-asks a
+  //     mis-supplying caller forever. Counts live in the task-scoped
+  //     `spentLadders` latch under `capture:<action>` — the record that already
+  //     carries every once-latch — and a parse that SUCCEEDS clears the run, so
+  //     only consecutive failures escalate.
+  const captureLatchKey = (action: string): string => `capture:${action}`;
+
+  const spentLaddersOf = (): Record<string, number> =>
+    (st.view as { spentLadders?: Record<string, number> | null }).spentLadders ?? {};
+
+  /** A capture that parsed ends this action's bounce run. */
+  const clearCaptureBounces = (action: CompiledAction): void => {
+    if (!action.captureBounces) return;
+    const key = captureLatchKey(action.name);
+    const spent = spentLaddersOf();
+    if (spent[key] === undefined) return;
+    const { [key]: _spentRun, ...rest } = spent;
+    st.apply({ spentLadders: rest } as unknown as Partial<T>);
+  };
+
+  /** Bounce a malformed capture. Past the configured run the engine CLIMBS the
+   *  configured escalation ladder instead of bouncing plainly: the ladder's
+   *  free use returns its instruction (explain/suggest once and re-ask in the
+   *  SAME turn) and the use after that applies its `onExhaust` handoff
+   *  atomically — the same `climbLadder` core `note_refusal` uses, so there is
+   *  one escalation mechanism, not two. Every byte here stays COUNT-FREE: a
+   *  count in a capture message measurably makes the model pad digits to
+   *  satisfy it. */
+  const failInvalidParams = (action: CompiledAction, message: string): void => {
+    const debug = `Invalid params for "${action.name}": ${message}`;
+    const plain: StepResult = {
+      action: action.name,
+      ok: false,
+      summary: msgs.invalid_params,
+      error: "invalid_params",
+      _debug: debug,
+    };
+    const policy = action.captureBounces;
+    if (!policy) {
+      fail(plain);
+      return;
+    }
+    const key = captureLatchKey(action.name);
+    const spent = spentLaddersOf();
+    const bounces = (spent[key] ?? 0) + 1;
+    st.apply({ spentLadders: { ...spent, [key]: bounces } } as unknown as Partial<T>);
+    if (bounces <= policy.max) {
+      fail(plain);
+      return;
+    }
+    // The ladder's existence was validated at construction (compile/validate).
+    const ladder = activation.ladders[policy.ladder];
+    const climb = climbLadder(
+      controlCtx,
+      policy.ladder,
+      ladder.maxFreeUses ?? 1,
+      ladder.onExhaust,
+    );
+    if (climb.exhausted) {
+      // The handoff patch is applied; `finalize` skips the standing-ask
+      // lifecycle whenever a handoff is set, so nothing is left owing.
+      fail({
+        action: action.name,
+        ok: false,
+        summary: climb.summary,
+        error: "invalid_params",
+        ladder: policy.ladder,
+        ladder_exhausted: true,
+        handoff_requested: true,
+        reason: climb.reason,
+        _debug: debug,
+      });
+      return;
+    }
+    // Free use: the step still FAILED (`error: invalid_params` keeps the
+    // standing ask recorded — the caller still owes the value), but the summary
+    // is now the ladder's instruction for this one turn.
+    fail({
+      action: action.name,
+      ok: false,
+      summary: ladder.instruction,
+      error: "invalid_params",
+      ladder: policy.ladder,
+      _debug: debug,
+    });
   };
 
   for (const step of planned) {
@@ -149,35 +247,6 @@ export async function executeSteps<T extends LibraryManagedSlots>(
 
     const action = plan.actions[step.action];
     const controller = action.controller;
-
-    // ─── 1. Consuming a pending meta-choice as "the caller supplied the
-    //     requested domain input" happens ON ACCEPTANCE — after the flow
-    //     gate, the prereqs, and the params validation have all passed (see
-    //     consumePendingChoice below, called from the propose and execute
-    //     paths). A refused or malformed step must NOT burn the one-shot
-    //     choice: `invalid_params` on a bad capture sends the model back to
-    //     the caller with the choice still pending.
-    const consumePendingChoice = (): { choice: string; selection: "domain_input" } | null => {
-      if (!choiceEnabled) return null;
-      const pendingChoice = getBoundedChoice(st.view);
-      if (pendingChoice?.status !== "pending") return null;
-      // Preserve the resolved marker (no turn id — the caller's input
-      // itself is the resolution) so a later unsupported clarification
-      // cannot reopen the one-shot choice.
-      st.apply(
-        setBoundedChoicePatch<T>({
-          name: pendingChoice.name,
-          status: "resolved",
-          selection: "domain_input",
-        }),
-      );
-      // The transition must be VISIBLE in the step result (`choice_consumed`):
-      // the transcript is the model's only authority for the choice status —
-      // engine state is never injected into the prompt — so a silent
-      // consumption would leave the model believing the choice is still
-      // pending.
-      return { choice: pendingChoice.name, selection: "domain_input" };
-    };
 
     // ─── 2. Library-managed flow prereq — BEFORE confirm-mode resolution. A
     //     confirm-required mutation that also `requiresFlow` would otherwise
@@ -227,15 +296,10 @@ export async function executeSteps<T extends LibraryManagedSlots>(
           err instanceof z.ZodError
             ? err.issues.map((iss) => iss.message).join("; ")
             : String(err);
-        fail({
-          action: step.action,
-          ok: false,
-          summary: msgs.invalid_params,
-          error: "invalid_params",
-          _debug: `Invalid params for "${step.action}": ${message}`,
-        });
+        failInvalidParams(action, message);
         break;
       }
+      clearCaptureBounces(action);
       // Propose-time state-aware refusal (ConfirmationOpts.refuseProposal):
       // a schema-valid proposal may still be impossible given state (e.g. an
       // empty capture probing for carried identity that does not exist). It
@@ -249,9 +313,6 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         fail({ action: step.action, ok: false, ...proposeRefusal });
         break;
       }
-      // The step was accepted (params parsed) — the caller's input, not a
-      // malformed capture, is what consumed any pending meta-choice.
-      const consumedChoice = consumePendingChoice();
       const maxAttempts =
         action.confirmation?.maxAttempts ?? CONFIRMATION_DEFAULTS.maxAttempts;
       const attemptsLeft = step.proposeAttemptsLeft ?? maxAttempts;
@@ -275,6 +336,16 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         st.preview(confirmationPatch),
       );
       const hasReadBack = typeof readBack === "string" && readBack.length > 0;
+      // Framing for the rendered bytes (what may precede/follow them) — only
+      // meaningful when a read-back exists at all.
+      const readBackDirective = hasReadBack
+        ? action.confirmation?.readBackDirective(
+            params as Record<string, unknown>,
+            st.preview(confirmationPatch),
+          )
+        : undefined;
+      const hasDirective =
+        typeof readBackDirective === "string" && readBackDirective.length > 0;
       // Commit exactly once. When repetition is enabled, persist the
       // already-rendered bytes on the gate; the repeat control never calls the
       // renderer again against potentially drifted host state.
@@ -297,8 +368,17 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         needs_confirmation: true,
         proposed_params: params as object,
         ...(hasReadBack ? { read_back: readBack } : {}),
-        ...(consumedChoice ? { choice_consumed: consumedChoice } : {}),
+        ...(hasDirective ? { read_back_directive: readBackDirective } : {}),
         attempts_left: attemptsLeft,
+        // The gate turn reacts to THIS, not to prompt memory: what each class
+        // of caller reply means for the pending proposal (journey-engine G2 —
+        // both agents' skipped-yes-turn incidents are this failure class). A
+        // non-empty per-action override is that action's SOLE authority.
+        reply_contract:
+          action.confirmation?.replyContract ||
+          formatMessage(msgs.confirm_reply_contract, {
+            action: step.action,
+          }),
       });
       lastSummary = summary;
       continue;
@@ -380,18 +460,10 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         err instanceof z.ZodError
           ? err.issues.map((iss) => iss.message).join("; ")
           : String(err);
-      fail({
-        action: step.action,
-        ok: false,
-        summary: msgs.invalid_params,
-        error: "invalid_params",
-        _debug: `Invalid params for "${step.action}": ${message}`,
-      });
+      failInvalidParams(action, message);
       break;
     }
-    // The step was accepted — only now does it count as the caller supplying
-    // the domain input a pending meta-choice was suspended over.
-    const consumedChoice = consumePendingChoice();
+    clearCaptureBounces(action);
 
     // ─── 11. Pageable self-paginate cache hit: re-page from the
     //     library-managed `pagedRead` slot WITHOUT calling the executor.
@@ -422,10 +494,15 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     const selector = plan.selectors[step.action];
     const executor = plan.executors[step.action];
     const slice = selector(st.view);
-    let result: Awaited<ReturnType<typeof executor>>;
+    let result: ExecutorResult<T>;
     anExecutorRan = true; // set before the call — a throw still counts as ran
     try {
-      result = await executor(params, slice);
+      // The declarative return ({verdict, data, …}) is composed into the
+      // internal result shape from the action's VerdictDef row; an undeclared
+      // verdict throws here and surfaces through the executor_error path
+      // below (host bug, loud in _debug). There is NO legacy pass-through —
+      // the rows ARE the result space (b8e9e95).
+      result = normalizeExecutorResult(step.action, action, await executor(params, slice), st.view);
     } catch (err) {
       // Executors — and the fetchers / backend client they call — throw on
       // hard failures (backend 5xx, non-JSON, a required URL missing).
@@ -465,7 +542,6 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     results.push({
       action: step.action,
       ok: result.ok,
-      ...(consumedChoice ? { choice_consumed: consumedChoice } : {}),
       ...entryBody,
     });
 
@@ -504,7 +580,7 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     //     still be terminal). Same atomic cleanup as the built-in control.
     for (const effect of effects) {
       if (effect.type === "request_handoff") {
-        st.apply(requestHandoffPatch<T>(effect.request, choiceEnabled));
+        st.apply(requestHandoffPatch<T>(effect.request));
       }
     }
 
@@ -580,7 +656,7 @@ export async function executeSteps<T extends LibraryManagedSlots>(
       }
 
       if (controller?.endsFlow) {
-        st.apply(clearInteractionPatch<T>(choiceEnabled));
+        st.apply(clearInteractionPatch<T>());
       }
     } else if (!result.ok && !handoffSet) {
       // ─── f. ok:false — double-entry mismatch accounting (only a
@@ -591,7 +667,6 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         result.resultBody,
         getAwaitingInput(st.view),
         msgs,
-        choiceEnabled,
       );
       if (mismatch) {
         st.apply(mismatch.patch);
@@ -606,9 +681,9 @@ export async function executeSteps<T extends LibraryManagedSlots>(
     // ─── g. Executor-driven gate clearing (regardless of ok).
     for (const effect of effects) {
       if (effect.type === "clear_awaiting_input") {
-        st.apply(clearAwaitingInputPatch<T>());
+        st.apply(clearGatePatch<T>());
       } else if (effect.type === "abort_flow") {
-        st.apply(clearInteractionPatch<T>(choiceEnabled));
+        st.apply(clearInteractionPatch<T>());
       }
     }
 
@@ -625,4 +700,48 @@ export async function executeSteps<T extends LibraryManagedSlots>(
   }
 
   return { results, failedAt, lastSummary, anExecutorRan };
+}
+
+/** Compose an executor's declarative return into the runner's internal
+ *  ExecutorResult via the action's declared {@link VerdictDef} row. `summary`
+ *  renders over the CURRENT state view (language catalogs — the readBack
+ *  division); the row's `body` fields compose IN DECLARATION ORDER (wire
+ *  order, so a converted action reproduces its historical body bytes);
+ *  `resultExtras` append after them; the row's static `stateUpdate`/`effects`
+ *  merge UNDER the executor's dynamic ones. */
+function normalizeExecutorResult<T>(
+  actionName: string,
+  action: CompiledAction,
+  raw: DeclaredExecutorResult<T>,
+  state: unknown,
+): ExecutorResult<T> {
+  const row = action.verdicts[raw.verdict];
+  if (!row) {
+    throw new Error(
+      `action "${actionName}" returned undeclared verdict "${raw.verdict}" — ` +
+        "declare it in ActionDef.verdicts.",
+    );
+  }
+  const data = raw.data ?? {};
+  const body: Record<string, unknown> = {
+    summary: typeof row.summary === "function" ? row.summary(state, data) : row.summary,
+  };
+  for (const [key, value] of Object.entries(row.body ?? {})) {
+    body[key] =
+      typeof value === "function"
+        ? (value as (d: Record<string, unknown>) => unknown)(data)
+        : value;
+  }
+  Object.assign(body, raw.resultExtras ?? {});
+  const stateUpdate =
+    row.stateUpdate || raw.stateUpdate
+      ? ({ ...(row.stateUpdate ?? {}), ...(raw.stateUpdate ?? {}) } as Partial<T>)
+      : undefined;
+  const effects = [...(row.effects ?? []), ...(raw.effects ?? [])];
+  return {
+    resultBody: body,
+    ok: row.ok,
+    ...(stateUpdate !== undefined ? { stateUpdate } : {}),
+    ...(effects.length > 0 ? { effects } : {}),
+  };
 }

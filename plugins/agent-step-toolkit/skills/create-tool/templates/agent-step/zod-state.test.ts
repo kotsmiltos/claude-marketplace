@@ -46,6 +46,13 @@ function makeOpts(): BuildAgentStepToolOptions<ZS, ActionName, never, typeof sel
         description: "write first_wins + last_write",
         paramsSchema: z.object({ fw: z.string(), lw: z.string() }),
         prereqs: [],
+        verdicts: {
+          ok: {
+            ok: true,
+            summary: (_state, data) => `wrote ${String(data.fw)}/${String(data.lw)}`,
+            body: { verdict: "ok" },
+          },
+        },
       },
     },
   });
@@ -53,9 +60,9 @@ function makeOpts(): BuildAgentStepToolOptions<ZS, ActionName, never, typeof sel
     write: async (params) => {
       const { fw, lw } = params as { fw: string; lw: string };
       return {
-        resultBody: { summary: `wrote ${fw}/${lw}`, verdict: "ok" },
+        verdict: "ok",
+        data: { fw, lw },
         stateUpdate: { first_wins: fw, last_write: lw },
-        ok: true,
       };
     },
   };

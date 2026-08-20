@@ -7,7 +7,7 @@ import { z } from "zod";
 import { defineConfig } from "./define-config.js";
 import {
   buildAgentStepTool,
-  REPEAT_PENDING_CONFIRMATION_ACTION,
+  REPEAT_PENDING_QUESTION_ACTION,
   runSteps,
   type BuildAgentStepToolOptions,
 } from "./runner.js";
@@ -50,6 +50,7 @@ function human(id: string): { role: "user"; id: string; content: string } {
   return { role: "user", id, content: "…" };
 }
 
+
 function makeOpts(repeatEnabled = true): {
   opts: BuildAgentStepToolOptions<S, ActionName, never, typeof selectors>;
   calls: { repeatable: number; plain: number; render: number };
@@ -73,8 +74,21 @@ function makeOpts(repeatEnabled = true): {
               calls.render++;
               return EXACT_READ_BACK;
             },
+            // A repeatable gate must declare its own taxonomy — construction
+            // fails otherwise (the generic contract forbids the repeat call).
+            ...(repeatEnabled
+              ? {
+                  replyContract: {
+                    subject: "this test question",
+                    subjectNoun: "test question",
+                    executesLabel: "the test change",
+                    categories: ["TEST CATEGORY: route re-asks through the repeat control."],
+                  },
+                }
+              : {}),
           },
         },
+        verdicts: { ok: { ok: true, summary: "repeatable changed" } },
       },
       plain_change: {
         description: "propose a normal confirm-gated change",
@@ -86,6 +100,7 @@ function makeOpts(repeatEnabled = true): {
             readBack: (params) => `plain:${String(params.value)}`,
           },
         },
+        verdicts: { ok: { ok: true, summary: "plain changed" } },
       },
     },
   });
@@ -93,17 +108,15 @@ function makeOpts(repeatEnabled = true): {
     repeatable_change: async (params) => {
       calls.repeatable++;
       return {
-        resultBody: { summary: "repeatable changed" },
+        verdict: "ok",
         stateUpdate: { changed: String((params as { value: string }).value) },
-        ok: true,
       };
     },
     plain_change: async (params) => {
       calls.plain++;
       return {
-        resultBody: { summary: "plain changed" },
+        verdict: "ok",
         stateUpdate: { changed: String((params as { value: string }).value) },
-        ok: true,
       };
     },
   };
@@ -124,7 +137,7 @@ function makeOpts(repeatEnabled = true): {
 }
 
 const repeatStep = {
-  action: REPEAT_PENDING_CONFIRMATION_ACTION,
+  action: REPEAT_PENDING_QUESTION_ACTION,
   params: {},
 };
 
@@ -143,22 +156,35 @@ function eligibleGate(
   };
 }
 
+test("repeatReadBack without a replyContract fails construction — the generic contract cannot govern a repeatable gate", () => {
+  const { opts } = makeOpts(true);
+  const cfg = opts.config as unknown as {
+    actions: Record<string, { controller?: { requiresConfirmation?: { replyContract?: string } } }>;
+  };
+  delete cfg.actions.repeatable_change.controller!.requiresConfirmation!.replyContract;
+  assert.throws(
+    () => buildAgentStepTool(opts),
+    /replyContract/,
+    "a repeatable gate silently inheriting the generic taxonomy is the measured incident class",
+  );
+});
+
 test("repeat control is injected only when a confirmation action opts in", () => {
   const enabledTool = buildAgentStepTool(makeOpts(true).opts);
   assert.equal(
     validate({ steps: [repeatStep] }, enabledTool.schema as never).valid,
     true,
   );
-  assert.match(JSON.stringify(enabledTool.schema), /repeat_pending_confirmation/);
-  assert.match(enabledTool.description, /repeat_pending_confirmation/);
+  assert.match(JSON.stringify(enabledTool.schema), /repeat_pending_question/);
+  assert.match(enabledTool.description, /repeat_pending_question/);
 
   const disabledTool = buildAgentStepTool(makeOpts(false).opts);
   assert.equal(
     validate({ steps: [repeatStep] }, disabledTool.schema as never).valid,
     false,
   );
-  assert.doesNotMatch(JSON.stringify(disabledTool.schema), /repeat_pending_confirmation/);
-  assert.doesNotMatch(disabledTool.description, /repeat_pending_confirmation/);
+  assert.doesNotMatch(JSON.stringify(disabledTool.schema), /repeat_pending_question/);
+  assert.doesNotMatch(disabledTool.description, /repeat_pending_question/);
 });
 
 test("opted-in proposal persists the exact rendered read_back; default-off does not", async () => {
@@ -398,3 +424,9 @@ test("AwaitingInputSchema accepts only a nonempty persisted confirmation read_ba
   assert.equal(AwaitingInputSchema.safeParse(eligibleGate()).success, true);
   assert.equal(AwaitingInputSchema.safeParse(eligibleGate("turn", "")).success, false);
 });
+
+
+
+
+
+

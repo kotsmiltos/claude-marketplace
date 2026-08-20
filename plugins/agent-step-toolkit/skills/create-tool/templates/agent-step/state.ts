@@ -10,7 +10,7 @@ import type { PagedCache } from "./paginate.js";
  *  spread the exported fragments so the slot the runner mutates can never
  *  drift from the storage the host provides.
  *
- *  Discriminated union over the three kinds of input the controller
+ *  Discriminated union over the four kinds of input the controller
  *  coordinates:
  *
  *  - `confirmation`: a confirm-required mutation has been proposed; the same
@@ -25,12 +25,34 @@ import type { PagedCache } from "./paginate.js";
  *    receive the same value to verify match. The library decrements
  *    `attempts_left` on each `match_mismatch` and aborts the flow on
  *    exhaustion. Semantically: "customer must provide the value AGAIN."
+ *  - `dictation`: a step's verdict asked the customer for a fresh value (the
+ *    plainest input kind — declared per verdict via `ActionDef.asks`, applied
+ *    by the batch finalizer from the batch's FINAL entry, and made visible to
+ *    the model on that entry as `standing_ask` + `ask_contract`). Unlike the
+ *    three gates it does NOT lock the surface: it is the record of the
+ *    standing question — capturing the answer remains the MODEL's job.
+ *    Semantically: "customer owes the value the first time."
  *
  *  `flow_ref` ties the input to its owning flow; clearing the owning
  *  `currentFlow` clears `awaitingInput` too. No timestamps / `expires_at` —
  *  the library is a lockdown mechanism, not a state-decay manager. Stale state
  *  is cleared via `abort_pending_input` or a backend-reported error. */
-export const AwaitingInputSchema = z.discriminatedUnion("kind", [
+/** The four GATE/ASK members — every kind a `choice` may SUSPEND. Kept as a
+ *  named subunion so the choice member cannot nest another choice: the stack
+ *  is depth-2 by construction, enforced by the schema itself. */
+const GATE_AWAITING_MEMBERS = [
+  z.object({
+    kind: z.literal("dictation"),
+    /** The action the asked-for value feeds when the customer supplies it. */
+    for_action: z.string(),
+    /** The param on that action that carries the capture. */
+    param: z.string(),
+    /** What was asked for — `digits` (a dictated number) or `text` (a free
+     *  value like a person's name). Descriptive: kind-specific behavior (e.g.
+     *  per-kind contracts) keys on it. */
+    expects: z.enum(["digits", "text"]),
+    flow_ref: z.string().optional(),
+  }),
   z.object({
     kind: z.literal("confirmation"),
     for_action: z.string(),
@@ -70,7 +92,14 @@ export const AwaitingInputSchema = z.discriminatedUnion("kind", [
     max_attempts: z.number().int().positive(),
     flow_ref: z.string().optional(),
   }),
+] as const;
+
+/** The gate/ask members ARE the whole cursor since the bounded-choice
+ *  overlay's removal (3.0.0) — no kind may suspend another. */
+export const AwaitingInputSchema = z.discriminatedUnion("kind", [
+  ...GATE_AWAITING_MEMBERS,
 ]);
+
 
 /** Schema for the library-managed `currentFlow` slot — the active multi-turn
  *  flow (PIN setup, card activation, …). One at a time, mutex by design.
@@ -79,31 +108,6 @@ export const AwaitingInputSchema = z.discriminatedUnion("kind", [
 export const CurrentFlowSchema = z.object({
   name: z.string(),
   data: z.record(z.string(), z.unknown()),
-});
-
-/** Schema for the library-managed `boundedChoice` overlay. Unlike
- *  `awaitingInput`, this does NOT replace or unlock a confirmation/OTP/match
- *  gate: a caller-facing meta-choice may temporarily suspend the spoken
- *  question while the original gate remains authoritative underneath.
- *
- *  `pending` means the caller still owes one of the configured selections.
- *  `resolved` deliberately remains in state until the surrounding flow ends
- *  or hands off, so the same one-shot choice cannot be offered again later in
- *  the conversation. The runner is the only writer. */
-export const BoundedChoiceSchema = z.object({
-  name: z.string(),
-  status: z.enum(["pending", "resolved"]),
-  selection: z.string().optional(),
-  /** Stable identity of the caller turn on which the choice was OFFERED.
-   *  While that turn is current, the choice cannot be resolved and no
-   *  direct-input action may consume it — the caller must actually hear the
-   *  fork and reply before anything counts as their selection. */
-  requested_on_caller_turn_id: z.string().min(1).optional(),
-  /** Stable identity of the caller turn on which a nonterminal selection
-   *  resolved (the latest LangGraph HumanMessage id by default). Domain
-   *  actions remain locked while that turn is current; a later caller turn
-   *  has a different id and unlocks normal processing. */
-  resolved_on_caller_turn_id: z.string().min(1).optional(),
 });
 
 /** What input the customer owes right now, or `null`. Inferred from
@@ -115,9 +119,7 @@ export type AwaitingInput = z.infer<typeof AwaitingInputSchema>;
  *  {@link CurrentFlowSchema}. */
 export type CurrentFlow = z.infer<typeof CurrentFlowSchema>;
 
-/** One engine-owned, one-shot conversational choice layered over any pending
- *  domain input, or `null` when no such choice has been used. */
-export type BoundedChoice = z.infer<typeof BoundedChoiceSchema>;
+
 
 /** Schema for the library-managed `handoff` slot — set by the built-in
  *  `request_handoff` action (enabled via `BuildAgentStepToolOptions.handoff`)
@@ -160,20 +162,14 @@ export const PagedCacheSchema = z.object({
 export interface LibraryManagedSlots {
   awaitingInput?: AwaitingInput | null;
   currentFlow?: CurrentFlow | null;
-  boundedChoice?: BoundedChoice | null;
   pagedRead?: PagedCache<unknown> | null;
-  /** Per-guard latch: guard id → the caller-turn id it last fired on. Lets a
-   *  host fire a model-input guard at most ONCE per caller turn even though the
-   *  ReAct loop re-enters the model several times within that turn. Written via
-   *  {@link markGuardFired}, read via {@link guardFiredOnTurn}. Entries expire
-   *  by themselves when the turn id changes, so it is deliberately NOT
-   *  task-scoped. */
-  guardTurn?: Record<string, string> | null;
-  /** One-shot social-aside deflection latch (the `deflect_aside` control):
-   *  true once the free in-place deflection of THIS task has been spent, so
-   *  the next `deflect_aside` escalates to a real `off_topic` handback instead
-   *  of deflecting again. Task-scoped — a task-ending handback clears it. */
-  deflectedAside?: boolean | null;
+  /** Per-ladder free-use counts — ladder name → uses so far. Carries every
+   *  once-latch: the `note_refusal` ladders (journey-engine G7) AND the
+   *  `deflect_aside` damper under the reserved key `"deflect_aside"`. When a ladder's count reaches its
+   *  configured `maxFreeUses`, the next `note_refusal` escalates atomically
+   *  into the ladder's configured handoff. Task-scoped — a task-ending
+   *  handback clears it; an `off_topic` roundtrip does not. */
+  spentLadders?: Record<string, number> | null;
   handoff?: HandoffRequest | null;
   /** Consecutive backend-failure counter. The runner increments it on each
    *  batch whose failing step is a backend failure (the runner-raised
@@ -210,10 +206,10 @@ const replaceNull = <T>() => ({
 export const agentStepStateSpec = {
   awaitingInput: Annotation<AwaitingInput | null>(replaceNull<AwaitingInput>()),
   currentFlow: Annotation<CurrentFlow | null>(replaceNull<CurrentFlow>()),
-  boundedChoice: Annotation<BoundedChoice | null>(replaceNull<BoundedChoice>()),
   pagedRead: Annotation<PagedCache<unknown> | null>(replaceNull<PagedCache<unknown>>()),
-  guardTurn: Annotation<Record<string, string> | null>(replaceNull<Record<string, string>>()),
-  deflectedAside: Annotation<boolean | null>(replaceNull<boolean>()),
+  spentLadders: Annotation<Record<string, number> | null>(
+    replaceNull<Record<string, number>>(),
+  ),
   handoff: Annotation<HandoffRequest | null>(replaceNull<HandoffRequest>()),
   errorCount: Annotation<number | null>(replaceNull<number>()),
 };
@@ -242,18 +238,13 @@ export const agentStepZodShape = {
   currentFlow: withLangGraph(CurrentFlowSchema.nullable(), {
     default: (): CurrentFlow | null => null,
   }),
-  boundedChoice: withLangGraph(BoundedChoiceSchema.nullable(), {
-    default: (): BoundedChoice | null => null,
-  }),
   pagedRead: withLangGraph(PagedCacheSchema.nullable(), {
     default: (): PagedCache<unknown> | null => null,
   }),
-  guardTurn: withLangGraph(z.record(z.string(), z.string()).nullable(), {
-    default: (): Record<string, string> | null => null,
-  }),
-  deflectedAside: withLangGraph(z.boolean().nullable(), {
-    default: (): boolean | null => null,
-  }),
+  spentLadders: withLangGraph(
+    z.record(z.string(), z.number().int().nonnegative()).nullable(),
+    { default: (): Record<string, number> | null => null },
+  ),
   handoff: withLangGraph(HandoffRequestSchema.nullable(), {
     default: (): HandoffRequest | null => null,
   }),
@@ -262,38 +253,72 @@ export const agentStepZodShape = {
   }),
 };
 
+/** ONE metadata row per library slot — the single authority every key-set
+ *  artifact below derives from. Until 3.0.0 each slot lived in FIVE hand-kept
+ *  mirrors (the {@link LibraryManagedSlots} interface, the annotation spec,
+ *  the zod shape, the internal-slot mask, the task-scoped list) plus a sixth
+ *  in run/batch-state.ts; adding or removing a slot meant editing all of them,
+ *  and a missed copy type-checked fine in whichever mirror still carried it.
+ *  Now: the interface, the spec and the zod shape stay hand-written (they
+ *  carry per-slot TYPES and reference docs the value level cannot), but their
+ *  KEY SETS are compile-locked to this table (the assignments at the bottom of
+ *  this file), and every pure key-set artifact is derived.
+ *
+ *  - `taskScoped`: work in progress (a pending gate, an open flow, a reslice
+ *    cache, a once-latch, the error counter) — a task-ENDING handback makes it
+ *    stale by definition, so `createHandoffNode` nulls it on every resolved
+ *    `completed`/`abandon`. `handoff` is NOT task-scoped on purpose (the node
+ *    always returns it null, resolved or not).
+ *  - `runnerOwned`: the runner is the slot's only writer — an executor
+ *    `stateUpdate` touching it throws (run/batch-state.ts). Every current
+ *    slot is runner-owned; the flag exists because history proved the
+ *    exception class (the retired `guardTurn` was host-written). */
+export const AGENT_STEP_SLOT_META = {
+  awaitingInput: { taskScoped: true, runnerOwned: true },
+  currentFlow: { taskScoped: true, runnerOwned: true },
+  pagedRead: { taskScoped: true, runnerOwned: true },
+  spentLadders: { taskScoped: true, runnerOwned: true },
+  handoff: { taskScoped: false, runnerOwned: true },
+  errorCount: { taskScoped: true, runnerOwned: true },
+} as const satisfies Record<
+  keyof LibraryManagedSlots,
+  { taskScoped: boolean; runnerOwned: boolean }
+>;
+
+type AgentStepSlotName = keyof typeof AGENT_STEP_SLOT_META;
+
+const agentStepSlotNames = Object.keys(AGENT_STEP_SLOT_META) as AgentStepSlotName[];
+
 /** The library-managed slot keys as a Zod `.omit()` mask. A host that derives a
  *  graph INPUT schema from its full state schema omits these so the internal
  *  slots can never be injected at the invoke boundary (the runner is their only
- *  writer). Single source of truth for "which slots are library-internal" —
- *  mirrors {@link agentStepZodShape} / {@link agentStepStateSpec}. */
-export const agentStepInternalSlotMask = {
-  awaitingInput: true,
-  currentFlow: true,
-  boundedChoice: true,
-  pagedRead: true,
-  guardTurn: true,
-  deflectedAside: true,
-  handoff: true,
-  errorCount: true,
-} as const;
+ *  writer). Derived from {@link AGENT_STEP_SLOT_META}. */
+export const agentStepInternalSlotMask = Object.fromEntries(
+  agentStepSlotNames.map((name) => [name, true]),
+) as { readonly [K in AgentStepSlotName]: true };
 
-/** The library-managed slots that are TASK-SCOPED: every one of them describes
- *  work in progress (a pending gate, an open flow, a reslice cache, the
- *  auto-handoff error counter), so a task-ENDING handback makes all of them
- *  stale by definition. `createHandoffNode` nulls these whenever it resolves a
- *  `completed`/`abandon` handback, because channel middlewares reuse ONE thread
- *  per call and never reset it — the next task on that thread would otherwise
- *  inherit the finished one's pending gates. `handoff` is absent on purpose:
- *  the node always returns it as null, resolved or not.
- *
- *  Domain slots are the host's own; it declares them via
- *  `HandoffSpec.clearsOnHandback`. */
-export const agentStepTaskScopedSlots = [
-  "awaitingInput",
-  "currentFlow",
-  "boundedChoice",
-  "pagedRead",
-  "deflectedAside",
-  "errorCount",
-] as const satisfies readonly (keyof typeof agentStepInternalSlotMask)[];
+/** The task-scoped library slots — see {@link AGENT_STEP_SLOT_META} for what
+ *  task-scoped means and which slots are deliberately excluded. Domain slots
+ *  are the host's own; it declares them via `HandoffSpec.clearsOnHandback`. */
+export const agentStepTaskScopedSlots: readonly AgentStepSlotName[] =
+  agentStepSlotNames.filter((name) => AGENT_STEP_SLOT_META[name].taskScoped);
+
+/** The runner-owned slots — an executor `stateUpdate` may not write them (the
+ *  guard in run/batch-state.ts throws). Derived from the same table. */
+export const agentStepRunnerOwnedSlots: readonly AgentStepSlotName[] =
+  agentStepSlotNames.filter((name) => AGENT_STEP_SLOT_META[name].runnerOwned);
+
+// ─── Compile-time key-locks ─────────────────────────────────────────────────
+// The three hand-written per-slot artifacts must cover EXACTLY the table's
+// keys, in both directions — an added or removed slot fails the build until
+// every mirror follows (the same key-lock pattern the i18n catalogs use).
+const _specCoversTable: Record<AgentStepSlotName, unknown> = agentStepStateSpec;
+const _tableCoversSpec: Record<keyof typeof agentStepStateSpec, unknown> =
+  AGENT_STEP_SLOT_META;
+const _zodCoversTable: Record<AgentStepSlotName, unknown> = agentStepZodShape;
+const _tableCoversZod: Record<keyof typeof agentStepZodShape, unknown> =
+  AGENT_STEP_SLOT_META;
+void _specCoversTable;
+void _tableCoversSpec;
+void _zodCoversTable;
+void _tableCoversZod;

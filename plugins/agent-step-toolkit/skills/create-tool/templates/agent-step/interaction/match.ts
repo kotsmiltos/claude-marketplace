@@ -72,8 +72,7 @@ export function matchMismatchLifecycle<T extends LibraryManagedSlots>(
   controller: ControllerHooks | undefined,
   resultBody: object,
   liveAwaiting: AwaitingInput | null,
-  msgs: SystemMessages,
-  clearBoundedChoice: boolean,
+  msgs: SystemMessages
 ): MatchMismatchOutcome<T> | null {
   if (!controller?.requiresMatch) return null;
   if ((resultBody as { verdict?: string }).verdict !== "match_mismatch") return null;
@@ -85,7 +84,7 @@ export function matchMismatchLifecycle<T extends LibraryManagedSlots>(
   const remaining = liveAwaiting.attempts_left - 1;
   if (remaining <= 0) {
     return {
-      patch: clearInteractionPatch<T>(clearBoundedChoice),
+      patch: clearInteractionPatch<T>(),
       entryPatch: {
         summary: formatMessage(msgs.match_attempts_exhausted, { action: actionName }),
         error: "match_attempts_exhausted",

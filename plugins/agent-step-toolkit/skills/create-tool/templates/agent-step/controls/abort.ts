@@ -18,7 +18,6 @@ import type { ControlAction, ControlOutcome, ControlRunContext } from "./contrac
 import {
   clearInteractionPatch,
   getAwaitingInput,
-  getBoundedChoice,
   getCurrentFlow,
 } from "../run/batch-state.js";
 
@@ -89,14 +88,13 @@ function policyDescriptionLine(
 
 export const abortControl: ControlAction = {
   name: ABORT_ACTION,
-  activeWhen: (ctx) => ctx.hasLifecycleOpts || ctx.boundedChoicesEnabled,
+  activeWhen: (ctx) => ctx.hasLifecycleOpts,
   schemaVariant: (ctx) =>
     z
       .object({ action: z.literal(ABORT_ACTION), params: z.object({}) })
       .describe(policyDescription(ctx)),
   descriptionLine: policyDescriptionLine,
   allowedDuringGateLockdown: true,
-  allowedDuringChoicePending: true,
   sameTurnEscape: "sole",
   exclusivityGroup: null,
   execute<T extends LibraryManagedSlots>(
@@ -106,36 +104,25 @@ export const abortControl: ControlAction = {
     const { state, msgs } = ctx;
     const priorAwaiting = getAwaitingInput(state.view);
     const priorFlow = getCurrentFlow(state.view);
-    const priorChoice = ctx.activation.boundedChoicesEnabled
-      ? getBoundedChoice(state.view)
-      : null;
-    // A resolved choice is a persistent one-shot marker, not pending caller
-    // input. Abort may clear only a choice which is still awaiting selection;
-    // preserving the resolved marker keeps repeat fallback effective after an
-    // in-flow correction/reselection.
-    const priorPendingChoice =
-      priorChoice?.status === "pending" ? priorChoice : null;
-    const hadSomething =
-      priorAwaiting != null || priorFlow != null || priorPendingChoice != null;
+    const hadSomething = priorAwaiting != null || priorFlow != null;
     if (hadSomething) {
-      state.apply(clearInteractionPatch<T>(priorPendingChoice != null));
+      state.apply(clearInteractionPatch<T>());
     }
     const entry: StepResult = {
       action: ABORT_ACTION,
       ok: true,
       summary: hadSomething ? msgs.abort_done : msgs.abort_nothing,
     };
-    if (priorAwaiting) {
+    // Report the gate the caller was actually answering.
+    const abortedGate = priorAwaiting;
+    if (abortedGate) {
       entry.aborted_awaiting = {
-        kind: priorAwaiting.kind,
-        for_action: priorAwaiting.for_action,
+        kind: abortedGate.kind,
+        for_action: abortedGate.for_action,
       };
     }
     if (priorFlow) {
       entry.aborted_flow = priorFlow.name;
-    }
-    if (priorPendingChoice) {
-      entry.aborted_choice = priorPendingChoice.name;
     }
     return { entry, failed: false };
   },

@@ -1,14 +1,12 @@
 // FILE: src/state.ts
 //
 // Graph-level state — defined ONCE as a Zod schema. Per-tool slots get added as
-// tools are introduced. `awaitingInput` + `currentFlow` + `boundedChoice` +
-// `pagedRead` + `deflectedAside` + `handoff` + `errorCount` + `guardTurn` are
-// library-managed slots used by the runner to coordinate
-// confirmation gates, OTP gates, double-entry-match gates, multi-turn flows, the
-// `pageable` read reslice-cache, the one-shot aside-deflection latch, and the
-// auto-handoff counter — plus `guardTurn`,
-// the turn-scoped latch a HOST model-input guard writes via `markGuardFired`.
-// They are NOT
+// tools are introduced. `awaitingInput` + `currentFlow` + `pagedRead` +
+// `spentLadders` + `handoff` + `errorCount` are library-managed slots used by
+// the runner to coordinate confirmation gates, OTP gates, double-entry-match
+// gates, standing dictation asks, multi-turn flows, the `pageable` read
+// reslice-cache, the per-ladder once-latch counts (note_refusal +
+// captureBounces), and the auto-handoff counter. They are NOT
 // declared here — the library exports them as a single spreadable Zod fragment
 // (`agentStepZodShape`), built from the same source-of-truth schemas the runner
 // mutates, so the host's storage can never drift from the library's contract.
@@ -59,9 +57,9 @@ const PendingHandoffSchema = z.object({
 });
 
 export const AgentStateSchema = MessagesZodState.extend({
-  // Library-managed slots (awaitingInput + currentFlow + boundedChoice +
-  // pagedRead + deflectedAside + handoff + errorCount + guardTurn), carrying
-  // the last-writer-wins channel semantics the runner
+  // Library-managed slots (awaitingInput + currentFlow + pagedRead +
+  // spentLadders + handoff + errorCount), carrying the last-writer-wins
+  // channel semantics the runner
   // expects. Never re-declare these by hand — spread the library fragment.
   ...agentStepZodShape,
 
@@ -131,7 +129,7 @@ export const AgentStateSchema = MessagesZodState.extend({
 
 /** The graph's full state type — the value types nodes receive. Tools import this
  *  to type their state selectors (each `stateSelector.ts` projects `State` down to
- *  one action's slice) and the `ExecutorResult<State>` their executors return. */
+ *  one action's slice) and the `DeclaredExecutorResult<State>` their executors return. */
 export type State = ExtractStateType<typeof AgentStateSchema>;
 
 /** The graph INPUT schema — what the channel middleware / Studio may send at

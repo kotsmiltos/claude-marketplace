@@ -11,6 +11,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.26.0] — 2026-08-20
+
+Ships **agent-step library 3.0.0** — a major library release; `/pull-library` is **required** for
+downstream projects and applies 10 transforms, one of them mandatory per action (see
+[migrations/2.5.0-to-3.0.0.md](migrations/2.5.0-to-3.0.0.md)). Authoring goes declarative — verdict
+rows are the result space and the legacy executor return shape is gone — and the engine takes over
+the model-facing language it enforces (action descriptions, gate reply contracts, the turn-protocol
+prompt fragment). Three zero-host subsystems are removed. Library suite 236 → 222 tests (the removed
+subsystems took their suites with them); verified by throwaway bootstrap from these templates: clean
+typecheck, 222/222 passing.
+
+### Added
+- **Library 3.0.0** — **declared verdict rows** (`ActionDef.verdicts` / `VerdictDef` +
+  `DeclaredExecutorResult`: the executor names a verdict and hands over dynamic data; the runner
+  composes the body in declaration order, merges the row's static `stateUpdate`/`effects`, and
+  derives the backend-failure code list from `backendFailure` rows), **standing asks** (`ActionDef.asks`
+  + the non-locking `dictation` awaiting-kind, stamped on the wire as `standing_ask` / `ask_contract`
+  / engine-rendered `ask_text`), **escalation ladders** (`ladders` + the sole-step `note_refusal`
+  control over the task-scoped `spentLadders` latch, escalating atomically into a configured handoff),
+  **`captureBounces`** (bounded consecutive `invalid_params` re-asks, `max: 2` measured),
+  **`composeGateContract` / `GateContractSpec`**, **`composeProtocolPrompt`**,
+  **`ConfirmationOpts.readBackDirective`**, the capture builders `callerTextParam` / `relayParam` /
+  `exactlyOneOf`, and **`AGENT_STEP_SLOT_META`** (one slot table; mask, task-scoped and
+  runner-owned lists derived and compile-key-locked).
+- **Two new tool templates** — `action.ts.template` (the per-action declaration: schema, verdict
+  rows, asks, captureBounces, controller) and `names.ts.template` (the types-only `ActionName` /
+  `PrereqName` leaf that keeps the declaration ↔ config import graph acyclic).
+- **Migration `2.5.0-to-3.0.0.md`** — prose + 10 ordered transforms (executors→rows with a per-action
+  wire byte-diff check, the repeat-control rename, gate contracts for repeatable gates, the
+  choices→ladders and deflect-aside→ladder folds, forced-handoff removal, guard-latch drop,
+  description trimming, the protocol splice, slot cleanup) plus the golden re-measurement and
+  checkpointed-thread follow-ups.
+
+### Changed
+- **The canonical tool layout** — per-action `action.ts` beside its executor, a `names.ts` leaf, and
+  `config.ts` as a slim assembler. Rippled through all five executor templates (now returning
+  `DeclaredExecutorResult`), `tool-index.ts.template` (ladders in, bounded choices out),
+  `project/state.ts.template` (six library slots), and `project/prompt.ts.template`, which now
+  splices the engine-composed `{PROTOCOL}` fragment instead of carrying hand-rolled machinery prose.
+- **References rewritten for the 3.0.0 contract** — `agent-step-api.md` (new `<declared_verdicts>`,
+  `<composed_surface>`, `<standing_asks>`, `<ladders>`, `<gate_contracts>` sections; refreshed
+  construction-check and result-envelope tables), `executor-patterns.md` (all ten patterns on rows),
+  `tool-directory-layout.md` (new layout + 10-step creation order). `state-and-prompt-integration.md`,
+  `agent-design-principles.md`, `project-bootstrap-structure.md`, both create-tool workflows, and the
+  `create-tool` / `test-agent-step` SKILLs reconciled.
+- **Plugin + marketplace descriptions rewritten** as capability text: they had accreted into a
+  per-release narrative (3,143 chars) that still advertised four features 3.0.0 removes.
+
+### Fixed
+- Stale test-file count in the bootstrap library copy list ("the ten `*.test.ts` files" → every
+  suite, phrased version-agnostically).
+- `ExecutorResult` references in the maintainer blast-radius map
+  (`.claude/skills/bump-version/references/tracked-assets.md`, Tiers 2 and 4).
+- Incomplete reserved-action-name list in the `create-tool` quick reference — the three
+  conditionally reserved control names were missing, and declaring one throws at construction.
+
+### Breaking (for downstream projects, not for the plugin)
+- The legacy `ExecutorResult` executor return is removed from the public contract; the bounded-choice
+  subsystem, the `deflect_aside` control, the `guardTurn` guard latch and `HandoffSpec.forcedHandoff`
+  are gone (zero-host or superseded by ladders / row-declared terminality);
+  `repeat_pending_confirmation` → `repeat_pending_question`; `repeatReadBack` now requires
+  `replyContract`. Library state is six slots. Hosts re-measure their model-surface goldens — the
+  engine-composed bytes moved.
+
 ## [0.25.0] — 2026-08-12
 
 Ships **agent-step library 2.5.0** (from 2.4.0): the confirmation gate hardens and configuration

@@ -59,6 +59,18 @@ export interface SystemMessages {
   confirm_proposed: string;
   /** A pending proposal was overwritten with adjusted params. `{action}`. */
   confirm_reproposed: string;
+  /** Reply contract riding every proposal entry (`reply_contract`): what each
+   *  class of caller reply means for the pending gate. Model-facing — the gate
+   *  turn reacts to THIS instead of prompt memory. `{action}`. */
+  confirm_reply_contract: string;
+  /** Contract riding the entry that recorded a standing ask (`standing_ask`
+   *  present): what to do when the caller supplies the value. `{action}`,
+   *  `{param}`. */
+  standing_ask_contract: string;
+  /** Framing directive riding the repeat control's returned `read_back`
+   *  (`read_back_directive`): the stored recap is complete and ends the turn.
+   *  Model-facing. */
+  read_back_directive_repeat: string;
   /** Confirmation attempts ran out; the pending action was dropped. `{action}`. */
   confirm_exhausted: string;
   /** A `requiresOtp` action ran with no OTP gate pending. `{action}`. */
@@ -73,12 +85,6 @@ export interface SystemMessages {
   match_attempts_exhausted: string;
   /** A handoff step succeeded; the turn must end silently. `{reason}`. */
   handoff_requested: string;
-  /** The `deflect_aside` control accepted the task's ONE free in-place
-   *  deflection: the model must decline the aside in a single short sentence
-   *  and repeat its pending question in the SAME turn — no handoff happened
-   *  and every pending gate survives. Model-facing instruction, not
-   *  caller-audible. */
-  aside_deflected: string;
   /** The batch contained no steps. */
   no_steps: string;
   /** Instruction accompanying the synthetic `auto_handoff` result. The
@@ -117,6 +123,12 @@ export const DEFAULT_SYSTEM_MESSAGES: SystemMessages = {
     'Mutation "{action}" must be the last step in the batch (reads may precede it; nothing may follow).',
   confirm_proposed: 'Proposed "{action}"; awaiting confirmation.',
   confirm_reproposed: 'Re-proposed "{action}" with adjusted params; awaiting confirmation.',
+  confirm_reply_contract:
+    'The caller\'s NEXT reply answers this read-back. A clear yes → re-call "{action}" with exactly the proposed params (that executes it). A corrected or fresh dictation → re-call "{action}" with the new value (a fresh proposal). Anything else is not an answer: make no call and re-ask the read-back question.',
+  standing_ask_contract:
+    'The caller now owes this value. When `ask_text` is present, ask with exactly those words. When their reply supplies it, call "{action}" with it in "{param}"; if they instead decline, pivot, or ask something else, handle that per your instructions — the ask keeps standing until answered. A reply that repeats a value this ask already refused is STILL the value: call again with exactly what they said, even when you expect the same refusal — the system counts these turns and escalates by itself; answering without the call breaks that count. When re-asking, use ONE short question and never describe how to dictate the value, its length, or its digits.',
+  read_back_directive_repeat:
+    "This read-back is the complete stored recap; only the one short answer that triggered this repeat may precede it, and nothing may follow it.",
   confirm_exhausted: 'Confirmation attempts exhausted for "{action}"; pending action dropped.',
   otp_not_pending:
     'Action "{action}" requires a pending OTP awaiting validation; none found.',
@@ -127,8 +139,6 @@ export const DEFAULT_SYSTEM_MESSAGES: SystemMessages = {
   match_attempts_exhausted: 'Match attempts exhausted for "{action}"; flow aborted.',
   handoff_requested:
     "Handoff requested ({reason}). The turn ends here — produce no further answer.",
-  aside_deflected:
-    "Aside noted — NOT handed off. Decline it in ONE short sentence (no details, no promises) and repeat your pending question in the SAME turn. If the caller pivots away from the task again, call deflect_aside again — the system will hand the conversation off then.",
   no_steps: "No steps executed.",
   auto_handoff_instruction:
     "Handoff triggered after repeated backend failures. The turn ends here — produce no further answer; the platform delivers the closing.",

@@ -1,0 +1,154 @@
+// FILE: src/tools/{{TOOL_NAME}}/actions/{{ACTION_NAME}}/action.ts
+//
+// The `{{ACTION_NAME}}` DECLARATION — schema, description, verdict rows,
+// controller — beside the executor that names those verdicts and the
+// selector that feeds it.
+//
+// MUST NOT import ./executor.js: executors pull backend/env, and the
+// config.ts → prompt.ts chain has to stay env-free.
+
+import { z } from "zod";
+import type { State } from "../../../../state.js";
+import type { ActionDef } from "../../../../agent-step/index.js";
+import type { PrereqName } from "../../names.js";
+
+export const {{ACTION_CAMEL}}Action: ActionDef<PrereqName, State> = {
+  summary: "{{ONE_LINE_ACTION_SUMMARY}}",
+  // SEMANTIC LEAD ONLY: what the action means for the business process, its
+  // param semantics, and what `ok` changes. The gate handshake and the
+  // verdict mechanics are ENGINE-COMPOSED (compile/action-describe.ts
+  // prepends the gate marker; results explain their own verdicts) — never
+  // restate them here.
+  description:
+    "{{ACTION_LLM_DESCRIPTION}}",
+  paramsSchema: z.object({
+    // {{ACTION_PARAMS}}
+    // Caller-dictated digit params use the library capture builders
+    // (`callerDigits`, `digitGroupsParam`, `digitCandidatesParam`); free-text
+    // captures use `callerTextParam`; exact-words relay fields use
+    // `relayParam`. XOR over optional selectors: `.superRefine(exactlyOneOf(
+    // ["a", "b"], message))`. See agent-step-api.md <caller_digit_capture>.
+  }),
+  prereqs: [{{ACTION_PREREQS}}],
+
+  // ─── Declared verdict rows — the executor's result space ──────────────── //
+  // The executor returns `{ verdict, data?, stateUpdate?, effects?,
+  // resultExtras? }` and the runner composes the wire body from the named
+  // row. STATIC doctrine strings live here (one authority); only genuinely
+  // branch-dependent values ride the executor's `data`. `body` fields are
+  // composed IN DECLARATION ORDER after `summary`; a function field receives
+  // `data`; `summary` may be a `(state, data) => string` renderer for
+  // language-keyed catalogs. A verdict with no row fails loudly as
+  // `executor_error`.
+  verdicts: {
+    ok: {
+      ok: true,
+      summary: "{{OK_SUMMARY}}",
+      body: { verdict: "ok" },
+      // Static state write for this verdict (typed against State; the
+      // executor's dynamic `stateUpdate` wins on key conflicts):
+      // stateUpdate: { {{STATE_FIELD}}: {{STATIC_VALUE}} },
+    },
+    {{FAILURE_VERDICT}}: {
+      ok: false,
+      summary: "{{FAILURE_SUMMARY}}",
+      body: {
+        verdict: "{{FAILURE_VERDICT}}",
+        error: "{{FAILURE_ERROR_CODE}}",
+        // Dynamic diagnostic from the executor's `data`:
+        // reason: (data) => data.reason,
+      },
+      // Mark a backend failure so the auto-handoff counter sees this code
+      // (requires body.error to be a static string):
+      // backendFailure: true,
+    },
+    // A TERMINAL verdict arms its handoff atomically with the outcome write —
+    // the two can never fork:
+    // {{TERMINAL_VERDICT}}: {
+    //   ok: false,
+    //   summary: "{{TERMINAL_SUMMARY}}",
+    //   body: { verdict: "{{TERMINAL_VERDICT}}" },
+    //   stateUpdate: { {{OUTCOME_SLOT}}: "{{TERMINAL_VERDICT}}" },
+    //   effects: [{ type: "request_handoff", request: { reason: "{{HANDOFF_REASON}}", context: "{{HANDOFF_CONTEXT}}" } }],
+    // },
+  },
+
+  // ─── Standing asks (optional) — keyed by verdict-or-error code ────────── //
+  // When the batch's FINAL entry carries a listed code, the engine records
+  // the mapped ask as the `dictation` awaiting-input state and stamps
+  // `standing_ask` + `ask_contract` (and `ask_text` when `render` returns
+  // bytes) on that entry. Non-locking: it records the standing question;
+  // capturing the answer stays the model's job. Runner-raised codes like
+  // `invalid_params` are legal keys.
+  // asks: {
+  //   invalid_params: { action: "{{ACTION_NAME}}", param: "{{CAPTURE_PARAM}}", expects: "digits" },
+  // },
+
+  // ─── Capture-bounce bound (optional; requires `ladders` in index.ts) ──── //
+  // Consecutive `invalid_params` bounces counted by the engine under
+  // `spentLadders["capture:{{ACTION_NAME}}"]`, cleared by any successful
+  // parse, escalating through the named ladder when spent. `max: 2` is the
+  // measured knob — the model improvises past ~3 identical bounces.
+  // captureBounces: { max: 2, ladder: "{{LADDER_NAME}}" },
+
+  // ─── Controller lifecycle (optional) ──────────────────────────────────── //
+  controller: {
+    // `soleOnExecute` lets propose/re-propose ride as the LAST step of a
+    // multi-step batch while the execute re-call must be the only step. Use
+    // strict `soleStep: true` instead if the action must never share a batch.
+    soleOnExecute: true,
+    // requiresConfirmation opts:
+    //   maxAttempts — re-propose budget before the gate exhausts (default 3).
+    //   lockdown    — defaults to true (unrelated batches refused while pending).
+    //   readBack    — (params, state) => string: render what the RUNNER
+    //                 recorded so the model speaks it back verbatim. Add it
+    //                 whenever params carry caller-dictated digits.
+    //   readBackDirective — (params, state) => string: how the model must
+    //                 FRAME the read_back (what may precede/follow the bytes);
+    //                 rides the proposal as `read_back_directive`.
+    //   repeatReadBack — persist the rendering on the gate and inject the
+    //                 sole-step `repeat_pending_question` control: a
+    //                 "pardon?" turn returns the EXACT stored bytes without
+    //                 confirming or spending an attempt. REQUIRES replyContract.
+    //   replyContract — a GateContractSpec ({ subject, subjectNoun,
+    //                 executesLabel, categories }): the engine composes the
+    //                 full reply contract for THIS gate (frame clauses engine-
+    //                 owned, domain categories host-owned) replacing the
+    //                 generic template. For gates whose reply taxonomy the
+    //                 generic yes/correction contract cannot cover.
+    //   refuseProposal — (params, state) => result body | null: propose-time,
+    //                 STATE-aware refusal (no gate stored, no attempt spent).
+    // There is deliberately NO TTL — stale gates clear via
+    // `abort_pending_input` or executor effects.
+    requiresConfirmation: { maxAttempts: 3 },
+  },
+
+  // ─── Downstream-slot invalidation (optional) ──────────────────────────── //
+  // Reset downstream slots when this action re-collects a watched slot with a
+  // DIFFERENT value (non-null → changed). Targets must accept `null`.
+  // invalidatesOnChange: {
+  //   {{WATCHED_SLOT}}: ["{{DOWNSTREAM_SLOT_A}}", "{{DOWNSTREAM_SLOT_B}}"],
+  // },
+};
+
+// ─── Other lifecycle opts available on `controller` (use as needed) ──────── //
+//
+// Multi-turn flow lifecycle (one flow at a time; library enforces flow mutex):
+//   startsFlow:    { name: "{{flow_name}}" }     — opens the flow on `ok`.
+//   requiresFlow:  "{{flow_name}}"               — refuse unless flow matches.
+//   endsFlow:      true                           — clears flow + awaitingInput on `ok`.
+//
+// SCA / OTP gating (library never counts OTP attempts; backend is authoritative):
+//   issuesOtp:     { consumer_action: "confirm_otp" }
+//   requiresOtp:   true
+//
+// Double-entry verification (PIN repeat, password repeat):
+//   startsMatchFor:{ consumer_action: "commit_x" }
+//   requiresMatch: { capturer: "propose_x", maxAttempts: 3 }
+//
+// Read pagination is a top-level ActionDef field (not a controller opt):
+//   pageable: true | "delegate" | { mode, pageSize, maxPageSize }
+// The runner injects `page`/`pageSize` and emits a uniform envelope. A
+// pageable action's paramsSchema MUST be a z.object. See executor-read-paginated.
+//
+// See `references/agent-step-api.md` for the full lifecycle table.

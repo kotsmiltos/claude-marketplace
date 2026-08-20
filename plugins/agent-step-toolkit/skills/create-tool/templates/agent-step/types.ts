@@ -14,7 +14,7 @@ import type { HandoffRequest } from "./state.js";
  *  documented point of the step lifecycle (see run/execution.ts):
  *
  *  - `request_handoff` — terminal business outcome: atomically clears every
- *    transient runner slot (`awaitingInput`, `currentFlow`, `boundedChoice`,
+ *    transient runner slot (`awaitingInput`, `currentFlow`,
  *    `pagedRead`) and writes the `handoff` slot, exactly like the built-in
  *    `request_handoff` action. Honoured regardless of `ok` — a refusal verdict
  *    (e.g. "already closed") may still be terminal. TERMINAL IS ENFORCED:
@@ -52,15 +52,72 @@ export type ExecutorEffect =
  *
  *  `stateUpdate` is a partial patch of HOST-OWNED slots, threaded to
  *  subsequent steps in the batch AND accumulated into the final tool Command.
- *  Library-managed slots (`awaitingInput`, `currentFlow`, `boundedChoice`,
+ *  Library-managed slots (`awaitingInput`, `currentFlow`,
  *  `pagedRead`, `handoff`, `errorCount`) may NOT appear in it — the runner is
  *  their only writer and rejects such a patch loudly. Library transitions go
  *  through `effects` instead. */
+/** INTERNAL — the runner's composed result shape, produced by normalizing a
+ *  {@link DeclaredExecutorResult} against the action's {@link VerdictDef} row.
+ *  NOT an authoring surface: executors return the declarative shape only, so
+ *  the composed verdict index and gate contracts are provably complete (an
+ *  outcome cannot exist outside the rows). */
 export interface ExecutorResult<T> {
   resultBody: object;
   stateUpdate?: Partial<T>;
   effects?: ExecutorEffect[];
   ok: boolean;
+}
+
+/** One DECLARED verdict of an action (`ActionDef.verdicts`): the row the
+ *  runner composes the result body from when the executor returns the
+ *  declarative shape ({@link DeclaredExecutorResult}). One authority per
+ *  verdict for the summary, the model-facing doctrine, the static state
+ *  write, the effects, and the standing ask — the five things that used to
+ *  be hand-kept consistent across executors, shared constants, and wiring
+ *  lists (and measurably forked). */
+export interface VerdictDef<T = unknown> {
+  /** Batch-continuation flag (`StepResult.ok`) for this verdict. */
+  ok: boolean;
+  /** The body `summary` — a string, or a renderer over the CURRENT state
+   *  view (for language-keyed catalogs; same division as
+   *  `ConfirmationOpts.readBack`) plus the executor's `data` (for
+   *  interpolated summaries, e.g. a kind label). */
+  summary: string | ((state: unknown, data: Record<string, unknown>) => string);
+  /** The remaining body fields, composed IN DECLARATION ORDER after
+   *  `summary` (e.g. `verdict`, `error`, `reason`) — declaration order is
+   *  wire order, so a converted action reproduces its historical body bytes
+   *  exactly. A function value receives the executor's `data`. */
+  body?: Record<string, unknown | ((data: Record<string, unknown>) => unknown)>;
+  /** Static host-state patch for this verdict — typed against the host
+   *  state so a typo'd slot fails compilation instead of silently dropping
+   *  at the patch merger. The executor's dynamic `stateUpdate` wins on key
+   *  conflicts. */
+  stateUpdate?: Partial<T>;
+  /** Effects applied for this verdict, ahead of any executor-supplied ones
+   *  (e.g. the terminal handoff that must never fork from the outcome
+   *  written in `stateUpdate`). */
+  effects?: ExecutorEffect[];
+  /** Marks this verdict's `body.error` code as a backend failure for the
+   *  auto-handoff counter — derives `backendFailureCodes`, so the hand-kept
+   *  list in the host wiring goes away. Requires `body.error` to be a
+   *  static string (validated at construction). */
+  backendFailure?: boolean;
+}
+
+/** The executor return: name the verdict, hand over the dynamic data; the
+ *  runner composes the body from the action's {@link VerdictDef} row (unknown
+ *  verdicts fail loudly as `executor_error`). `resultExtras` are appended
+ *  after the declared body fields; `effects` append after the row's. This is
+ *  the ONLY authorable result shape — every verdict an executor can return
+ *  must have a declared row. */
+export interface DeclaredExecutorResult<T> {
+  verdict: string;
+  /** Dynamic values the row's function fields read (e.g. a diagnostic
+   *  message interpolated into `reason`). */
+  data?: Record<string, unknown>;
+  stateUpdate?: Partial<T>;
+  effects?: ExecutorEffect[];
+  resultExtras?: Record<string, unknown>;
 }
 
 /** Projects the host state down to the slice one action's executor needs. The
@@ -83,7 +140,7 @@ export type SelectorRegistry<T, ActionName extends string> = Record<ActionName, 
 export type Executor<Slice, T> = (
   params: unknown,
   state: Slice,
-) => Promise<ExecutorResult<T>>;
+) => Promise<DeclaredExecutorResult<T>>;
 
 /** The executor registry, keyed 1:1 by action name. Each entry's `state` param
  *  is derived from that action's selector return (`ReturnType<Selectors[K]>`),
@@ -105,7 +162,59 @@ export interface Verifier<T> {
 }
 export type VerifierRegistry<T> = Record<string, Verifier<T>>;
 
-export interface ActionDef<PrereqName extends string> {
+/** One verdict's standing ask: which action the requested value feeds, on
+ *  which param, and whether the value is deterministic digit content. Declared
+ *  per verdict in {@link ActionDef.asks}; the batch finalizer turns the
+ *  batch's FINAL entry into the library `awaitingInput` `dictation` record. */
+export interface DictationAsk {
+  /** Target action the customer's value will be sent to. Must exist. */
+  action: string;
+  /** The target action's param carrying the capture (e.g. `spokenDigits`). */
+  param: string;
+  /** `digits` → a purely digit-bearing caller turn may be intercepted
+   *  deterministically; `text` → standing-question record only. */
+  expects: "digits" | "text";
+  /** Render the caller-audible ask itself (language/lexicon live in state, so
+   *  the host supplies the function — the same division as
+   *  `ConfirmationOpts.readBack`). A non-empty return rides the final entry as
+   *  `ask_text` beside `standing_ask`, and the ask contract directs the model
+   *  to speak it exactly — engine-rendered bytes are how fixed sentences stay
+   *  verbatim (a model asked to speak a catalog line "verbatim" from prompt
+   *  memory measurably decorates it). Omit for asks whose wording the model
+   *  may own (e.g. the shortened re-ask after a bounce). */
+  render?: (state: unknown) => string | undefined;
+}
+
+/** Bound on CONSECUTIVE malformed captures for one action — the runner's
+ *  `invalid_params` bounce ({@link ActionDef.captureBounces}).
+ *
+ *  The bounce is deliberately cheap: no confirmation attempt is spent, no
+ *  verdict is produced, no executor runs. That is what keeps a caller-capture
+ *  shape rule out of the model's JSON Schema — but it also means NOTHING in
+ *  the engine counts it, so a caller who keeps mis-supplying a value is
+ *  re-asked forever (live incident 2026-08-19: seven identical AFM bounces in
+ *  105 seconds with no exit, while a well-formed AFM the backend cannot
+ *  resolve is terminal on the FIRST miss). This policy closes that asymmetry.
+ *
+ *  Past `max` consecutive bounces the engine CLIMBS the named escalation
+ *  ladder instead of bouncing plainly: the ladder's free use returns its
+ *  instruction (explain/suggest once and re-ask in the SAME turn) and the use
+ *  after that applies its `onExhaust` handoff atomically. Counts live in the
+ *  task-scoped `spentLadders` latch under `capture:<action>` and RESET on any
+ *  capture for that action that parses, so only a consecutive run escalates.
+ *
+ *  Model-invisible by design: nothing about the bound reaches the schema, and
+ *  the bounce summary stays count-free — a count in a capture message
+ *  measurably makes the model pad digits to satisfy it. */
+export interface CaptureBouncePolicy {
+  /** Plain bounces tolerated before the ladder is climbed. Integer ≥ 1. */
+  max: number;
+  /** Which configured escalation ladder an exhausted capture enters. Must name
+   *  a ladder in the config's `ladders` registry (validated at construction). */
+  ladder: string;
+}
+
+export interface ActionDef<PrereqName extends string, T = unknown> {
   /** Full LLM-facing mechanics for this action — params, verdicts/refusal
    *  codes, result-body shape, lifecycle. Attached to the action's Zod schema
    *  variant via `.describe()`, so the model receives it once, in the schema.
@@ -152,6 +261,27 @@ export interface ActionDef<PrereqName extends string> {
    *  batch-isolation flags. Omit for plain reads and collection steps that
    *  don't participate in any controller-managed lifecycle. */
   controller?: ControllerHooks;
+  /** Standing asks, keyed by the verdict-or-error code THIS action's results
+   *  carry (`resultBody.verdict`, else the entry's `error` — runner-raised
+   *  codes like `invalid_params` are legal keys). When the batch's FINAL entry
+   *  carries a listed code, the finalizer records the mapped ask as the
+   *  library `awaitingInput` `dictation` state — the engine-owned "current
+   *  question" the caller now owes an answer to. A final entry from this
+   *  action whose code is NOT listed clears a dictation that was standing for
+   *  this same action (the ask was serviced); it never disturbs a
+   *  confirmation/OTP/match gate. Non-locking by design. */
+  asks?: Record<string, DictationAsk>;
+  /** Declared verdict rows ({@link VerdictDef}), keyed by the code the
+   *  executor returns ({@link DeclaredExecutorResult}). The rows ARE the
+   *  action's result space: an executor returning a verdict with no row here
+   *  fails loudly as `executor_error`. Each row's `ask` merges into `asks` at
+   *  construction (duplicates fail); rows with `backendFailure` derive
+   *  `backendFailureCodes`. */
+  verdicts?: Record<string, VerdictDef<T>>;
+  /** Bound the runner's `invalid_params` bounce for this action's captures —
+   *  see {@link CaptureBouncePolicy}. Requires `ladders`; omit for actions
+   *  whose params the caller does not dictate. */
+  captureBounces?: CaptureBouncePolicy;
 }
 
 /** Per-mutation opt-in for state-driven confirmation gating. Truthy form
@@ -167,7 +297,7 @@ export interface ConfirmationOpts {
   maxAttempts?: number;
   lockdown?: boolean;
   /** Persist a non-empty `readBack` rendering on the pending confirmation and
-   *  inject the built-in `repeat_pending_confirmation` control. The control
+   *  inject the built-in `repeat_pending_question` control. The control
    *  may return those exact stored bytes on a later caller turn without
    *  confirming, executing, re-rendering, or spending an attempt. Default
    *  `false`; enabling it without a non-empty rendering leaves that proposal
@@ -192,6 +322,17 @@ export interface ConfirmationOpts {
    *  and threading one ripples through `ControllerHooks`/`ActionDef`; hosts cast
    *  their own state, exactly as executors do with their slices. */
   readBack?: (params: Record<string, unknown>, state: unknown) => string | undefined;
+  /** How the model must FRAME the rendered `read_back` this proposal carries —
+   *  what, if anything, may precede or follow the verbatim bytes ("this is the
+   *  capture: append one short confirm question"; "this recap is complete: add
+   *  nothing"). Called only when `readBack` rendered non-empty, with the same
+   *  params/state; a non-empty return rides the proposal body as
+   *  `read_back_directive`. The model reads the framing from the wire instead
+   *  of a per-shape prompt table. Model-facing English, never caller-audible. */
+  readBackDirective?: (
+    params: Record<string, unknown>,
+    state: unknown,
+  ) => string | undefined;
   /** Propose-time, state-aware refusal. Runs on the propose/re-propose path
    *  AFTER the params parsed and BEFORE anything is committed — no gate is
    *  stored, no attempt is spent, and a pending bounded choice is NOT
@@ -208,6 +349,48 @@ export interface ConfirmationOpts {
     params: Record<string, unknown>,
     state: unknown,
   ) => ({ summary: string; error: string } & Record<string, unknown>) | null | undefined;
+  /** Replace the runner's generic `reply_contract` on THIS action's proposal
+   *  bodies with an action-specific one. The contract is the COMPLETE
+   *  classification of the caller's next reply while the gate pends — a
+   *  non-empty override is the sole authority for that action (the generic
+   *  template is not concatenated), so it must classify every reply class it
+   *  wants handled, including the generic yes/correction ones.
+   *
+   *  For mutations whose gate outranks the generic taxonomy: a permanent
+   *  closure needs reply classes a generic proposal never sees (third-party
+   *  speech, re-selection, clarification-with-repeat). Model-facing English,
+   *  never caller-audible; empty/omitted keeps the runner template.
+   *
+   *  Declared as a {@link GateContractSpec} and composed at construction
+   *  (compile/gate-contract.ts): the engine writes the frame clauses it
+   *  enforces — the lead, the exact-params yes clause, and the closing
+   *  never-re-call guard — around the host's domain categories, so no host
+   *  can omit or reword them. */
+  replyContract?: GateContractSpec;
+}
+
+/** The declarative form of {@link ConfirmationOpts.replyContract}: the host
+ *  supplies only what the engine cannot know — how the model should name the
+ *  pending question, what the execute re-call does, and the measured domain
+ *  reply categories. The action name and sole-step rule come from the action
+ *  itself at compile time, so the contract can never fork from the gate it
+ *  governs. */
+export interface GateContractSpec {
+  /** The pending question as the lead clause names it (e.g. "this
+   *  permanent-closure consent question"). */
+  subject: string;
+  /** The question's short noun phrase, cited by the yes clause ("addressed
+   *  to this {subjectNoun}") and the closing guard ("a clear answer to the
+   *  {subjectNoun}") — e.g. "consent question". */
+  subjectNoun: string;
+  /** What the execute re-call performs, spoken inside the yes clause's
+   *  parenthetical ("that executes {executesLabel}") — e.g. "the permanent
+   *  closure". */
+  executesLabel: string;
+  /** The host's reply categories, joined verbatim in order between the yes
+   *  clause and the closing guard. Each is one or more complete sentences
+   *  ending in a period, with no trailing space. */
+  categories: readonly string[];
 }
 
 /** Per-action behavioural opts coordinated by the runner. Covers
@@ -286,9 +469,13 @@ export interface ControllerHooks {
   startsMatchFor?: { consumer_action: string };
 }
 
-export interface AgentStepConfig<ActionName extends string, PrereqName extends string> {
+export interface AgentStepConfig<
+  ActionName extends string,
+  PrereqName extends string,
+  T = unknown,
+> {
   tool: { name: string; description: string };
-  actions: Record<ActionName, ActionDef<PrereqName>>;
+  actions: Record<ActionName, ActionDef<PrereqName, T>>;
 }
 
 export interface StepResult {

@@ -37,7 +37,7 @@ import {
 import { validateConfig } from "./compile/validate.js";
 import { buildStepSchema } from "./compile/schema.js";
 import { composeToolDescription } from "./compile/describe.js";
-import { resolveCallerTurnId } from "./interaction/bounded-choice.js";
+import { resolveCallerTurnId } from "./interaction/turn-identity.js";
 import { createBatchState } from "./run/batch-state.js";
 import { admitBatch } from "./run/admission.js";
 import { expandPlan, type UserStep } from "./run/planning.js";
@@ -47,11 +47,7 @@ import { finalizeRun, type RunResult } from "./run/finalize.js";
 export type { BuildAgentStepToolOptions } from "./compile/plan.js";
 export type { RunResult } from "./run/finalize.js";
 export type { StateSchemaLike } from "./compile/state-schema.js";
-export {
-  REPEAT_PENDING_CONFIRMATION_ACTION,
-  REQUEST_BOUNDED_CHOICE_ACTION,
-  RESOLVE_BOUNDED_CHOICE_ACTION,
-} from "./controls/registry.js";
+export { REPEAT_PENDING_QUESTION_ACTION } from "./controls/registry.js";
 
 /** Run one batch against an explicit initial state, with a pre-compiled plan.
  *  The tool binding compiles once and calls this; `runSteps` compiles per

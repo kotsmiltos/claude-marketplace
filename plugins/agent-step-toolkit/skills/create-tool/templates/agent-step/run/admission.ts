@@ -6,10 +6,6 @@
 // is behavior — later rules assume earlier ones passed:
 //
 //   1. unknown action           — hallucinated/typo'd names, structured refusal
-//   2. choice same-turn lock    — a resolved bounded choice locks domain work
-//                                 until the caller speaks again
-//   3. choice pending lockdown  — a pending bounded choice admits only its
-//                                 controls / abort / handoff / direct inputs
 //   4. gate lockdown            — a pending confirmation/OTP/match admits only
 //                                 its target action / abort / handoff / choice
 //                                 controls (+ the capturer, for match)
@@ -27,18 +23,13 @@ import type { StepResult } from "../types.js";
 import type { LibraryManagedSlots } from "../state.js";
 import { formatMessage } from "../messages.js";
 import type { CompiledPlan } from "../compile/plan.js";
-import {
-  ABORT_ACTION,
-  EXCLUSIVITY_GROUPS,
-  RESOLVE_BOUNDED_CHOICE_ACTION,
-} from "../controls/registry.js";
+import { ABORT_ACTION, EXCLUSIVITY_GROUPS } from "../controls/registry.js";
 import {
   paramsMatchPending,
   pendingConfirmationOf,
 } from "../interaction/confirmation.js";
 import {
   getAwaitingInput,
-  getBoundedChoice,
   getCurrentFlow,
 } from "./batch-state.js";
 import type { UserStep } from "./planning.js";
@@ -79,120 +70,6 @@ export function admitBatch<T extends LibraryManagedSlots>(
     };
   }
 
-  // ── 2. Bounded-choice same-turn lock: a nonterminal resolution recorded on
-  //    THIS caller turn keeps domain work locked until the caller speaks again,
-  //    so a second ReAct loop in the same turn cannot execute suspended work.
-  //    An unknown current identity fails closed (locked). Safe escapes come
-  //    from control metadata: abort only as the batch's single step, handoff /
-  //    choice controls as the first step.
-  const choiceAtStart = activation.boundedChoicesEnabled
-    ? getBoundedChoice(view)
-    : null;
-  if (
-    activation.boundedChoicesEnabled &&
-    choiceAtStart?.status === "resolved" &&
-    choiceAtStart.resolved_on_caller_turn_id !== undefined &&
-    (currentCallerTurnId === undefined ||
-      currentCallerTurnId === choiceAtStart.resolved_on_caller_turn_id) &&
-    userSteps.length > 0
-  ) {
-    const escaped = plan.controls.some((control) => {
-      if (control.sameTurnEscape === "sole") {
-        return userSteps.length === 1 && first?.action === control.name;
-      }
-      if (control.sameTurnEscape === "first") {
-        return first?.action === control.name;
-      }
-      return false;
-    });
-    if (!escaped) {
-      const action = first?.action ?? "(empty)";
-      const summary =
-        `Bounded choice "${choiceAtStart.name}" was resolved on the current caller turn; ` +
-        "wait for the caller's next reply before running another step.";
-      return {
-        entry: {
-          action,
-          ok: false,
-          summary,
-          error: "bounded_choice_resume_turn_locked",
-          choice: choiceAtStart.name,
-        },
-      };
-    }
-  }
-
-  // ── 3. Bounded-choice pending lockdown: while the meta-choice awaits a
-  //    selection, no consequential domain action may run unless the host
-  //    explicitly marks it as a direct-input continuation. In particular, a
-  //    suspended confirm-required mutation is NOT allowed: a model mistake
-  //    cannot turn the caller's "continue" into execution. Abort is admitted
-  //    even if somehow inactive (defense for handcrafted state).
-  if (activation.boundedChoicesEnabled && choiceAtStart?.status === "pending") {
-    // Offered-this-turn lock: until the caller has actually HEARD the fork
-    // and replied (a later turn), nothing may count as their selection — not
-    // `resolve_bounded_choice`, not a direct-input action. Only the terminal
-    // escapes (abort, handoff) and the request control (whose repeat path is
-    // the configured atomic handoff) may lead the batch. Enforced only when
-    // both turn identities exist; a same-turn resolve would otherwise let a
-    // second ReAct loop answer the choice on the caller's behalf. Abort may
-    // escape this lock only as a sole step: an abort+domain batch would let the
-    // same pre-offer caller utterance both discard the choice and supply its
-    // replacement input.
-    const offeredThisTurn =
-      choiceAtStart.requested_on_caller_turn_id !== undefined &&
-      currentCallerTurnId !== undefined &&
-      choiceAtStart.requested_on_caller_turn_id === currentCallerTurnId;
-    const choice = activation.boundedChoices[choiceAtStart.name];
-    const directInputActions = new Set(choice?.directInputActions ?? []);
-    const abortAllowed =
-      first?.action === ABORT_ACTION &&
-      (!offeredThisTurn || userSteps.length === 1);
-    const allowed =
-      !!first &&
-      (abortAllowed ||
-        (offeredThisTurn
-          ? plan.controls.some(
-              (c) =>
-                c.allowedDuringChoicePending &&
-                c.name === first.action &&
-                c.name !== ABORT_ACTION &&
-                c.name !== RESOLVE_BOUNDED_CHOICE_ACTION,
-            )
-          : plan.controls.some(
-              (c) => c.allowedDuringChoicePending && c.name === first.action,
-            ) || directInputActions.has(first.action)));
-    if (!allowed) {
-      const action = first?.action ?? "(empty)";
-      if (offeredThisTurn) {
-        const summary =
-          `Bounded choice "${choiceAtStart.name}" was offered on the current caller turn; ` +
-          "wait for the caller's reply before consuming it.";
-        return {
-          entry: {
-            action,
-            ok: false,
-            summary,
-            error: "bounded_choice_same_turn_locked",
-            choice: choiceAtStart.name,
-          },
-        };
-      }
-      const summary =
-        `Bounded choice "${choiceAtStart.name}" is awaiting a selection; ` +
-        `domain action "${action}" is locked until the choice is resolved.`;
-      return {
-        entry: {
-          action,
-          ok: false,
-          summary,
-          error: "bounded_choice_pending_locked",
-          choice: choiceAtStart.name,
-        },
-      };
-    }
-  }
-
   // ── 4. Gate lockdown: if anything is awaiting customer input, the batch's
   //    first step must be the targeted `for_action` (plan expansion / the gate
   //    check resolves what happens next), an allowed control, or — for match —
@@ -203,47 +80,50 @@ export function admitBatch<T extends LibraryManagedSlots>(
   //    No library-side TTL on any slot — confirmation and OTP are both
   //    conversation-driven. Stale state is cleared by `abort_pending_input` or
   //    executor effects; the runner doesn't time anything out on its own.
+  //
   const awaiting = getAwaitingInput(view);
-  if (awaiting) {
+  const gate = awaiting;
+  if (gate) {
     // Confirmation lockdown defaults to true and is overridable per action;
-    // OTP and match lockdown are always on — no opt to disable.
+    // OTP and match lockdown are always on — no opt to disable. A dictation
+    // never locks: it is the record of the standing question, not a gate —
+    // the caller may legitimately pivot.
     const isLocked =
-      awaiting.kind === "confirmation"
-        ? plan.actions[awaiting.for_action]?.confirmation?.lockdown !== false
-        : true;
+      gate.kind === "confirmation"
+        ? plan.actions[gate.for_action]?.confirmation?.lockdown !== false
+        : gate.kind !== "dictation";
     if (isLocked) {
       let capturer: string | null = null;
-      if (awaiting.kind === "match") {
+      if (gate.kind === "match") {
         capturer =
-          plan.actions[awaiting.for_action]?.controller?.requiresMatch?.capturer ?? null;
+          plan.actions[gate.for_action]?.controller?.requiresMatch?.capturer ?? null;
       }
       const allowed =
         !!first &&
-        (first.action === awaiting.for_action ||
+        (first.action === gate.for_action ||
           first.action === ABORT_ACTION ||
-          // A handoff abandons the conversation path entirely; bounded-choice
-          // controls are an overlay that may suspend or resume the spoken
-          // question without consuming this gate. Both must work while locked.
+          // A handoff abandons the conversation path entirely and must work
+          // while locked.
           plan.controls.some(
             (c) => c.allowedDuringGateLockdown && c.name === first.action,
           ) ||
           (capturer !== null && first.action === capturer));
       if (!allowed) {
         const errorCode =
-          awaiting.kind === "confirmation"
+          gate.kind === "confirmation"
             ? "pending_confirmation_locked"
-            : awaiting.kind === "otp"
+            : gate.kind === "otp"
               ? "otp_pending_locked"
               : "match_pending_locked";
         const lockdownVars = {
-          action: awaiting.for_action,
+          action: gate.for_action,
           abort_action: ABORT_ACTION,
           capturer: capturer ?? "",
         };
         const summary =
-          awaiting.kind === "confirmation"
+          gate.kind === "confirmation"
             ? formatMessage(msgs.lockdown_confirmation, lockdownVars)
-            : awaiting.kind === "otp"
+            : gate.kind === "otp"
               ? formatMessage(msgs.lockdown_otp, lockdownVars)
               : formatMessage(msgs.lockdown_match, lockdownVars);
         return {
@@ -252,7 +132,7 @@ export function admitBatch<T extends LibraryManagedSlots>(
             ok: false,
             summary,
             error: errorCode,
-            awaiting: { kind: awaiting.kind, for_action: awaiting.for_action },
+            awaiting: { kind: gate.kind, for_action: gate.for_action },
           },
         };
       }
@@ -289,27 +169,6 @@ export function admitBatch<T extends LibraryManagedSlots>(
       if (activeMembers.length === 0) continue;
       const found = userSteps.find((s) => activeMembers.includes(s.action));
       if (!found) continue;
-      // Narrow relaxation (2026-08-11): a LEADING `resolve_bounded_choice` may
-      // be followed by the pending choice's own direct-input actions — the
-      // batch a model naturally emits when one caller reply both selects
-      // "continue" and supplies the suspended detail. Every follower is an
-      // action the config already trusts to consume caller input while the
-      // choice is pending (the confirm-required mutation is never among
-      // them), so the shape this group exists to prevent — "continue" turning
-      // into consent for a suspended mutation — stays impossible. The
-      // offered-this-turn lock (section 3) still refuses the same-turn form.
-      if (found.action === RESOLVE_BOUNDED_CHOICE_ACTION) {
-        const pendingChoice = getBoundedChoice(view);
-        if (
-          userSteps[0].action === RESOLVE_BOUNDED_CHOICE_ACTION &&
-          pendingChoice?.status === "pending"
-        ) {
-          const directInputs = new Set(
-            activation.boundedChoices[pendingChoice.name]?.directInputActions ?? [],
-          );
-          if (userSteps.slice(1).every((s) => directInputs.has(s.action))) continue;
-        }
-      }
       return {
         entry: {
           action: found.action,
@@ -341,44 +200,44 @@ export function admitBatch<T extends LibraryManagedSlots>(
       };
     }
 
-    const hasActiveTarget =
-      awaiting != null ||
-      currentFlow != null ||
-      (activation.boundedChoicesEnabled && choiceAtStart?.status === "pending");
+    const hasActiveTarget = awaiting != null || currentFlow != null;
     if (abortPolicy.requireActive && !hasActiveTarget) {
       return {
         entry: {
           action: ABORT_ACTION,
           ok: false,
-          summary: `"${ABORT_ACTION}" requires pending input, an active flow, or a pending bounded choice.`,
+          summary: `"${ABORT_ACTION}" requires pending input or an active flow.`,
           error: "abort_requires_active_input",
         },
       };
     }
 
+    // A pending CHOICE has no target action of its own; its abort target is
+    // the suspended gate underneath.
+    const awaitingTarget = gate;
     if (
       abortPolicy.allowedPendingTargets !== null &&
-      (awaiting == null ||
-        !abortPolicy.allowedPendingTargets.includes(awaiting.for_action))
+      (awaitingTarget == null ||
+        !abortPolicy.allowedPendingTargets.includes(awaitingTarget.for_action))
     ) {
       const allowed = abortPolicy.allowedPendingTargets
         .map((name) => `"${name}"`)
         .join(", ");
       const summary =
-        awaiting == null
+        awaitingTarget == null
           ? `"${ABORT_ACTION}" requires pending input targeting one of: ${allowed}.`
-          : `"${ABORT_ACTION}" cannot clear pending input for "${awaiting.for_action}"; allowed targets: ${allowed}.`;
+          : `"${ABORT_ACTION}" cannot clear pending input for "${awaitingTarget.for_action}"; allowed targets: ${allowed}.`;
       return {
         entry: {
           action: ABORT_ACTION,
           ok: false,
           summary,
           error: "abort_pending_target_not_allowed",
-          ...(awaiting
+          ...(awaitingTarget
             ? {
                 awaiting: {
-                  kind: awaiting.kind,
-                  for_action: awaiting.for_action,
+                  kind: awaitingTarget.kind,
+                  for_action: awaitingTarget.for_action,
                 },
               }
             : {}),

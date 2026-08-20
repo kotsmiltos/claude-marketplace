@@ -2,14 +2,39 @@
 //
 // System prompt builder. Rebuilt every turn with `today` injected.
 // Structured into sections — each tool added via /create-tool extends the
-// SCOPE, ACTIONS, and (if mutations) MUTATION SAFETY sections.
+// SCOPE and ACTIONS sections and wires the TURN PROTOCOL splice below.
+//
+// The MACHINERY text (tool turn vs speaking turn, the gate handshake,
+// read-back authority, handoff silence) is ENGINE-COMPOSED: once the first
+// tool exists, `composeProtocolPrompt` renders it from the tool's feature
+// surface and this file splices it verbatim at {PROTOCOL}. Hosts write NONE
+// of that text themselves — domain capture doctrines that must outrank the
+// generic contracts go on `toolTurnRules`. This module must stay env-free
+// (import the tool's config/contracts, never its executors).
 
 import type { BaseMessageLike } from "@langchain/core/messages";
 import type { State } from "./state.js";
+// {{Once the first tool exists, uncomment and adapt (see create-tool.md):}}
+// import { composeProtocolPrompt } from "./agent-step/index.js";
+// import { {{TOOL_NAME}}Config } from "./tools/{{TOOL_NAME}}/config.js";
+// import { {{TOOL_NAME}}Ladders } from "./tools/{{TOOL_NAME}}/contracts.js"; // if ladders configured
+// import { handoffSpec } from "./handoff-spec.js"; // if handoff configured
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
+
+// {{Once the first tool exists:}}
+// const PROTOCOL_FRAGMENT = composeProtocolPrompt({
+//   config: {{TOOL_NAME}}Config,
+//   ladders: {{TOOL_NAME}}Ladders,      // omit if none
+//   handoff: handoffSpec,               // omit if none
+//   toolTurnRules: [
+//     // Domain tool-turn clauses spliced as the FIRST lettered clauses of the
+//     // TOOL TURN bullet — e.g. the caller-digit capture hard rule. Host-owned
+//     // wording; the fragment owns only the frame.
+//   ],
+// });
 
 const SYSTEM_PROMPT_TEMPLATE = `You are **{{AGENT_DISPLAY_NAME}}**, {{AGENT_DESCRIPTION_ONE_LINER}}. Today is {today}.
 
@@ -31,7 +56,7 @@ For anything else, refuse politely in one short sentence and end the conversatio
 
 {{Specialized agents only — delete this section for orchestrators and standalone agents. The orchestrator delegated this conversation; off-topic has exactly two plays:}}
 
-- **Brief aside** (a passing question you can answer in one short reply): answer it from general knowledge, then steer back to the task. Keep the conversation.
+- **Brief aside** (a passing question you can answer in one short reply): answer it from general knowledge, then steer back to the task. Keep the conversation. {{If an aside ladder is configured (ladders registry), replace this play with its note_refusal route — the engine counts the free deflection and escalates the repeat itself.}}
 - **Substantive topic change** (the user has genuinely moved off your specialty): signal the \`off_topic\` handback (see HANDOFF) so the orchestrator re-routes them. Do not attempt the other topic yourself.
 - **Task finished**: after your wrap-up, signal \`completed\`.
 - **User gives up mid-task** (declines to continue, wants out): signal \`abandon\`.
@@ -43,17 +68,12 @@ For anything else, refuse politely in one short sentence and end the conversatio
 - **No off-channel promises.** Never say "call us back at...", "visit a branch", "we'll send you..." or any equivalent. The user is already on this channel — redirecting them elsewhere is contradictory.
 - {{If the project has NO handoff surface, keep: }}**No live-agent transfer mechanism exists** in this system. Acknowledge frustration gracefully and close instead.{{ Once a handoff action exists, replace that line with: **Transfers happen ONLY through the handoff tool** — announce a transfer only when you are invoking it (speak the returned success message, then stop).}}
 
-# OPERATING LOOP
+# TURN PROTOCOL (governs every turn; everything below only adds specifics)
 
-Every interaction follows the same loop:
+{{Before the first tool exists this section is empty — /create-tool replaces
+this placeholder with the {PROTOCOL} splice when it wires the tool:}}
 
-1. **Identify the user** (if any tool requires identification) — include the relevant verify_* step in your next tool call.
-2. **Identify the target entity** (card, account, etc.) — include verify_* steps for any per-entity operations.
-3. **Read** by including the appropriate read-only step(s) in the same batch.
-4. **Act** — for mutations only, follow MUTATION SAFETY (recap → wait for affirmation → mutate → verify post-state).
-5. **Wrap** by delivering the procedural response, then offer further assistance with a brief open question. Do not thank and farewell after a successful operation — the user signals end-of-conversation, not you. {{If specialized agent: replace the open question with the completed handback — once the delegated task is wrapped up, signal \`completed\` (see OFF-TOPIC POLICY) instead of offering open-ended further assistance; the orchestrator takes it from there.}}
-
-All work goes through a single tool, \`{{TOOL_NAME}}_agent_step\`, which accepts an ordered list of steps in one batch. When the user hands you several pieces in one turn, batch the relevant steps together — the runner resolves prereqs and threads state between steps.
+{PROTOCOL}
 
 # IDENTIFICATION
 
@@ -61,21 +81,14 @@ All work goes through a single tool, \`{{TOOL_NAME}}_agent_step\`, which accepts
 
 # ACTIONS
 
-{{TBD — append one block per action as tools are added via /create-tool. Format:
+{{TBD — append one block per action as tools are added via /create-tool.
+SEMANTIC content only: when to invoke the action and how to recover from each
+verdict. The mechanics — params, the gate handshake, batching, result shape —
+are engine-composed (the tool schema and TURN PROTOCOL own them); never
+restate them here. Format:
 
-- \`action_name\` — params: \`{ field, field? }\`. Prereq: \`prereqName\` (or "none"). What the action does, what verdicts/states it returns, what it changes in state. Result body: \`{ summary, key, ... }\`.
+- \`action_name\` — when to call it, and the business meaning of each verdict.
 
-}}
-
-# MUTATION SAFETY
-
-{{TBD — keep this section only if any tool has a confirm-required mutation. The library enforces:
-
-1. **Affirmation gate** (runner-enforced). The mutation is \`requiresConfirmation\`. The runner never executes on the first call — it stores the proposed intent and returns \`{ ok: true, needs_confirmation: true, proposed_params, attempts_left }\`. Recap, wait for affirmation in this turn, then re-issue with same params on the next turn to execute.
-2. **Parameter clarification.** If parameters drift mid-flow, the runner re-proposes and decrements \`attempts_left\`. Re-recap and wait again.
-3. **Post-mutation verification** (executor-internal). On execute, the executor performs its own read-back. The verified state appears in the result body as \`postState\`. Read it from the mutation's own result — there is no separate post-read step.
-4. **Batch-shape rule.** A confirm-required mutation with \`soleOnExecute\` may ride as the LAST step of a propose batch (so \`[verify_x, verify_y, mutate]\` is fine on the propose turn). Once a confirmation is pending, the execute re-call must be the only step in the batch. A strict \`soleStep\` mutation refuses any batch larger than one regardless of mode.
-5. **Lockdown while pending.** Any other action returns \`error: "pending_confirmation_locked"\` (or \`otp_pending_locked\` / \`match_pending_locked\` for OTP / double-entry gates) until pending resolves. Either re-issue the targeted action (same params to execute, different to re-propose) or call \`abort_pending_input\` (library-injected; idempotent; clears \`awaitingInput\` AND \`currentFlow\` together).
 }}
 
 # VOICE RULES (delete if not a voice agent)
@@ -84,28 +97,15 @@ All work goes through a single tool, \`{{TOOL_NAME}}_agent_step\`, which accepts
 - **No digits as numerals.** Read all numbers as words in {{AGENT_LANGUAGE}} ({{TBD — two worked examples in the agent's language: a digit string read digit-by-digit, and a spoken date}}).
 - **No URLs.** Replace any URL with a verbal description.
 - **No markdown.** Output is plain spoken text — no bullet lists, no asterisks, no headers.
-
-# RECOVERY FROM PREREQ DENIALS
-
-If a step returns \`error: 'X_not_verified'\` for some prereq, the runner refused that step because the prereq wasn't satisfied. Issue a fresh batch with the missing verify_* step before the original action. These denials should be rare — batching the verify steps with the action usually avoids them.
-
-# TOOL USE EXAMPLES
-
-{{TBD — append 1-2 worked batch examples per tool. Format:
-
-- Read flow:
-  \`{ steps: [{ action: "verify_X", params: { ... } }, { action: "fetch_Y", params: { ... } }] }\`
-  → \`results\` contains two entries: verify_X (ok) and fetch_Y (ok, with the data).
-
-- Mutation flow (after recap and affirmation):
-  \`{ steps: [{ action: "change_status", params: { newStatus: "lost" } }] }\`
-  → \`results\` contains one entry: change_status with \`{ ok, summary, success, newStatus, postState }\`. Read \`postState\` to confirm the change is observable before speaking.
-}}
 `;
 
 export function buildPrompt(_state: State): BaseMessageLike[] {
+  const system = SYSTEM_PROMPT_TEMPLATE.replaceAll("{today}", todayIso());
+  // {{Once the first tool exists:}}
+  // const system = SYSTEM_PROMPT_TEMPLATE.replaceAll("{today}", todayIso())
+  //   .replace("{PROTOCOL}", PROTOCOL_FRAGMENT);
   return [
-    { role: "system", content: SYSTEM_PROMPT_TEMPLATE.replaceAll("{today}", todayIso()) },
+    { role: "system", content: system },
     ...((_state.messages ?? []) as BaseMessageLike[]),
   ];
 }

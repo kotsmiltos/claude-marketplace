@@ -1,0 +1,13 @@
+// FILE: src/tools/{{TOOL_NAME}}/names.ts
+//
+// The action and prerequisite NAMES, alone in a leaf module so an action
+// declaration can be typed (`ActionDef<PrereqName, State>`) without importing
+// config.ts — which imports the action declarations back. A types-only leaf
+// is the cheapest way to keep that graph acyclic.
+
+export type ActionName =
+  | "{{ACTION_1}}"
+  | "{{ACTION_2}}"
+  | "{{ACTION_3}}";
+
+export type PrereqName = "{{PREREQ_1}}" | "{{PREREQ_2}}";

@@ -1,14 +1,15 @@
 // FILE: src/tools/{{TOOL_NAME}}/actions/{{ACTION_NAME}}/executor.ts
 //
-// Read-only executor. Calls backend, parses response, returns a result body
-// shaped for the LLM. No backend mutations. May return stateUpdate to cache
-// or pin the resolved entity for later actions in this thread.
+// Read-only executor. Calls backend, parses response, NAMES the verdict —
+// the wire body (summary, doctrine, error codes) is composed by the runner
+// from the action's declared `verdicts` rows (see ./action.ts). No backend
+// mutations. May return stateUpdate to cache or pin the resolved entity for
+// later actions in this thread.
 
 import { postBackend } from "../../backend/client.js";
 import { {{TOOL_NAME}}Env } from "../../backend/env.js";
-// import { tryResolve{{ENTITY}} } from "../../shared/resolve-{{entity}}.js"; // if needed
 import type { State } from "../../../../state.js";
-import type { ExecutorResult } from "../../../../agent-step/index.js";
+import type { DeclaredExecutorResult } from "../../../../agent-step/index.js";
 import type { Slice } from "./stateSelector.js";
 
 interface {{ACTION_PARAMS_TYPE}} {
@@ -21,18 +22,12 @@ interface BackendPayload {
 
 // `state` is the SLICE this action's stateSelector returned — not the whole
 // state. Read only what the selector handed you. The result's `stateUpdate`,
-// though, may still patch any host slot (ExecutorResult<State>).
+// though, may still patch any host slot (DeclaredExecutorResult<State>).
 export async function {{EXECUTOR_FN_NAME}}(
   rawParams: unknown,
   state: Slice,
-): Promise<ExecutorResult<State>> {
+): Promise<DeclaredExecutorResult<State>> {
   const p = rawParams as {{ACTION_PARAMS_TYPE}};
-
-  // (Optional) Resolve the target entity from state + params.
-  // const entity = tryResolve{{ENTITY}}(state, p.{{LOOKUP_FIELD}});
-  // if ("error" in entity) {
-  //   return { resultBody: { summary: entity.summary, error: entity.error }, ok: false };
-  // }
 
   const resp = await postBackend<{ payload?: BackendPayload }>(
     {{TOOL_NAME}}Env.{{BASE_URL_FIELD}},
@@ -45,14 +40,15 @@ export async function {{EXECUTOR_FN_NAME}}(
 
   const payload = resp?.payload ?? {};
   // {{INTERPRET_RESPONSE}}
-  const summary = `{{HUMAN_READABLE_SUMMARY}}`;
+  // A miss names its declared failure verdict; dynamic diagnostics ride
+  // `data` for the row's function fields (e.g. `reason: (data) => data.reason`):
+  // if ({{MISS_CONDITION}}) {
+  //   return { verdict: "{{FAILURE_VERDICT}}", data: { reason: {{DIAGNOSTIC}} } };
+  // }
 
   return {
-    resultBody: {
-      summary,
-      // {{RESULT_BODY_FIELDS}}
-    },
-    // stateUpdate: { {{STATE_FIELD}}: ... } as Partial<State>,  // include only if this action updates state
-    ok: true,
+    verdict: "ok",
+    // data: { {{DYNAMIC_SUMMARY_FIELDS}} },  // only what the row's renderers read
+    // stateUpdate: { {{STATE_FIELD}}: ... },  // include only if this action updates state
   };
 }

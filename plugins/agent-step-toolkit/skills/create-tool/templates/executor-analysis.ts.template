@@ -8,10 +8,24 @@
 // Pair this action with the `dataLoaded` prereq (verifier-data-loaded.ts.template)
 // so it refuses when nothing has been fetched yet, and a stateSelector that returns
 // the DatasetSource slice (every cached collection the snippet can aggregate over).
+//
+// Declared rows for this action (in ./action.ts):
+//   verdicts: {
+//     ok: { ok: true, summary: "Analysis computed over the fetched data.",
+//           body: {} },
+//     analysis_error: {
+//       ok: false,
+//       // Failure is a NORMAL result, not a throw — the composed summary hands
+//       // the model the error so it can retry with corrected code.
+//       summary: (_state, data) => `Analysis could not be computed: ${String(data.error)}.`,
+//       body: { error: "analysis_error", verdict: "analysis_error",
+//               detail: (data) => data.error },
+//     },
+//   },
 
 import { runAnalysis } from "../../shared/analysis-vm.js";
 import type { State } from "../../../../state.js";
-import type { ExecutorResult } from "../../../../agent-step/index.js";
+import type { DeclaredExecutorResult } from "../../../../agent-step/index.js";
 import type { Slice } from "./stateSelector.js";
 
 interface Params {
@@ -21,32 +35,21 @@ interface Params {
 export async function {{ANALYZE_EXECUTOR_FN}}(
   rawParams: unknown,
   state: Slice,
-): Promise<ExecutorResult<State>> {
+): Promise<DeclaredExecutorResult<State>> {
   const p = rawParams as Params;
   const outcome = runAnalysis(state, p.code);
 
   if (!outcome.ok) {
-    // Failure is a NORMAL result, not a throw — hand the model the error + the
-    // row counts so it can read what went wrong and retry with corrected code.
     return {
-      resultBody: {
-        summary: `Analysis could not be computed: ${outcome.error}.`,
-        error: "analysis_error",
-        verdict: "analysis_error",
-        detail: outcome.error,
-        datasetSizes: outcome.datasetSizes,
-      },
-      ok: false,
+      verdict: "analysis_error",
+      data: { error: outcome.error },
+      resultExtras: { datasetSizes: outcome.datasetSizes },
     };
   }
 
   return {
-    resultBody: {
-      summary: "Analysis computed over the fetched data.",
-      result: outcome.result,
-      datasetSizes: outcome.datasetSizes,
-    },
-    ok: true,
+    verdict: "ok",
+    resultExtras: { result: outcome.result, datasetSizes: outcome.datasetSizes },
   };
   // Read-only: no stateUpdate — analysis never writes back.
 }

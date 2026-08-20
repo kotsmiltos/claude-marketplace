@@ -14,7 +14,8 @@ prompt, and when porting an existing agent (the closing checklist is the port-mo
 The graph is three nodes — `agent`, `tools`, `resolve_handoff` — and the agent node does exactly one
 thing: build the prompt, invoke the model over the transcript, return its message. Nothing is
 injected, nothing is wrapped, no state is patched from outside. Every mechanism — confirmation
-gates, bounded choices, abort policy, handoff resolution, attempt accounting, admission — lives in
+gates, standing asks, escalation ladders, abort policy, handoff resolution, attempt accounting,
+admission — lives in
 the agent-step engine; every business behaviour lives in the configuration, the prompt, or an
 executor. The model learns the world only from the transcript: tool results carry every engine
 transition, and the caller-audible sentences that matter are rendered by the engine and spoken by
@@ -54,8 +55,9 @@ prompt is byte-identical across differing states — is a cheap guard worth addi
 ## 3. State reaches the model only through the message stream
 
 If the model must know an engine fact, that fact must appear in a tool result. Every engine
-transition is visible in the transcript (e.g. a consumed bounded choice stamps `choice_consumed` on
-the consuming step's result); pending/resolved status is derived from the results themselves. A
+transition is visible in the transcript (e.g. a recorded standing ask stamps `standing_ask` +
+`ask_contract` on the final entry; a ladder escalation stamps `ladder_exhausted` +
+`handoff_requested`); pending status is derived from the results themselves. A
 silent state mutation in the engine is a bug by definition, because the transcript is the model's
 only authority.
 
@@ -102,18 +104,18 @@ obligate a full live re-run.
 ## 6. Caller-audible consequence text is engine-rendered; the model only speaks it
 
 Whatever the caller must hear *exactly* — a digit read-back, an irreversible-action recap, a
-carried-identity consent question, a bounded-choice offer and resume — is rendered by the engine
-from state and catalogs, carried on the result as `read_back`, and spoken by the model verbatim. If
-a sentence must be heard before an irreversible action, the model's discretion is precisely what
-must be removed from it.
+carried-identity consent question, a fixed standing ask — is rendered by the engine
+from state and catalogs, carried on the result as `read_back` (or `ask_text`), and spoken by the
+model verbatim. If a sentence must be heard before an irreversible action, the model's discretion
+is precisely what must be removed from it.
 
 *Why:* model-composed consequence text was measured to mangle digits, skip recaps under turn
 pressure, and paraphrase fixed offers — each a consent defect the confirmation gate cannot catch,
 because both sides then agree on words nobody said.
 
 *How:* `ConfirmationOpts.readBack` + `repeatReadBack` (stored-byte repetition), and
-`BoundedChoiceDef.renderRequest` / `renderResolution`. Give the prompt ONE read-back authority
-stating what to speak verbatim and what may accompany it, per result type.
+`DictationAsk.render` (`ask_text`). The read-back authority is stated ONCE, by the engine-composed
+protocol fragment; the per-result framing rides the wire as `read_back_directive`.
 
 ## 7. One authority per behaviour in the prompt
 
@@ -148,8 +150,9 @@ sanctioned script; the schema is the contract.
 
 When the model consistently emits a shape the engine forbids, and the shape is provably equivalent
 to the sanctioned one and cannot reach danger, the right fix is a narrow admission relaxation with
-transcript visibility — not another round of prompt insistence. The leading-`resolve_bounded_choice`
-batch entered the engine contract this way. The boundary is absolute in the other direction: nothing
+transcript visibility — not another round of prompt insistence. The propose batch riding behind its
+prereq verifications (`soleOnExecute`) entered the engine contract this way. The boundary is
+absolute in the other direction: nothing
 is ever relaxed toward a mutation — confirm-required executes stay sole, and every relaxation names
 its exact admissible shape.
 
