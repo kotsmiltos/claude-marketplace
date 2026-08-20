@@ -56,12 +56,13 @@ Present:
 # Kafka observability — <install|upgrade to> <version>: <repo name>
 
 ## Vendored (replaced wholesale, safe)
-- src/observability/  (26 files: library + tests + README + VERSION)
+- src/observability/  (28 files: library + tests + README + VERSION)
 
 ## Project edits (need your OK)
 - package.json         + "@confluentinc/kafka-javascript", + "test:observability" script
                        (+ fold into "test:all" if the repo has one)
 - <graph entry module> + import + startup() call at module load
+                       (+ contentMask policy, if one is being wired — say which)
 - [existing-Kafka guard only] <classification the user gave>:
   <keep-both: git mv src/observability → src/observability-legacy + N call-site import
    updates | replace (downstream sign-off confirmed): delete module + remove M call
@@ -148,6 +149,42 @@ them to the user before overwriting).
    a full card number or customer name; see the library README "Backend HTTP call
    tracing"). Skip silently when there is no chokepoint — never instrument individual
    call sites.
+6. **Optional — content masking (1.6.0+).** The library masks credentials only; the
+   conversation itself (prompts, completions, graph state, tool params) reaches the topic
+   verbatim unless the project supplies a policy. ASK whether to wire one, and lead with
+   what the project already has — search for an existing domain masker before proposing
+   new code:
+
+   ```bash
+   ls src/**/redact*.ts src/**/*redaction*.ts 2>/dev/null
+   grep -rln "mask\|redact" src --include=*.ts | grep -v src/observability
+   ```
+
+   - **A domain masker exists** (the common case in the voice agents — e.g.
+     `src/tools/<tool>/backend/redact.ts`): propose composing it, digit pass INSIDE the
+     key-based one, because every key tier trims a tail and the digit pass preserves
+     tails:
+
+     ```ts
+     startupObservability({
+       contentMask: (value) => redactValue(mapStringsDeep(value, maskDigitsInText, { keys: true })),
+     });
+     ```
+
+     Check two things before proposing it, and say what you found: whether it masks a bare
+     `name` key (inside run content that also hits LangChain's own `ToolMessage.name` /
+     `tool_calls[].name`), and whether any rule strips digits from a WHOLE string (which
+     collapses model prose instead of the numbers inside it).
+   - **No masker exists**: offer `digitContentMask()` as-is, and name its rule out loud —
+     runs of 7+ digits become `***<last4>`, shorter runs are masked digit-for-digit, so
+     four real digits of every long identifier still reach the topic (`keepLast: 0`
+     removes even those).
+   - **Either way**, state the scope: `keys: true` is what reaches a slot keyed BY a
+     sensitive value, `metadata` is never masked (so no PII in `configurable`), and
+     numbers spoken as words cannot be caught. See the library README "Content masking".
+
+   Wiring nothing is a valid answer — it keeps 1.5.0 behaviour exactly — but it must be
+   the user's choice, not a default that goes unmentioned.
 
 ## Step 6: Configure
 

@@ -11,10 +11,10 @@ walk the tiers and list the specific assets to hand-update.
 
 - Code: `index.ts`, `run-tracer.ts`, `run-filter.ts`, `configure-slot.ts`, `event-emitter.ts`,
   `schemas.ts`, `registry.ts`, `kafka-producer.ts`, `bounded-queue.ts`, `event-producer.ts`,
-  `redaction.ts`, `settings.ts`, `env.ts`, `backend-trace.ts`
+  `redaction.ts`, `content-mask.ts`, `settings.ts`, `env.ts`, `backend-trace.ts`
 - Tests: `index.test.ts`, `run-tracer.test.ts`, `run-filter.test.ts`, `configure-slot.test.ts`,
   `event-emitter.test.ts`, `schemas.test.ts`, `kafka-producer.test.ts`, `bounded-queue.test.ts`,
-  `redaction.test.ts`, `backend-trace.test.ts`
+  `redaction.test.ts`, `content-mask.test.ts`, `backend-trace.test.ts`
 - `VERSION` — written by this skill (the new version), never copied from the source.
 
 **What touches it:** every bump. Added/removed files must also be mirrored in Tier 3's
@@ -29,7 +29,9 @@ file inventory mentions.
 
 **What touches it:** any env-var change (add/rename/default), any `schemas.ts` field change, any
 pipeline/reliability-semantics change (queue, retries, shutdown, truncation cap, Kafka key
-choice), any redaction-pattern change.
+choice), any redaction-pattern change, and any change to the host-supplied content-mask seam
+(`content-mask.ts` — its scope table, primitives and stated limits are the written contract for
+what a host policy can and cannot reach).
 
 ## Tier 3 — skill docs (the install/upgrade instructions)
 

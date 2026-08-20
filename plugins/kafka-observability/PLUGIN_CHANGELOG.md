@@ -11,6 +11,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.7.0] — 2026-08-20
+
+Ships **observability library 1.6.0** (from 1.5.0) — a host-supplied **content mask**. Every
+traced run carried the conversation verbatim (prompts, completions, graph state, tool params)
+into a durable, indexed sink, and the only masking was credential redaction. The first design
+put a digit policy in the library; the library's own `traceBackendCall` contract already said
+why that was wrong ("no notion of the domain's PII"): every length or key rule is a guess about
+someone else's flow, and the guesses fail — a "mask short runs, pass long ones" rule ships a
+full 16-digit PAN, which is exactly what a card flow keeps in graph state. So the library ships
+the **seam and the building blocks, not the policy**, extending to every run the division
+backend-call runs already used.
+
+### Added
+- Library 1.6.0: `content-mask.ts` — `startup({ contentMask })` (`StartupOptions`), applied at
+  the single emit funnel to `inputs`/`outputs`/`error` and each `events[].kwargs`. Primitives to
+  build or compose a policy: `maskDigitsInText` (runs of 7+ digits → `***<last4>`, shorter runs
+  → one `#` per digit; a single space or dash CONTINUES a run, so dictated `4 1 1 1 …` reads as
+  one card number rather than sixteen; Unicode `\p{Nd}`, not `\d`), `mapStringsDeep(v, fn,
+  { keys })` (strings only — numbers stay numbers so token analytics survive; `keys: true` masks
+  OBJECT KEYS, the only thing that reaches a slot keyed BY the sensitive value),
+  `digitContentMask()`, `applyContentMask()`. 36 new tests in 7 groups incl. a realistic
+  captured chain-run event (suite 114 → 158). No new env keys — masking is code, because a
+  policy is a function.
+- Install workflow Step 5: optional item — offer to wire a policy, and **search for one the
+  project already owns first** (`grep` recipe included), proposing composition over new code.
+  Names the two audit checks for a reused backend masker (a bare `name` key also hits
+  LangChain's own; whole-string digit rules collapse model prose) and states the scope out loud.
+- SKILL.md quick reference gained the content-masking line; library README gained a
+  "Content masking (opt-in, host-supplied)" section — wiring, an in/out-of-scope table, the
+  composition ORDER rule (digit pass inside the key-based one, because key tiers trim tails and
+  the digit pass preserves them), and the limits stated plainly.
+- `migrations/1.5.0-to-1.6.0.md`: no mandatory transforms (additive); optional wiring with both
+  paths worked out (compose an existing domain masker vs adopt `digitContentMask()`).
+
+### Changed
+- Library `emitRun` pipeline: project → validate → redact → **mask** → serialize → truncate →
+  produce. Credential redaction still runs first, so the library's own contract stays primary,
+  and the existing schema re-parse now doubles as the guard on host policies — one returning the
+  wrong shape drops that event with a logged error instead of writing a malformed document.
+- `events[].name` and `events[].time` are carved OUT of the masked scope: the library builds
+  that array itself (`sanitizeRunEvents` → `{name, time, kwargs}`), so they are machine-generated
+  timeline data in the same category as `start_time`/`end_time`. Caught in test — a digit policy
+  had been rewriting every streaming-token timestamp to `##:##:##`, taking inter-token latency
+  analysis with it. Same class of carve-out as `USAGE_KEY_PATTERN` in `redaction.ts`.
+- Capability descriptions (plugin.json, marketplace entry, root README) now name the
+  host-supplied content mask; vendored-file count is now **28**; `/bump-version`'s observability
+  tracked-assets Tier 1 lists `content-mask.ts` + its test, and its Tier 2 trigger list now
+  names the seam's documented scope as part of the written contract.
+
+### Fixed
+- Root README: layout tree omitted kafka-observability's `PLUGIN_CHANGELOG.md`, and described
+  `.claude/skills/bump-version/` as absorbing "a newer agent-step runner" although it owns the
+  observability library bump too — the flow this very release used.
+- Library README event-schema example omitted `serialized` and `tags`; both are named in the new
+  masking scope table, so the example referenced fields it never showed.
+
+**With no policy wired, emitted bytes are identical to 1.5.0** — guarded by a regression test on
+the omitted-argument payload. Downstream projects upgrade via `/add-kafka-observability`
+(upgrade mode); set-pin-agents-ts is on 1.4.1, so it applies `1.4.1-to-1.5.0` first.
+
 ## [0.6.0] — 2026-08-11
 
 Ships **observability library 1.5.0** (from 1.4.1) — opt-in backend HTTP call tracing, the

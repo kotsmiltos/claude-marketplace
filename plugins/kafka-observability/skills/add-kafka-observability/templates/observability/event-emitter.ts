@@ -1,13 +1,15 @@
 // FILE: src/observability/event-emitter.ts
 //
 // Converts a LangChain tracer Run into an observability event, then validates,
-// redacts, serializes, truncates-if-oversized, and produces it. Depends only
-// on the narrow EventProducer contract (DIP) — unit-testable with a fake
-// producer, no Kafka client involved.
+// redacts, applies the host's content mask (if any), serializes,
+// truncates-if-oversized, and produces it. Depends only on the narrow
+// EventProducer contract (DIP) — unit-testable with a fake producer, no Kafka
+// client involved.
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Run } from "@langchain/core/tracers/base";
 import { redact } from "./redaction.js";
+import { applyContentMask, type ContentMask } from "./content-mask.js";
 import { ObservabilityEventSchema, RunEventDataSchema, type RunEventData } from "./schemas.js";
 import type { EventProducer } from "./event-producer.js";
 
@@ -81,24 +83,38 @@ export function runToEventData(run: Run, direction: RunDirection): RunEventData 
 }
 
 export class RunEventEmitter {
+  /** `contentMask` is the HOST's domain-PII policy (see content-mask.ts).
+   *  Defaulted to null so the public constructor stays backward compatible and
+   *  an application that supplies nothing emits byte-identical payloads. */
   constructor(
     private readonly producer: EventProducer,
     private readonly applicationName: string,
     private readonly topic: string,
+    private readonly contentMask: ContentMask | null = null,
   ) {}
 
   /** The one path every emit funnels through: project, validate, redact,
-   *  serialize, truncate-if-oversized, produce. */
+   *  mask content, serialize, truncate-if-oversized, produce. */
   emitRun(threadId: string, run: Run, direction: RunDirection): void {
     const parsedData = RunEventDataSchema.parse(runToEventData(run, direction));
+    // Credential redaction FIRST, so the library's own contract stays primary
+    // whatever the host policy does. Order-independent in practice —
+    // ***REDACTED*** carries no digits for a digit policy to find.
     const redactedData = redact(parsedData);
+    const data = this.contentMask
+      ? applyContentMask(redactedData, this.contentMask)
+      : redactedData;
 
+    // Re-validating `data` here is also the guard on host masks: a policy that
+    // returns the wrong shape for a content field throws, and the tracer's
+    // fire-and-forget wrapper logs and drops the event rather than writing a
+    // malformed document to the sink.
     const event = ObservabilityEventSchema.parse({
       id: randomUUID(),
       thread_id: threadId,
       application_name: this.applicationName,
       timestamp: new Date().toISOString(),
-      data: redactedData,
+      data,
     });
 
     let payload: Buffer = Buffer.from(JSON.stringify(event), "utf-8");

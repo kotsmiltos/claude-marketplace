@@ -29,11 +29,26 @@
 // client wrap each outgoing call as a traced child run — opt-in, and subject
 // to that module's pre-masking security contract.
 //
+// PII: the library redacts CREDENTIALS only. Domain PII — card numbers, tax
+// ids, PINs dictated into the conversation — is masked by a policy the
+// APPLICATION supplies as startup({ contentMask }), because the rules are facts
+// about the application's flow, not about Kafka (see content-mask.ts, and the
+// same division in backend-trace.ts's security contract). Supply nothing and
+// nothing is masked: full prompts and state reach the topic, which is the
+// self-hosted-LangSmith data boundary this library started from.
+//
 // Wiring (done by /add-kafka-observability): the module that builds/exports
 // the graph calls startup() once at module load:
 //
 //   import { startup as startupObservability } from "./observability/index.js";
 //   startupObservability();
+//
+// …or, with a masking policy (composing the project's existing domain masker
+// with this library's digit primitives):
+//
+//   startupObservability({
+//     contentMask: (value) => redactValue(mapStringsDeep(value, maskDigitsInText)),
+//   });
 
 import { registerConfigureHook } from "@langchain/core/context";
 import { isKafkaEnabled, readAttachMode, readKafkaSettings } from "./settings.js";
@@ -42,6 +57,7 @@ import { RunEventEmitter } from "./event-emitter.js";
 import { KafkaRunTracer } from "./run-tracer.js";
 import { readRunFilterFromEnv } from "./run-filter.js";
 import { setEmitter, setRunFilter } from "./registry.js";
+import type { ContentMask } from "./content-mask.js";
 import {
   installConfigureSlot,
   logAttachmentDiagnostics,
@@ -54,6 +70,18 @@ export { RunFilter, readRunFilterFromEnv } from "./run-filter.js";
 export type { RunFilterMode } from "./run-filter.js";
 export { RunEventEmitter, runToEventData } from "./event-emitter.js";
 export type { ObservabilityEvent, RunEventData } from "./schemas.js";
+export {
+  applyContentMask,
+  digitContentMask,
+  mapStringsDeep,
+  maskDigitsInText,
+} from "./content-mask.js";
+export type {
+  ContentField,
+  ContentMask,
+  DigitContentMaskOptions,
+  DigitMaskOptions,
+} from "./content-mask.js";
 export { getAttachDiagnostics } from "./configure-slot.js";
 export type { AttachDiagnostics } from "./configure-slot.js";
 export { traceBackendCall, withAttemptContext, currentAttempt } from "./backend-trace.js";
@@ -62,9 +90,18 @@ export type { TracedCallInfo, TracedCallOutcome } from "./backend-trace.js";
 let producer: KafkaEventProducer | null = null;
 let started = false;
 
+export interface StartupOptions {
+  /** The application's domain-PII masking policy, applied to the content
+   *  fields of every event (see content-mask.ts). Omitted means NOTHING is
+   *  masked beyond credential redaction — deliberate: the library will not
+   *  guess a domain's PII rules. An object rather than a positional argument
+   *  so future seams do not change this signature again. */
+  contentMask?: ContentMask;
+}
+
 /** Call once at module load (the graph entry module). Idempotent. Validates
  *  all required Kafka settings fail-fast when KAFKA_ENABLED=true. */
-export function startup(): void {
+export function startup(options: StartupOptions = {}): void {
   if (started) return;
   started = true;
   if (!isKafkaEnabled()) {
@@ -77,7 +114,14 @@ export function startup(): void {
   const attachMode = readAttachMode();
   const runFilter = readRunFilterFromEnv();
   producer = new KafkaEventProducer(settings);
-  setEmitter(new RunEventEmitter(producer, settings.applicationName, settings.topic));
+  setEmitter(
+    new RunEventEmitter(
+      producer,
+      settings.applicationName,
+      settings.topic,
+      options.contentMask ?? null,
+    ),
+  );
   setRunFilter(runFilter);
   if (attachMode !== "patch") {
     // Every callback-manager configure() in a context descending from here
@@ -97,7 +141,11 @@ export function startup(): void {
     `[observability] Kafka run tracing initialized (producer connecting in background): ` +
       `app=${settings.applicationName} topic=${settings.topic} ` +
       `brokers=${settings.bootstrapServers} retries=${settings.retries} ` +
-      `delivery_timeout_ms=${settings.deliveryTimeoutMs}`,
+      `delivery_timeout_ms=${settings.deliveryTimeoutMs} ` +
+      // Logged even when off, unlike the run filter below: an operator reading
+      // this line needs to see that NOTHING is masking the conversation
+      // content, which is the library's default state.
+      `content_mask=${options.contentMask ? "host" : "off"}`,
   );
   if (runFilter) {
     console.log(

@@ -6,6 +6,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import type { Run } from "@langchain/core/tracers/base";
 import { RunEventEmitter, runToEventData } from "./event-emitter.js";
+import { digitContentMask, type ContentField } from "./content-mask.js";
 import type { EventProducer } from "./event-producer.js";
 import type { ObservabilityEvent } from "./schemas.js";
 
@@ -139,5 +140,80 @@ describe("RunEventEmitter", () => {
     assert.equal(event.data.sha256.length, 64);
     assert.equal(event.thread_id, "thread-1", "envelope correlation survives truncation");
     assert.ok(producer.produced[0].value.length < 4096, "truncated payload is small");
+  });
+});
+
+describe("RunEventEmitter — host content mask", () => {
+  test("no mask supplied leaves the payload exactly as it was before the seam existed", () => {
+    const withoutArg = new FakeProducer();
+    const withNull = new FakeProducer();
+    const run = makeRun({ inputs: { afm: "123456789", card: "4111111111114410" } as never });
+
+    new RunEventEmitter(withoutArg, "test_app", "t").emitRun("thread-1", run, "request");
+    new RunEventEmitter(withNull, "test_app", "t", null).emitRun("thread-1", run, "request");
+
+    const inputs = lastEvent(withoutArg).data.inputs as Record<string, unknown>;
+    assert.equal(inputs.afm, "123456789", "default must stay non-masking for existing sinks");
+    assert.equal(inputs.card, "4111111111114410");
+    assert.deepEqual(lastEvent(withNull).data.inputs, inputs);
+  });
+
+  test("a mask is applied to the content fields before producing", () => {
+    const producer = new FakeProducer();
+    const emitter = new RunEventEmitter(producer, "test_app", "t", digitContentMask());
+    const run = makeRun({
+      inputs: { afm: "123456789", pin: "1234", tokens: 1450 } as never,
+      end_time: 1754179201500,
+      outputs: { content: "ΑΦΜ 1 2 3 4 5 6 7 8 9" } as never,
+    });
+    emitter.emitRun("thread-1", run, "response");
+
+    const data = lastEvent(producer).data;
+    const inputs = data.inputs as Record<string, unknown>;
+    assert.equal(inputs.afm, "***6789");
+    assert.equal(inputs.pin, "####");
+    assert.equal(inputs.tokens, 1450, "numbers stay numbers — usage analytics survive");
+    assert.equal((data.outputs as Record<string, unknown>).content, "ΑΦΜ ***6789");
+  });
+
+  test("trace identity, timeline and metadata are never handed to the mask", () => {
+    const producer = new FakeProducer();
+    const seen: ContentField[] = [];
+    const emitter = new RunEventEmitter(producer, "test_app", "t", (value, field) => {
+      seen.push(field);
+      return value;
+    });
+    const run = makeRun({
+      extra: { metadata: { thread_id: "voice-4711", langgraph_node: "agent" } } as never,
+      outputs: { content: "ok" } as never,
+      end_time: 1754179201500,
+    });
+    emitter.emitRun("thread-1", run, "response");
+
+    assert.deepEqual(seen, ["inputs", "outputs"], "absent events/error are not passed");
+    const data = lastEvent(producer).data;
+    assert.equal(data.run_id, "run-1");
+    assert.equal(data.trace_id, "trace-1");
+    assert.equal(data.latency_ms, 1500);
+    assert.deepEqual(data.metadata, { thread_id: "voice-4711", langgraph_node: "agent" });
+    assert.equal(lastEvent(producer).thread_id, "thread-1");
+  });
+
+  test("credential redaction still runs first, and the mask leaves its marker alone", () => {
+    const producer = new FakeProducer();
+    const emitter = new RunEventEmitter(producer, "test_app", "t", digitContentMask());
+    const run = makeRun({ inputs: { api_key: "sk-1234567890", afm: "123456789" } as never });
+    emitter.emitRun("thread-1", run, "request");
+
+    const inputs = lastEvent(producer).data.inputs as Record<string, unknown>;
+    assert.equal(inputs.api_key, "***REDACTED***");
+    assert.equal(inputs.afm, "***6789");
+  });
+
+  test("a mask that breaks the field shape drops the event instead of shipping it (edge case)", () => {
+    const producer = new FakeProducer();
+    const emitter = new RunEventEmitter(producer, "test_app", "t", () => "not-an-object");
+    assert.throws(() => emitter.emitRun("thread-1", makeRun(), "request"));
+    assert.equal(producer.produced.length, 0);
   });
 });

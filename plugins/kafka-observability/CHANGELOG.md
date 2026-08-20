@@ -6,6 +6,66 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.6.0 (2026-08-20)
+
+Privacy release: a **host-supplied content mask**. Every traced run carried the
+conversation verbatim — prompts, completions, graph state, tool params — and the only
+masking the library did was credential redaction, so caller-dictated card numbers, tax
+ids, PINs and OTPs reached a durable, indexed sink untouched. The first design put a digit
+policy in the library; it was wrong, and the library's own `traceBackendCall` contract
+already said why ("no notion of the domain's PII"): every length or key rule is a guess
+about someone else's flow, and the guesses fail on real payloads — a "mask short runs,
+pass long ones" rule ships a full 16-digit PAN, which is exactly what a card flow keeps in
+graph state. So this release ships the **seam and the building blocks, not the policy**,
+extending to all runs the division backend-call runs already used.
+
+### Added
+
+- `content-mask.ts` — the seam and its primitives. `ContentMask` /
+  `ContentField` types; `applyContentMask(data, mask)` (the field-scoping helper the
+  emitter uses); `maskDigitsInText(text, opts?)` (runs of 7+ digits → `***<last4>`,
+  shorter runs → one `#` per digit, single space/dash CONTINUES a run so voice dictation
+  reads as one number, Unicode `\p{Nd}` not `\d`, options `maskChar`/`keepLast`/
+  `keepLastMinRun`); `mapStringsDeep(value, fn, { keys? })` (strings only — numbers stay
+  numbers so token analytics survive; `keys: true` also masks OBJECT KEYS, which is the
+  only thing that reaches a slot keyed BY the sensitive value); `digitContentMask(opts?)`
+  (the two composed, ready-made but never installed).
+- `startup({ contentMask })` — `StartupOptions`, an object so future seams need no further
+  signature change. `RunEventEmitter` takes the policy as a defaulted 4th constructor
+  argument. The startup line now always reports `content_mask=host|off` — logged even when
+  off, unlike the run filter, because an operator needs to see that nothing is masking.
+- `content-mask.test.ts` — 36 tests in 7 groups, including a realistic captured chain-run event
+  (LangChain message envelopes, a PAN-keyed state slot, usage counters, a streaming token)
+  asserting content is masked while `run_id` / `trace_id` / `dotted_order` / the timeline /
+  `metadata` / `serialized` / numeric usage counters survive byte-for-byte. Suite:
+  114 → 158 (with 5 `event-emitter.test.ts` and 3 `index.test.ts` additions).
+- New `index.ts` re-exports: `applyContentMask`, `digitContentMask`, `mapStringsDeep`,
+  `maskDigitsInText`, and the `ContentField` / `ContentMask` / `DigitMaskOptions` /
+  `DigitContentMaskOptions` / `StartupOptions` types.
+- README: "Content masking (opt-in, host-supplied)" — the wiring, the in/out-of-scope
+  table, the composition rule for projects that already own a domain masker (digit pass
+  INSIDE the key-based one, because key tiers trim tails and the digit pass preserves
+  them), and the limits stated plainly (words-not-numerals, non-numeric PII, the four real
+  digits `keepLast: 4` leaves behind, `metadata` being out of scope).
+
+### Changed
+
+- `emitRun`'s pipeline gains one step: project → validate → redact → **mask** → serialize
+  → truncate → produce. Credential redaction still runs first, so the library's own
+  contract stays primary. The existing `ObservabilityEventSchema.parse` after it now also
+  guards host policies — one that returns the wrong shape for a content field drops the
+  event with a logged error instead of writing a malformed document to the sink.
+- `events[].name` and `events[].time` are carved out of the masked scope: the library
+  builds that array itself (`sanitizeRunEvents` → `{name, time, kwargs}`), so they are
+  machine-generated timeline data in the same category as `start_time`/`end_time`, in
+  scope only by accident of nesting. Only each entry's `kwargs` reaches the mask. Caught
+  in test: a digit policy had been shredding every token timestamp into `##:##:##`, taking
+  inter-token latency analysis with it — the same class of carve-out as
+  `USAGE_KEY_PATTERN` in `redaction.ts`.
+- Nothing breaking; no env keys added. Masking is code, not configuration, because a
+  policy is a function. **With no policy wired, emitted bytes are identical to 1.5.0** —
+  verified by a regression test asserting the omitted-argument payload.
+
 ## 1.5.0 (2026-08-11)
 
 Coverage release: opt-in **backend HTTP call tracing**. Outgoing backend calls were the

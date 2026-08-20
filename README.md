@@ -116,7 +116,12 @@ Ships one skill:
   (`KAFKA_ENABLED`); runs alongside LangSmith for parallel validation. Apps that have
   payload-verified which runs duplicate root/LLM/tool content can opt into run filtering
   (`KAFKA_RUN_FILTER_MODE` allow/deny + `run_type:name` globs; the root run always
-  survives) — default stays emit-everything. Repos with pre-existing Kafka
+  survives) — default stays emit-everything. Conversation content — prompts, completions,
+  graph state, tool params — can be masked by a policy the APPLICATION supplies
+  (`startup({ contentMask })`, plus digit/deep-walk primitives that compose with a domain
+  masker the project already owns): the library ships the **seam, not the policy**, because
+  which digits are a tax id and which are an order reference is a fact about the
+  application's flow, and masks nothing until one is wired. Repos with pre-existing Kafka
   functionality are safe: the skill detects a foreign `src/observability/` module or
   producers elsewhere, asks the user to classify them (agent-flow observability →
   keep-both/replace; unrelated, e.g. liveness or business events → always preserved),
@@ -135,7 +140,7 @@ guides.
 ```
 .claude-plugin/marketplace.json     # marketplace manifest (lists plugins)
 .claude/skills/                      # repo-maintainer skills (not shipped)
-├── bump-version/                    # absorb a newer agent-step runner into the toolkit's embedded library
+├── bump-version/                    # absorb a newer runner into an embedded library (agent-step or observability)
 └── publish-release/                 # cut a plugin release — staleness sweep, version sync, changelog, release commit
 plugins/
 ├── agent-step-toolkit/
@@ -156,6 +161,7 @@ plugins/
 └── kafka-observability/
     ├── .claude-plugin/plugin.json   # plugin manifest
     ├── CHANGELOG.md                 # observability library version history
+    ├── PLUGIN_CHANGELOG.md          # plugin package version history
     ├── migrations/                  # per-version upgrade guides
     └── skills/
         └── add-kafka-observability/ # install/upgrade the vendored library + wiring (templates incl. the canonical observability library)

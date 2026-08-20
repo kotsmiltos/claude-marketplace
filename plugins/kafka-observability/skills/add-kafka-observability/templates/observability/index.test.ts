@@ -156,3 +156,44 @@ describe("startup() — KAFKA_RUN_FILTER_* (opt-in run filtering)", () => {
     await shutdown();
   });
 });
+
+describe("startup() — content mask (host-supplied, opt-in)", () => {
+  test("a contentMask is accepted and reported as active in the startup log", async () => {
+    setCompleteEnv();
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      assert.doesNotThrow(() => startup({ contentMask: (value) => value }));
+    } finally {
+      console.log = original;
+    }
+    assert.ok(
+      lines.some((l) => l.includes("content_mask=host")),
+      `expected content_mask=host in the startup log, got: ${lines.join(" | ")}`,
+    );
+    await shutdown();
+  });
+
+  test("bare startup() reports content_mask=off — the operator must see that nothing masks", async () => {
+    setCompleteEnv();
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      assert.doesNotThrow(() => startup());
+    } finally {
+      console.log = original;
+    }
+    assert.ok(
+      lines.some((l) => l.includes("content_mask=off")),
+      `expected content_mask=off in the startup log, got: ${lines.join(" | ")}`,
+    );
+    await shutdown();
+  });
+
+  test("a mask is irrelevant while disabled — startup stays a no-op (edge case)", () => {
+    clearKafkaEnv();
+    assert.doesNotThrow(() => startup({ contentMask: (value) => value }));
+  });
+});

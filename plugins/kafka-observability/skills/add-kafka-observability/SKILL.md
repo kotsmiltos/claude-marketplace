@@ -134,6 +134,14 @@ vendor → wire → configure → verify → report.
   `withAttemptContext`). Inputs and the `logged` view MUST be pre-masked by the
   project's domain redaction — library redaction is credential-only. Rides
   `KAFKA_ENABLED`; no new env vars. See the library README "Backend HTTP call tracing".
+- Content masking (opt-in, 1.6.0+): CODE, not config — `startup({ contentMask })` takes
+  the project's own domain-PII policy, applied to `inputs`/`outputs`/`error` and each
+  `events[].kwargs`. Nothing is masked by default. Library primitives to build or compose
+  one: `maskDigitsInText` (7+ digit runs → `***<last4>`, shorter runs → `#` each; single
+  space/dash joins a run, so dictation is caught), `mapStringsDeep(v, fn, { keys })`,
+  `digitContentMask()`. Compose with an existing domain masker by running the digit pass
+  INSIDE it (key tiers trim tails; the digit pass preserves them). Startup logs
+  `content_mask=host|off`. See the library README "Content masking".
 - Event contract: envelope `{ id, thread_id, application_name, timestamp, data }`, Kafka
   key = event `id` (the shared ES sink upserts by key — never key by thread_id).
 - Env vars: required when enabled — `KAFKA_ENABLED`, `APPLICATION_NAME`,

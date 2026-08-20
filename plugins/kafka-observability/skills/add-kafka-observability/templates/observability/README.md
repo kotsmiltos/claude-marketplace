@@ -35,6 +35,7 @@ graph/node/LLM/tool run (via BaseTracer hooks)
 RunEventEmitter (event-emitter.ts)
        ├── project Run → event data (child_runs dropped; each run emits its own)
        ├── validate (zod), redact sensitive fields
+       ├── apply the host's content mask, if one was supplied
        ├── serialize, truncate if >512 KB ({original_bytes, sha256} marker)
        └── produce (key = event.id — a sink that upserts by key would otherwise
            collapse a thread's events into one document)
@@ -84,6 +85,8 @@ KafkaEventProducer (kafka-producer.ts)
     "run_id": "...", "trace_id": "...", "parent_run_id": "...", "dotted_order": "...",
     "run_type": "chain | llm | tool | ...",
     "name": "agent | AzureChatOpenAI | password_reset_agent_step | ...",
+    "tags": ["..."],
+    "serialized": { "...": "request only — model class + params" },
     "inputs": { "...": "always present" },
     "outputs": { "...": "response only" },
     "error": "response only, when failed",
@@ -135,11 +138,106 @@ return traceBackendCall<T>(
 under generic keys). `input` and the `logged` half MUST already be masked by the
 project's own domain redaction before they reach `traceBackendCall`; the `{result,
 logged}` split exists so the caller still gets the real body while only the masked view
-is recorded. Never hand it a raw payload or raw response. Remember these events land in
+is recorded. A wired `contentMask` (see **Content masking**) does also cover these runs —
+they funnel through the same emitter — but it does not lift this requirement: it may not
+be wired at all, and a digit policy cannot mask a customer name. Never hand it a raw payload or raw response. Remember these events land in
 a durable, indexed sink — a value that was tolerable in a log file that rotates away by
 evening is not tolerable there. Audit the project's redaction key list against the real
 backend response shapes before wiring this up (field spellings like `customerName` /
 `shortName` / `contactName` are commonly missed).
+
+## Content masking (opt-in, host-supplied)
+
+Redaction (above) masks **credentials**, which look the same in every application. Domain
+PII does not: whether a nine-digit run is a tax id to hide or an order reference to keep,
+and whether a card number should vanish or keep its last four, are facts about *your*
+flow. So the library provides the funnel and the building blocks; the application provides
+the policy — the same division `traceBackendCall`'s security contract already draws.
+
+**Nothing is masked until you supply a policy.** By default the full conversation reaches
+the topic.
+
+```ts
+import {
+  startup as startupObservability,
+  mapStringsDeep,
+  maskDigitsInText,
+} from "./observability/index.js";
+
+startupObservability({
+  contentMask: (value) => mapStringsDeep(value, maskDigitsInText),
+});
+```
+
+The startup line reports the state either way: `content_mask=host` or `content_mask=off`.
+
+### What a mask sees
+
+Only the content-bearing fields of the event `data`: `inputs`, `outputs`, `error`, and —
+within `events` — each entry's `kwargs`. It is called once per present field, with the
+field name as its second argument, and must return the same **shape** it was handed (the
+emitter re-validates against the schema, so a policy that returns a string for `inputs`
+drops the event with a logged error rather than writing a malformed document).
+
+Deliberately out of reach, because masking them destroys something load-bearing:
+
+| Field | Why |
+|---|---|
+| `run_id`, `trace_id`, `parent_run_id`, `dotted_order` | run-tree reconstruction and ordering |
+| `start_time`, `end_time`, `latency_ms` | the timeline |
+| `events[].name`, `events[].time` | this library's own projection — the streaming token timeline |
+| `metadata`, `serialized` | node/model analytics (`langgraph_node`, `ls_model_name`) |
+| envelope `thread_id` | the sink's grouping key; never part of `data` at all |
+| JSON numbers | token/usage counters — `mapStringsDeep` touches strings only |
+
+### The supplied primitives
+
+- `maskDigitsInText(text, opts?)` — masks digit runs. A run of **7+ digits** collapses to
+  `***<last4>`; shorter runs (PINs, OTPs, amounts) are masked digit-for-digit, preserving
+  length. A single space or dash **continues** a run, which is what makes it work on voice
+  transcripts: dictation arrives as `4 1 1 1 1 …` and is read as one card number, not
+  sixteen one-digit runs. Unicode digits (`١٢٣`, `１２３`) count. Options: `maskChar`
+  (default `#`), `keepLast` (default 4; `0` masks every run whole), `keepLastMinRun`
+  (default 7).
+- `mapStringsDeep(value, fn, { keys? })` — recursive walk over strings. `keys: true` also
+  maps **object keys**, which you need when a slot is keyed BY the sensitive value
+  (`{ "4111111111114410": {…} }` is unreachable by any key-*name* policy).
+- `digitContentMask(opts?)` — the two composed into a ready-made `ContentMask`. Still
+  opt-in: you wire it, the library never installs it.
+- `applyContentMask(data, mask)` — the field-scoping helper the emitter itself uses.
+
+### Composing with a domain masker you already have
+
+If the project already owns a key-based masker for its backend logs, reuse it — run the
+digit pass **inside** it, not after:
+
+```ts
+contentMask: (value) => redactValue(mapStringsDeep(value, maskDigitsInText, { keys: true })),
+```
+
+Order matters. Key-based tiers trim a **tail** (`***4410`, `***567`), and the digit pass
+preserves tails, so the tiers still land on the real last digits. Reversed, the tiers'
+own `***4410` gets re-masked to `***####` and the last-four the flow itself uses is gone.
+
+A domain masker written for backend JSON usually needs one check before reuse: it may mask
+a bare `name` key, which inside run content also hits LangChain's own (`ToolMessage.name`,
+`tool_calls[].name` — the run's own `data.name` is out of scope and survives), and it may
+apply a whole-string digit rule that collapses model prose rather than the numbers in it.
+
+### Limits, stated honestly
+
+- **Nothing is masked unless you wire it.** An un-wired upgrade behaves exactly as before.
+- **Numbers spoken as words** ("five zero five zero") are not numerals. No digit rule can
+  catch them; only a semantic policy could, and this library has none.
+- **Non-numeric PII** — names, addresses, free-text answers — is untouched unless your
+  policy handles it.
+- **`keepLast: 4` leaves four real digits** of every long identifier on the topic. That is
+  the point (the tail is what a flow reads back), but it *is* four real digits. Use
+  `keepLast: 0` for blanket masking.
+- **Model version strings inside `outputs`** (`response_metadata.model_name:
+  "gpt-4.1-2025-04-14"`) are digits to a digit policy. `metadata.ls_model_name` is out of
+  scope, so model analytics survive there.
+- **`metadata` is not masked**, so do not put PII in `configurable` — it lands there.
 
 ## Run filtering (opt-in — default emits every run)
 
@@ -257,9 +355,12 @@ Diagnostics (all one-line, greppable):
   sensitive-keyed string or any OTHER sensitive-keyed object/array is masked whole
   (`credentials: {…}` never leaks unmatched inner keys). NOTE: redaction masks secrets,
   not PII — full prompts/transcripts (incl. `telephone_number`) flow to the topic by
-  design, same data-boundary decision as self-hosted LangSmith. Backend HTTP payloads
-  are the exception: they MUST be domain-masked by the project before they reach
-  `traceBackendCall` (see **Backend HTTP call tracing**).
+  design, same data-boundary decision as self-hosted LangSmith. Two ways to narrow that:
+  the application can supply a domain policy via `startup({ contentMask })`, which masks
+  the content fields of every event (see **Content masking**); and backend HTTP payloads
+  MUST be domain-masked by the project before they reach `traceBackendCall` regardless
+  (see **Backend HTTP call tracing**), since that is the only thing protecting them when
+  no content mask is wired.
 
 ## LangSmith migration
 
