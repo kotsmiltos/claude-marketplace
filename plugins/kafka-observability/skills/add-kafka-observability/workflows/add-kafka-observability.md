@@ -163,25 +163,40 @@ them to the user before overwriting).
    - **A domain masker exists** (the common case in the voice agents — e.g.
      `src/tools/<tool>/backend/redact.ts`): propose composing it, digit pass INSIDE the
      key-based one, because every key tier trims a tail and the digit pass preserves
-     tails:
+     tails — and for a voice-channel agent, the spoken-digit pass too (1.7.0+; word-form
+     is how dictated PINs/OTPs actually arrive), AFTER `maskDigitsInText` because the
+     spoken pass counts the numeral pass's `#` tokens as run members:
 
      ```ts
      startupObservability({
-       contentMask: (value) => redactValue(mapStringsDeep(value, maskDigitsInText, { keys: true })),
+       contentMask: (value) =>
+         redactValue(
+           mapStringsDeep(value, (s) => maskSpokenDigitsInText(maskDigitsInText(s)), { keys: true }),
+         ),
      });
      ```
+
+     (Text channel / no spoken-word need: keep the plain
+     `mapStringsDeep(value, maskDigitsInText, { keys: true })` form.)
 
      Check two things before proposing it, and say what you found: whether it masks a bare
      `name` key (inside run content that also hits LangChain's own `ToolMessage.name` /
      `tool_calls[].name`), and whether any rule strips digits from a WHOLE string (which
      collapses model prose instead of the numbers inside it).
-   - **No masker exists**: offer `digitContentMask()` as-is, and name its rule out loud —
+   - **No masker exists**: offer `digitContentMask()` as-is — with
+     `spokenLanguages: ["el", "en"]` for a voice agent — and name its rules out loud:
      runs of 7+ digits become `***<last4>`, shorter runs are masked digit-for-digit, so
      four real digits of every long identifier still reach the topic (`keepLast: 0`
-     removes even those).
+     removes even those); and with `spokenLanguages`, runs of 3+ spoken digit words are
+     masked (a lone «ένα» in prose survives), with the numeral pass's length rule (1.8.0+):
+     PIN/OTP shapes of 4–6 words mask whole, one `#` per word, while 7+-word dictated
+     identifiers (cards, tax ids) keep a TRANSLATED `***<last4>` tail — same digits the
+     typed form would keep (`keepLast: 0` blankets both passes).
    - **Either way**, state the scope: `keys: true` is what reaches a slot keyed BY a
-     sensitive value, `metadata` is never masked (so no PII in `configurable`), and
-     numbers spoken as words cannot be caught. See the library README "Content masking".
+     sensitive value, `metadata` is never masked (so no PII in `configurable`), and the
+     spoken pass covers word digits 0–9 in Greek and English only — composed number words
+     («σαράντα οκτώ», "forty-eight") and other languages cannot be caught. See the
+     library README "Content masking".
 
    Wiring nothing is a valid answer — it keeps 1.5.0 behaviour exactly — but it must be
    the user's choice, not a default that goes unmentioned.

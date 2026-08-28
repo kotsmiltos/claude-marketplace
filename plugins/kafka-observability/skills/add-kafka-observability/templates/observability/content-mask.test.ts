@@ -9,6 +9,7 @@ import {
   digitContentMask,
   mapStringsDeep,
   maskDigitsInText,
+  maskSpokenDigitsInText,
   type ContentField,
 } from "./content-mask.js";
 
@@ -99,6 +100,283 @@ describe("maskDigitsInText — Unicode digits and options", () => {
   test("maskChar and keepLastMinRun are honoured", () => {
     assert.equal(maskDigitsInText("1234", { maskChar: "*" }), "****");
     assert.equal(maskDigitsInText("1234", { keepLastMinRun: 4, keepLast: 2 }), "***34");
+  });
+});
+
+describe("maskSpokenDigitsInText — Greek forms", () => {
+  test("a dictated 4-word PIN is masked one # per word", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα οκτώ τρία επτά"), "# # # #");
+  });
+
+  test("a dictated 6-word OTP is masked whole", () => {
+    assert.equal(maskSpokenDigitsInText("ένα δύο τρία τέσσερα πέντε έξι"), "# # # # # #");
+  });
+
+  test("inflected and colloquial variants all match", () => {
+    assert.equal(maskSpokenDigitsInText("μία δυο τρεις τέσσερις"), "# # # #");
+    assert.equal(maskSpokenDigitsInText("εφτά οχτώ εννιά μηδέν"), "# # # #");
+    assert.equal(maskSpokenDigitsInText("μια εννέα επτά"), "# # #");
+  });
+
+  test("accentless ASR output matches («τεσσερα», not «τέσσερα»)", () => {
+    assert.equal(maskSpokenDigitsInText("τεσσερα οκτω τρια επτα"), "# # # #");
+  });
+
+  test("uppercase ASR output matches, final sigma included («ΤΡΕΙΣ»)", () => {
+    assert.equal(maskSpokenDigitsInText("ΤΕΣΣΕΡΑ ΟΚΤΩ ΤΡΕΙΣ ΕΠΤΑ"), "# # # #");
+    assert.equal(maskSpokenDigitsInText("Τέσσερα Οκτώ Τρία Επτά"), "# # # #");
+  });
+});
+
+describe("maskSpokenDigitsInText — run semantics", () => {
+  test("commas and dashes join a run like spaces, and separators survive", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα, οκτώ, τρία, επτά"), "#, #, #, #");
+    assert.equal(maskSpokenDigitsInText("τέσσερα - οκτώ - τρία - επτά"), "# - # - # - #");
+    assert.equal(maskSpokenDigitsInText("four,eight-three seven"), "#,#-# #");
+  });
+
+  test("a run of minRun−1 is untouched (default 3 — a pair is prose)", () => {
+    assert.equal(maskSpokenDigitsInText("δύο τρία λεπτά"), "δύο τρία λεπτά");
+  });
+
+  test("a run of exactly minRun is masked", () => {
+    assert.equal(maskSpokenDigitsInText("ένα δύο τρία"), "# # #");
+  });
+
+  test("a lone digit word in prose is untouched — the prose guard", () => {
+    assert.equal(maskSpokenDigitsInText("θέλω ένα νέο PIN"), "θέλω ένα νέο PIN");
+  });
+
+  test("a non-digit word breaks the run («ή» between digit words)", () => {
+    assert.equal(maskSpokenDigitsInText("δύο ή τρία ή τέσσερα"), "δύο ή τρία ή τέσσερα");
+  });
+
+  test("sentence punctuation breaks the run (a dot does not join)", () => {
+    assert.equal(maskSpokenDigitsInText("ένα δύο. τρία τέσσερα"), "ένα δύο. τρία τέσσερα");
+  });
+
+  test("minRun option is honoured in both directions", () => {
+    assert.equal(maskSpokenDigitsInText("δύο τρία", { minRun: 2 }), "# #");
+    assert.equal(maskSpokenDigitsInText("ένα δύο τρία", { minRun: 4 }), "ένα δύο τρία");
+  });
+
+  test("maskChar option is honoured", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα οκτώ τρία επτά", { maskChar: "*" }), "* * * *");
+  });
+});
+
+describe("maskSpokenDigitsInText — languages", () => {
+  test("an English run is masked, zero and oh included", () => {
+    assert.equal(maskSpokenDigitsInText("four eight three seven"), "# # # #");
+    assert.equal(maskSpokenDigitsInText("oh one zero"), "# # #");
+  });
+
+  test("English is case-insensitive", () => {
+    assert.equal(maskSpokenDigitsInText("FOUR EIGHT THREE SEVEN"), "# # # #");
+  });
+
+  test("a lone English digit word in prose survives", () => {
+    assert.equal(maskSpokenDigitsInText("give me one moment"), "give me one moment");
+  });
+
+  test("languages: ['en'] leaves a Greek run untouched", () => {
+    assert.equal(
+      maskSpokenDigitsInText("τέσσερα οκτώ τρία επτά", { languages: ["en"] }),
+      "τέσσερα οκτώ τρία επτά",
+    );
+  });
+
+  test("languages: ['el'] leaves an English run untouched", () => {
+    assert.equal(
+      maskSpokenDigitsInText("four eight three seven", { languages: ["el"] }),
+      "four eight three seven",
+    );
+  });
+
+  test("the default covers both languages in one text", () => {
+    assert.equal(
+      maskSpokenDigitsInText("είπε τέσσερα οκτώ τρία επτά, then one two three four"),
+      "είπε # # # #, then # # # #",
+    );
+  });
+
+  test("a cross-language run still counts as one run (edge case)", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα eight τρία"), "# # #");
+  });
+});
+
+describe("maskSpokenDigitsInText — numerals and prior masks inside a run", () => {
+  test("a numeral counts toward the run and is masked digit-for-digit", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα 8 τρία επτά"), "# # # #");
+  });
+
+  test("a multi-digit numeral in a run is masked per digit", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα 48 τρία"), "# ## #");
+  });
+
+  test("numerals alone never form a spoken run — maskDigitsInText's job", () => {
+    assert.equal(maskSpokenDigitsInText("1 2 3 4"), "1 2 3 4");
+  });
+
+  test("a numeral+word pair below minRun is untouched", () => {
+    assert.equal(maskSpokenDigitsInText("ένα 2"), "ένα 2");
+  });
+
+  test("a maskChar token from a prior digit pass continues the run", () => {
+    assert.equal(maskSpokenDigitsInText("τέσσερα # τρία επτά"), "# # # #");
+  });
+
+  test("the documented digits-first composition catches a mixed run end-to-end", () => {
+    const composed = (s: string) => maskSpokenDigitsInText(maskDigitsInText(s));
+    assert.equal(composed("το PIN είναι τέσσερα 8 τρία επτά"), "το PIN είναι # # # #");
+  });
+
+  test("idempotent: a second pass over masked output is a no-op", () => {
+    const once = maskSpokenDigitsInText("τέσσερα οκτώ τρία επτά και 1 2");
+    assert.equal(maskSpokenDigitsInText(once), once);
+  });
+});
+
+describe("maskSpokenDigitsInText — long runs keep a translated tail (numeral parity)", () => {
+  const SPOKEN_CARD =
+    "τέσσερα ένα ένα ένα ένα ένα ένα ένα ένα ένα ένα ένα τέσσερα τέσσερα ένα μηδέν";
+
+  test("a 16-word dictated card collapses to ***<last4>, words translated to numerals", () => {
+    assert.equal(maskSpokenDigitsInText(SPOKEN_CARD), "***4410");
+  });
+
+  test("a 9-word dictated tax id collapses to ***<last4>", () => {
+    assert.equal(
+      maskSpokenDigitsInText("ο ΑΦΜ μου είναι ένα δύο τρία τέσσερα πέντε έξι επτά οκτώ εννιά"),
+      "ο ΑΦΜ μου είναι ***6789",
+    );
+  });
+
+  test("exactly 7 digit words is the threshold; 6 (the OTP shape) is masked whole", () => {
+    assert.equal(maskSpokenDigitsInText("ένα δύο τρία τέσσερα πέντε έξι επτά"), "***4567");
+    assert.equal(maskSpokenDigitsInText("ένα δύο τρία τέσσερα πέντε έξι"), "# # # # # #");
+  });
+
+  test("an English dictated card translates too, oh included", () => {
+    assert.equal(
+      maskSpokenDigitsInText(
+        "four one one one one one one one one one one one four four one oh",
+      ),
+      "***4410",
+    );
+  });
+
+  test("inflected/accentless/uppercase variants translate to the right digits", () => {
+    assert.equal(
+      maskSpokenDigitsInText("μηδέν μηδεν ΜΗΔΕΝ ΤΕΣΣΕΡΑ τέσσερις ένα μηδέν"),
+      "***4410",
+    );
+  });
+
+  test("separators inside a long run collapse with it, like maskDigitsInText", () => {
+    assert.equal(
+      maskSpokenDigitsInText("ένα, δύο, τρία, τέσσερα, πέντε, έξι, επτά, οκτώ, εννιά"),
+      "***6789",
+    );
+  });
+
+  test("a numeral in the tail contributes its real digits", () => {
+    assert.equal(maskSpokenDigitsInText("ένα δύο τρία τέσσερα πέντε 6789"), "***6789");
+  });
+
+  test("keepLast: 0 masks every run whole — no tail survives", () => {
+    assert.equal(
+      maskSpokenDigitsInText("ένα δύο τρία τέσσερα πέντε έξι επτά οκτώ εννιά", { keepLast: 0 }),
+      "# # # # # # # # #",
+    );
+  });
+
+  test("keepLast and keepLastMinRun are honoured", () => {
+    assert.equal(
+      maskSpokenDigitsInText("τέσσερα οκτώ τρία επτά", { keepLastMinRun: 4, keepLast: 2 }),
+      "***37",
+    );
+  });
+
+  test("an unrecoverable tail (prior-masked digits) falls back to a whole mask — never a partial tail", () => {
+    assert.equal(
+      maskSpokenDigitsInText("ένα δύο τρία τέσσερα πέντε έξι # #"),
+      "# # # # # # # #",
+    );
+  });
+
+  test("digitContentMask parity: a spoken and a typed card mask to the SAME tail", () => {
+    const mask = digitContentMask({ spokenLanguages: ["el", "en"] });
+    assert.deepEqual(
+      mask({ spoken: SPOKEN_CARD, typed: "4111111111114410" }, "inputs"),
+      { spoken: "***4410", typed: "***4410" },
+    );
+  });
+
+  test("digitContentMask keepLast: 0 blankets both passes", () => {
+    const mask = digitContentMask({ spokenLanguages: ["el"], keepLast: 0 });
+    assert.deepEqual(
+      mask({ spoken: "ένα δύο τρία τέσσερα πέντε έξι επτά", typed: "1234567" }, "inputs"),
+      { spoken: "# # # # # # #", typed: "#######" },
+    );
+  });
+});
+
+describe("maskSpokenDigitsInText — a realistic Greek utterance", () => {
+  const utterance =
+    "Θέλω ένα νέο PIN. Το PIN που διάλεξα είναι τέσσερα οκτώ τρία επτά και ο κωδικός που έλαβα είναι ένα δύο τρία τέσσερα πέντε έξι, ευχαριστώ.";
+
+  test("the 4-word PIN and the 6-word OTP are fully masked, the sentence survives", () => {
+    assert.equal(
+      maskSpokenDigitsInText(utterance),
+      "Θέλω ένα νέο PIN. Το PIN που διάλεξα είναι # # # # και ο κωδικός που έλαβα είναι # # # # # #, ευχαριστώ.",
+    );
+  });
+
+  test("no digit word of either secret survives, while the prose «ένα» does", () => {
+    const masked = maskSpokenDigitsInText(utterance);
+    assert.equal(masked.includes("τέσσερα οκτώ τρία επτά"), false);
+    assert.equal(masked.includes("ένα δύο τρία τέσσερα πέντε έξι"), false);
+    assert.ok(masked.startsWith("Θέλω ένα νέο PIN."));
+  });
+});
+
+describe("digitContentMask — the spokenLanguages opt-in", () => {
+  test("spokenLanguages masks a spoken PIN deep in a payload", () => {
+    const mask = digitContentMask({ spokenLanguages: ["el", "en"] });
+    assert.deepEqual(
+      mask(
+        { messages: [{ content: "το PIN είναι τέσσερα οκτώ τρία επτά" }], note: "one two three" },
+        "inputs",
+      ),
+      { messages: [{ content: "το PIN είναι # # # #" }], note: "# # #" },
+    );
+  });
+
+  test("omitted spokenLanguages leaves spoken words verbatim — pre-1.7.0 behaviour, the regression guard", () => {
+    const input = { content: "το PIN είναι τέσσερα οκτώ τρία επτά και ο ΑΦΜ 123456789" };
+    assert.deepEqual(digitContentMask()(input, "inputs"), {
+      content: "το PIN είναι τέσσερα οκτώ τρία επτά και ο ΑΦΜ ***6789",
+    });
+  });
+
+  test("the numeral pass and the spoken pass compose on mixed dictation", () => {
+    const mask = digitContentMask({ spokenLanguages: ["el"] });
+    assert.deepEqual(mask({ content: "τέσσερα 8 τρία επτά" }, "inputs"), {
+      content: "# # # #",
+    });
+  });
+
+  test("keys: true runs the spoken pass over object keys too", () => {
+    const mask = digitContentMask({ spokenLanguages: ["el"], keys: true });
+    assert.deepEqual(mask({ "ένα δύο τρία τέσσερα": true }, "inputs"), { "# # # #": true });
+  });
+
+  test("a spokenLanguages subset does not touch the other language", () => {
+    const mask = digitContentMask({ spokenLanguages: ["en"] });
+    assert.deepEqual(mask({ content: "τέσσερα οκτώ τρία επτά" }, "inputs"), {
+      content: "τέσσερα οκτώ τρία επτά",
+    });
   });
 });
 

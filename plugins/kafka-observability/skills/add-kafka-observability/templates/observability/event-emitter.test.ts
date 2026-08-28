@@ -210,6 +210,49 @@ describe("RunEventEmitter — host content mask", () => {
     assert.equal(inputs.afm, "***6789");
   });
 
+  test("a policy without spokenLanguages emits spoken digit words verbatim — 1.6.0 bytes, the regression guard", () => {
+    const producer = new FakeProducer();
+    const emitter = new RunEventEmitter(producer, "test_app", "t", digitContentMask());
+    const run = makeRun({
+      inputs: { content: "το PIN είναι τέσσερα οκτώ τρία επτά και ο ΑΦΜ 123456789" } as never,
+    });
+    emitter.emitRun("thread-1", run, "request");
+
+    const inputs = lastEvent(producer).data.inputs as Record<string, unknown>;
+    assert.equal(
+      inputs.content,
+      "το PIN είναι τέσσερα οκτώ τρία επτά και ο ΑΦΜ ***6789",
+      "spoken-word masking must stay opt-in — nothing new wired means 1.6.0 output",
+    );
+  });
+
+  test("spokenLanguages opt-in masks a dictated Greek PIN and OTP through the emit funnel", () => {
+    const producer = new FakeProducer();
+    const emitter = new RunEventEmitter(
+      producer,
+      "test_app",
+      "t",
+      digitContentMask({ spokenLanguages: ["el", "en"] }),
+    );
+    const run = makeRun({
+      inputs: { content: "θέλω ένα νέο PIN" } as never,
+      outputs: { content: "το PIN τέσσερα οκτώ τρία επτά, ο κωδικός ένα δύο τρία τέσσερα πέντε έξι" } as never,
+      end_time: 1754179201500,
+    });
+    emitter.emitRun("thread-1", run, "response");
+
+    const data = lastEvent(producer).data;
+    assert.equal(
+      (data.inputs as Record<string, unknown>).content,
+      "θέλω ένα νέο PIN",
+      "a lone digit word in prose survives",
+    );
+    assert.equal(
+      (data.outputs as Record<string, unknown>).content,
+      "το PIN # # # #, ο κωδικός # # # # # #",
+    );
+  });
+
   test("a mask that breaks the field shape drops the event instead of shipping it (edge case)", () => {
     const producer = new FakeProducer();
     const emitter = new RunEventEmitter(producer, "test_app", "t", () => "not-an-object");
