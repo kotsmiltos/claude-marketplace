@@ -12,6 +12,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). The library uses
 **major** = breaking public-API change (exports/signatures in `index.ts` / `types.ts`, or the
 `buildAgentStepTool` options), **minor** = additive, **patch** = internal-only.
 
+## [3.0.1] — 2026-08-29
+
+Patch: OTP/match gate-interplay fixes enabling the folded **"confirming the value sends the code"**
+shape — one action that consumes the double-entry match AND issues the OTP — and letting a pending
+OTP be re-sent without aborting the flow. No public-surface change.
+Migration: [migrations/3.0.0-to-3.0.1.md](migrations/3.0.0-to-3.0.1.md).
+
+### Fixed
+- The match-then-OTP ordering guard exempts the match's own consumer: an `issuesOtp` action whose
+  pending match names it as `for_action` may issue (`otp_blocked_match_pending` no longer fires for
+  the consumer-issuer fold; the hazard the guard exists for — an issuer overwriting a match whose
+  consumer never ran — cannot arise when the issuer IS the consumer).
+- Ok-lifecycle apply order: `requiresOtp`/`requiresMatch` gate consumption now applies BEFORE the
+  `otp_issued` effect. `awaitingInput` is a single replace-on-write slot, so the old order had a
+  consumer-issuer action wipe the OTP gate it had just opened, stranding the caller. (Equivalent
+  orders when consuming and issuing are separate steps — which is why it went unnoticed.)
+
+### Changed
+- OTP gate lockdown additionally admits a **same-flow issuer** of the pending gate
+  (`issuesOtp.consumer_action` = the gate's `for_action` AND `requiresFlow` = the gate's
+  `flow_ref`) as the batch's first step, so a code that never arrived can be re-sent without
+  `abort_pending_input` (which takes the whole flow — and everything captured in it — down).
+  Scoped: an issuer for the same consumer in a different flow is not a re-send and stays locked out.
+
 ## [3.0.0] — 2026-08-19
 
 Major: **the authoring model goes declarative, and the engine takes over the model-facing language.**

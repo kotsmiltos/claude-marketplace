@@ -11,6 +11,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.26.1] — 2026-08-29
+
+Ships **agent-step library 3.0.1** — a patch release: OTP/match gate-interplay fixes. The folded
+consumer-issuer shape ("confirming the value sends the code" — one action declaring both
+`requiresMatch` and `issuesOtp`) is now allowed, with consume-before-issue ordering so the fresh
+OTP gate survives; and a pending OTP can be re-sent without aborting the flow (lockdown admits a
+same-flow issuer of the gate). `/pull-library` replaces the vendored library wholesale — **no
+transforms** ([migrations/3.0.0-to-3.0.1.md](migrations/3.0.0-to-3.0.1.md)). Library suite
+222 → 225 tests; verified by throwaway bootstrap from these templates: clean typecheck,
+225/225 passing.
+
+### Changed
+- **Library 3.0.1** — the match-then-OTP ordering guard exempts the match's own consumer;
+  the ok-lifecycle applies gate consumption BEFORE `otp_issued`; OTP lockdown additionally admits
+  a same-flow issuer of the pending gate (re-send). Details in [CHANGELOG.md](CHANGELOG.md).
+- Reference docs reconciled to the new gate semantics: `agent-step-api.md` (lockdown table,
+  admission bullet, apply order, `<otp_lifecycle>` re-send + consumer-exemption paragraphs,
+  match-consumer fold mention, error table), `executor-patterns.md` Pattern 6 (folded
+  consumer-issuer note), `test-agent-step` SKILL.md (same-turn-guards note).
+
 ## [0.26.0] — 2026-08-20
 
 Ships **agent-step library 3.0.0** — a major library release; `/pull-library` is **required** for

@@ -40,7 +40,8 @@ export function refuseOtpNotPending(
 }
 
 /** Refusal for an `issuesOtp` action while a double-entry match is still
- *  pending in the LIVE view, or `null` when issuing is allowed.
+ *  pending in the LIVE view AND that match belongs to a DIFFERENT action, or
+ *  `null` when issuing is allowed.
  *
  *  Enforces the ordering invariant "at most one input gate at a time, match
  *  THEN otp": the match consumer must clear the match before any OTP is
@@ -59,6 +60,13 @@ export function refuseOtpIssueWhileMatchPending(
 ): StepResult | null {
   if (!controller?.issuesOtp) return null;
   if (!liveAwaiting || liveAwaiting.kind !== "match") return null;
+  // The match CONSUMER may issue. A match gate names its consumer in
+  // `for_action`, so when the issuer IS that consumer the hazard this guard
+  // exists for cannot arise: the consumer is running right now and clears the
+  // gate as it does, so no OTP overwrites a match whose consumer never ran.
+  // Refusing it would forbid the legitimate "confirming the value sends the
+  // code" shape — one action that consumes the repeat AND issues.
+  if (liveAwaiting.for_action === actionName) return null;
   const summary = formatMessage(msgs.otp_blocked_match_pending, {
     action: actionName,
     match_action: liveAwaiting.for_action,

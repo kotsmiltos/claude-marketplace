@@ -36,7 +36,7 @@
 //   c. `request_handoff` effect      (terminal cleanup + handoff slot; the
 //      point where v1 hosts wrote the slot through stateUpdate)
 //   d. pageable cache patch
-//   e. ok-only lifecycle: flow open/merge → `otp_issued` → OTP/match gate
+//   e. ok-only lifecycle: flow open/merge → consume OTP/match gate → `otp_issued`
 //      consumption → `startsMatchFor` → `endsFlow` — SKIPPED once a handoff
 //      is set (handoff monotonicity: nothing may reopen interaction state)
 //   f. ok:false match-mismatch accounting (decrement / exhaust+abort) —
@@ -610,6 +610,21 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         st.apply(setCurrentFlowPatch<T>(flowUpdate.name, flowUpdate.data));
       }
 
+      // requiresOtp / requiresMatch on ok → the gate was consumed. CONSUME
+      // BEFORE ISSUE: one action may do both (a confirm action that consumes the
+      // double-entry match and mints the OTP in the same step), and
+      // `awaitingInput` is a single replace-on-write slot — so opening the new
+      // gate first and clearing the old one after would wipe the gate that was
+      // just opened and strand the caller with nothing pending. Both orders are
+      // equivalent for an action that only consumes OR only issues, which is why
+      // this went unnoticed while the two were always separate steps.
+      if (controller?.requiresOtp) {
+        st.apply(clearAwaitingInputPatch<T>());
+      }
+      if (controller?.requiresMatch) {
+        st.apply(clearAwaitingInputPatch<T>());
+      }
+
       if (effects.some((e) => e.type === "otp_issued")) {
         const finalFlow = getCurrentFlow(st.view);
         if (!finalFlow) {
@@ -625,14 +640,6 @@ export async function executeSteps<T extends LibraryManagedSlots>(
         st.apply(
           setAwaitingOtpPatch<T>(controller.issuesOtp.consumer_action, finalFlow.name),
         );
-      }
-
-      // requiresOtp / requiresMatch on ok → the gate was consumed.
-      if (controller?.requiresOtp) {
-        st.apply(clearAwaitingInputPatch<T>());
-      }
-      if (controller?.requiresMatch) {
-        st.apply(clearAwaitingInputPatch<T>());
       }
 
       // startsMatchFor on ok → open (or reset) the match gate for the named

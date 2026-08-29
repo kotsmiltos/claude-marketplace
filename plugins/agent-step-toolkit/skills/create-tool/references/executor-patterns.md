@@ -441,6 +441,8 @@ On the ok verdict: library auto-clears `awaitingInput`. The `endsFlow: true` opt
 On `ok: false` + body `verdict: "match_mismatch"`: library decrements `attempts_left`. On exhaustion, library clears both slots and re-shapes the result entry to surface `error: "match_attempts_exhausted"`, `verdict: "match_attempts_exhausted"`, `attempts_left: 0`.
 
 On `ok: false` + any other verdict: library leaves state alone (this is a "real" failure, e.g. backend error, not a mismatch).
+
+**Folded consumer-issuer ("confirming the value sends the code").** The consumer may additionally declare `issuesOtp` when the successful match should immediately mint an SCA challenge — one action that consumes the repeat AND issues. On its ok verdict the runner clears the consumed match gate first, then `otp_issued` opens the OTP gate (consume-before-issue); on a mismatch nothing is issued and the match gate stands. The match-then-OTP ordering guard exempts the match's own consumer, so this shape is not refused. See `agent-step-api.md` `<otp_lifecycle>`.
 </pattern_6_double_entry_match>
 
 <pattern_7_self_sufficient_read>

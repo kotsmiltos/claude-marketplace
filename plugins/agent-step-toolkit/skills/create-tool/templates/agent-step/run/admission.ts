@@ -74,7 +74,8 @@ export function admitBatch<T extends LibraryManagedSlots>(
   //    first step must be the targeted `for_action` (plan expansion / the gate
   //    check resolves what happens next), an allowed control, or — for match —
   //    the capturer, so the customer can re-capture (e.g. enter a different
-  //    first PIN) without aborting the flow. Abort may lead a multi-step
+  //    first PIN) without aborting the flow, or — for otp — an ISSUER of that
+  //    gate, so a code that never arrived can be re-sent without aborting. Abort may lead a multi-step
   //    batch: subsequent steps run after the gate is cleared.
   //
   //    No library-side TTL on any slot — confirmation and OTP are both
@@ -98,6 +99,28 @@ export function admitBatch<T extends LibraryManagedSlots>(
         capturer =
           plan.actions[gate.for_action]?.controller?.requiresMatch?.capturer ?? null;
       }
+      // An OTP gate's ISSUER may re-run, for exactly the reason the match gate
+      // lets its capturer re-run: the customer whose code never arrived or has
+      // expired must be able to ask for another one WITHOUT aborting — and abort
+      // takes the whole flow (with the captured PIN) down with it. Re-issuing
+      // replaces this gate with a fresh one, so the invariant "one gate at a
+      // time, and it belongs to the flow" is untouched. Observed on a live
+      // host: "resend the code" → `otp_pending_locked` → abort → `no_flow_active`
+      // → the caller had to restart the flow from identification.
+      // Scoped to the gate's OWN flow: an action that issues for this consumer
+      // but opens a DIFFERENT flow is not a re-send, it is an unrelated action
+      // that would strand the pending code.
+      const otpIssuers =
+        gate.kind === "otp"
+          ? Object.keys(plan.actions).filter((name) => {
+              const c = plan.actions[name]?.controller;
+              return (
+                c?.issuesOtp?.consumer_action === gate.for_action &&
+                c?.requiresFlow !== undefined &&
+                c.requiresFlow === gate.flow_ref
+              );
+            })
+          : [];
       const allowed =
         !!first &&
         (first.action === gate.for_action ||
@@ -107,7 +130,8 @@ export function admitBatch<T extends LibraryManagedSlots>(
           plan.controls.some(
             (c) => c.allowedDuringGateLockdown && c.name === first.action,
           ) ||
-          (capturer !== null && first.action === capturer));
+          (capturer !== null && first.action === capturer) ||
+          otpIssuers.includes(first.action));
       if (!allowed) {
         const errorCode =
           gate.kind === "confirmation"

@@ -1915,6 +1915,250 @@ test("requiresMatch: capturer + consumer in ONE batch is refused (double-entry m
   assert.equal(calls.commit, 0, "commit executor never ran");
 });
 
+test("issuesOtp: the match's OWN CONSUMER may issue — confirming the value sends the code", async () => {
+  // The guard above protects against an issuer OVERWRITING a match gate whose
+  // consumer never ran. When the issuer IS that consumer the hazard cannot
+  // arise: it is running right now and clears the gate as it goes. Refusing it
+  // would forbid the "confirming the value sends the code" shape — one action
+  // that consumes the repeat AND issues.
+  const calls = { open: 0, capture: 0, confirm: 0 };
+  const config = defineConfig<"open_flow" | "capture_value" | "confirm_and_issue" | "use_otp", never>({
+    tool: { name: "fold_tool", description: "consumer-issues-otp test tool" },
+    actions: {
+      open_flow: {
+        description: "open the flow",
+        paramsSchema: z.object({}),
+        prereqs: [],
+        controller: { startsFlow: { name: "myflow" } },
+        verdicts: { opened: { ok: true, summary: "flow opened" } },
+      },
+      capture_value: {
+        description: "capture the first entry",
+        paramsSchema: z.object({ v: z.string() }),
+        prereqs: [],
+        controller: {
+          requiresFlow: "myflow",
+          startsMatchFor: { consumer_action: "confirm_and_issue" },
+        },
+        verdicts: { captured: { ok: true, summary: "captured" } },
+      },
+      confirm_and_issue: {
+        description: "consume the match AND issue the OTP",
+        paramsSchema: z.object({ v: z.string() }),
+        prereqs: [],
+        controller: {
+          requiresFlow: "myflow",
+          requiresMatch: { capturer: "capture_value", maxAttempts: 3 },
+          issuesOtp: { consumer_action: "use_otp" },
+        },
+        verdicts: {
+          match_mismatch: { ok: false, summary: "did not match", body: { verdict: "match_mismatch" } },
+          matched: {
+            ok: true,
+            summary: "matched and sent",
+            body: { otp_sent: true },
+            effects: [{ type: "otp_issued" }],
+          },
+        },
+      },
+      use_otp: {
+        description: "consume the OTP",
+        paramsSchema: z.object({ code: z.string() }),
+        prereqs: [],
+        controller: { requiresFlow: "myflow", requiresOtp: true, endsFlow: true },
+        verdicts: { done: { ok: true, summary: "done" } },
+      },
+    },
+  });
+  const foldSelectors = {
+    open_flow: (st: MatchS) => st,
+    capture_value: (st: MatchS) => st,
+    confirm_and_issue: (st: MatchS) => st,
+    use_otp: (st: MatchS) => st,
+  };
+  const executors: ExecutorRegistry<MatchS, typeof foldSelectors> = {
+    open_flow: async () => {
+      calls.open++;
+      return { verdict: "opened" };
+    },
+    capture_value: async (params) => {
+      calls.capture++;
+      return {
+        verdict: "captured",
+        effects: [{ type: "merge_flow_data", data: { captured: (params as { v: string }).v } }],
+      };
+    },
+    confirm_and_issue: async (params, state) => {
+      calls.confirm++;
+      const stored = (state.currentFlow?.data as { captured?: string } | undefined)?.captured;
+      if ((params as { v: string }).v !== stored) return { verdict: "match_mismatch" };
+      return { verdict: "matched" };
+    },
+    use_otp: async () => ({ verdict: "done" }),
+  };
+  const opts = {
+    config,
+    stateSchema: matchAnnotation,
+    selectors: foldSelectors,
+    executors,
+    verifiers: {},
+  } as BuildAgentStepToolOptions<MatchS, string, string, typeof foldSelectors>;
+
+  const r1 = await runSteps(opts, [{ action: "open_flow", params: {} }], {} as MatchS);
+  const r2 = await runSteps(
+    opts,
+    [{ action: "capture_value", params: { v: "secret" } }],
+    r1.committed as MatchS,
+  );
+  assert.equal((r2.committed as MatchS).awaitingInput?.kind, "match", "match gate opened");
+
+  const { body, committed } = await runSteps(
+    opts,
+    [{ action: "confirm_and_issue", params: { v: "secret" } }],
+    r2.committed as MatchS,
+  );
+  assert.equal(body.results[0].ok, true, JSON.stringify(body.results[0]));
+  assert.equal(calls.confirm, 1, "the consumer's executor DID run — not refused");
+  // The ordering that matters: the match it consumed is gone and the OTP gate it
+  // issued stands. `awaitingInput` is one replace-on-write slot, so a consume
+  // applied AFTER the issue would wipe the new gate and strand the caller.
+  assert.equal(committed.awaitingInput?.kind, "otp", "match cleared, OTP gate open");
+  assert.equal(committed.awaitingInput?.for_action, "use_otp");
+});
+
+test("issuesOtp: a MISMATCH on the consumer-issuer opens no OTP gate", async () => {
+  // The issue rides the ok row only, so a failed match leaves the match gate
+  // standing and sends nothing.
+  const { opts } = makeMatchOpts();
+  const r1 = await runSteps(opts, [{ action: "open_flow", params: {} }], {} as MatchS);
+  const r2 = await runSteps(
+    opts,
+    [{ action: "capture_value", params: { v: "secret" } }],
+    r1.committed as MatchS,
+  );
+  const { committed } = await runSteps(
+    opts,
+    [{ action: "commit_value", params: { v: "WRONG" } }],
+    r2.committed as MatchS,
+  );
+  assert.equal(committed.awaitingInput?.kind, "match", "still owed the repeat");
+});
+
+test("otp lockdown: a same-flow issuer may re-run (re-send the code without aborting)", async () => {
+  // While an OTP gate pends, the batch may lead with an ISSUER of that gate —
+  // an action whose issuesOtp targets the gate's consumer AND whose
+  // requiresFlow is the gate's flow — so a code that never arrived can be
+  // re-sent without abort_pending_input (which takes the whole flow down).
+  // An issuer for the same consumer but a DIFFERENT flow is NOT a re-send and
+  // stays locked out.
+  const calls = { open: 0, send: 0, sendOther: 0, use: 0 };
+  const config = defineConfig<"open_flow" | "send_code" | "send_code_other" | "use_otp", never>({
+    tool: { name: "resend_tool", description: "otp re-send admission test tool" },
+    actions: {
+      open_flow: {
+        description: "open the flow",
+        paramsSchema: z.object({}),
+        prereqs: [],
+        controller: { startsFlow: { name: "myflow" } },
+        verdicts: { opened: { ok: true, summary: "flow opened" } },
+      },
+      send_code: {
+        description: "mint and send the code",
+        paramsSchema: z.object({}),
+        prereqs: [],
+        controller: {
+          requiresFlow: "myflow",
+          issuesOtp: { consumer_action: "use_otp" },
+        },
+        verdicts: {
+          sent: { ok: true, summary: "code sent", effects: [{ type: "otp_issued" }] },
+        },
+      },
+      send_code_other: {
+        description: "issuer for the same consumer, different flow",
+        paramsSchema: z.object({}),
+        prereqs: [],
+        controller: {
+          requiresFlow: "otherflow",
+          issuesOtp: { consumer_action: "use_otp" },
+        },
+        verdicts: {
+          sent: { ok: true, summary: "code sent", effects: [{ type: "otp_issued" }] },
+        },
+      },
+      use_otp: {
+        description: "consume the OTP",
+        paramsSchema: z.object({ code: z.string() }),
+        prereqs: [],
+        controller: { requiresFlow: "myflow", requiresOtp: true, endsFlow: true },
+        verdicts: { done: { ok: true, summary: "done" } },
+      },
+    },
+  });
+  const resendSelectors = {
+    open_flow: (st: MatchS) => st,
+    send_code: (st: MatchS) => st,
+    send_code_other: (st: MatchS) => st,
+    use_otp: (st: MatchS) => st,
+  };
+  const executors: ExecutorRegistry<MatchS, typeof resendSelectors> = {
+    open_flow: async () => {
+      calls.open++;
+      return { verdict: "opened" };
+    },
+    send_code: async () => {
+      calls.send++;
+      return {
+        verdict: "sent",
+        effects: [{ type: "merge_flow_data", data: { challengeId: `ch-${calls.send}` } }],
+      };
+    },
+    send_code_other: async () => {
+      calls.sendOther++;
+      return { verdict: "sent" };
+    },
+    use_otp: async () => {
+      calls.use++;
+      return { verdict: "done" };
+    },
+  };
+  const opts = {
+    config,
+    stateSchema: matchAnnotation,
+    selectors: resendSelectors,
+    executors,
+    verifiers: {},
+  } as BuildAgentStepToolOptions<MatchS, string, string, typeof resendSelectors>;
+
+  const r1 = await runSteps(opts, [{ action: "open_flow", params: {} }], {} as MatchS);
+  const r2 = await runSteps(opts, [{ action: "send_code", params: {} }], r1.committed as MatchS);
+  assert.equal((r2.committed as MatchS).awaitingInput?.kind, "otp", "OTP gate opened");
+
+  // Re-send: the SAME issuer leads the next batch while its gate pends → admitted.
+  const r3 = await runSteps(opts, [{ action: "send_code", params: {} }], r2.committed as MatchS);
+  assert.equal(r3.body.results[0].ok, true, JSON.stringify(r3.body.results[0]));
+  assert.equal(calls.send, 2, "the issuer's executor ran again — not refused");
+  const gate = (r3.committed as MatchS).awaitingInput;
+  assert.equal(gate?.kind, "otp", "a fresh OTP gate stands");
+  assert.equal(gate?.for_action, "use_otp");
+  assert.equal(
+    ((r3.committed as MatchS).currentFlow?.data as { challengeId?: string }).challengeId,
+    "ch-2",
+    "the fresh challenge replaced the stale one",
+  );
+
+  // A different-flow issuer for the same consumer is NOT a re-send → still locked.
+  const r4 = await runSteps(opts, [{ action: "send_code_other", params: {} }], r3.committed as MatchS);
+  assert.equal(r4.body.results[0].ok, false);
+  assert.equal((r4.body.results[0] as { error?: string }).error, "otp_pending_locked");
+  assert.equal(calls.sendOther, 0, "the foreign issuer's executor never ran");
+
+  // The pending gate still consumes normally after a re-send.
+  const r5 = await runSteps(opts, [{ action: "use_otp", params: { code: "123456" } }], r3.committed as MatchS);
+  assert.equal(r5.body.results[0].ok, true);
+  assert.equal((r5.committed as MatchS).awaitingInput, null, "gate consumed");
+});
+
 test("issuesOtp: refused while a match gate is still pending (otp_blocked_match_pending)", async () => {
   const { opts, calls } = makeMatchOpts();
   // Flow opened in a prior turn; then [capture_value, issue_otp] in one batch.
