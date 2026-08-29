@@ -119,7 +119,9 @@ Ships one skill:
   survives) — default stays emit-everything. Conversation content — prompts, completions,
   graph state, tool params — can be masked by a policy the APPLICATION supplies
   (`startup({ contentMask })`, plus digit/deep-walk primitives that compose with a domain
-  masker the project already owns): the library ships the **seam, not the policy**, because
+  masker the project already owns — covering numeral runs and digits **spoken as words**,
+  Greek + English packs, the way PINs and OTPs arrive on a voice channel): the library
+  ships the **seam, not the policy**, because
   which digits are a tax id and which are an order reference is a fact about the
   application's flow, and masks nothing until one is wired. Repos with pre-existing Kafka
   functionality are safe: the skill detects a foreign `src/observability/` module or

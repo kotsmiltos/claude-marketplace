@@ -75,12 +75,15 @@ export {
   digitContentMask,
   mapStringsDeep,
   maskDigitsInText,
+  maskSpokenDigitsInText,
 } from "./content-mask.js";
 export type {
   ContentField,
   ContentMask,
   DigitContentMaskOptions,
   DigitMaskOptions,
+  SpokenDigitLanguage,
+  SpokenDigitMaskOptions,
 } from "./content-mask.js";
 export { getAttachDiagnostics } from "./configure-slot.js";
 export type { AttachDiagnostics } from "./configure-slot.js";

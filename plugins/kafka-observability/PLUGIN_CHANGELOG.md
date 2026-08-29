@@ -11,6 +11,87 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); newest first. Se
 **major** = removed/renamed skill or breaking workflow change, **minor** = new skill / capability /
 template, **patch** = doc or fix with no new surface.
 
+## [0.9.0] — 2026-08-28
+
+Ships **observability library 1.8.0** (from 1.7.0) — **numeral parity for spoken digit
+runs**. 1.7.0's "word-form values are never correlation identifiers" claim broke on the
+first real question about it: callers dictate card numbers and tax ids too, and those keep
+a `***4410` / `***6789` tail when typed but lost it entirely when spoken. The numeral
+pass's own length boundary (7+ digits = identifier, 3–6 = secret) discriminates the same
+shapes in word form, so the spoken pass now applies it.
+
+### Added
+- Library 1.8.0: `keepLast` (default 4) / `keepLastMinRun` (default 7) on
+  `maskSpokenDigitsInText`, mirroring `maskDigitsInText`. 7+-digit word runs collapse to
+  `***<last keepLast digits>` with kept words TRANSLATED to numerals (the packs now map
+  word → digit); 3–6-digit runs (PIN, OTP) mask whole, byte-identical to 1.7.0. Tail is
+  real or absent, never partial (unrecoverable `#` digits in the tail → whole mask).
+  `digitContentMask` shares `keepLast`/`keepLastMinRun` across both passes. 12 new tests
+  (suite 194 → **206**).
+- `migrations/1.7.0-to-1.8.0.md`: no mandatory transforms (file refresh picks parity up
+  through existing wiring), plus a STATED decision point — a policy that wired the spoken
+  pass on 1.7.0 changes output for 7+-digit word runs; `keepLast: 0` restores whole-mask.
+
+### Changed
+- Library README primitive bullet, composition notes and limits; SKILL quick reference and
+  workflow Step 5 now name the parity rule. No export removed or changed, no env key,
+  event schema untouched; everything unwired still emits bytes identical to 1.6.0.
+
+Downstream projects upgrade via `/add-kafka-observability` (applies `1.7.0-to-1.8.0.md`).
+
+## [0.8.0] — 2026-08-26
+
+Ships **observability library 1.7.0** (from 1.6.0) — **masking of digits spoken as words**,
+the residual leak the 1.6.0 seam left open and its own migration guide named first
+("numbers spoken as words are not numerals"). The seam itself works — a live Kafka capture
+of a downstream voice agent's full PIN-change conversation showed zero plaintext PIN/OTP
+numerals — but the callers speak Greek, and word-form is how digits normally arrive on a
+voice channel: the same capture carried the PIN as «τέσσερα οκτώ τρία επτά» (59×) and the
+OTP as «ένα δύο τρία τέσσερα πέντε έξι» (135×) in raw utterances inside llm-run content;
+English word digits leak identically. A language-shaped but domain-independent transform —
+the same class of primitive as `maskDigitsInText` — so it ships in the library rather than
+being copy-pasted into every agent repo.
+
+### Added
+- Library 1.7.0: `maskSpokenDigitsInText(text, opts?)` in `content-mask.ts` — masks runs of
+  consecutive spoken digit words. Pluggable language packs, Greek + English built in
+  (`languages` takes a subset; default both); Greek covers 0–9 with spoken
+  variants/inflections (ένα/μία/μια, δύο/δυο, τρία/τρεις, τέσσερα/τέσσερις, επτά/εφτά,
+  οκτώ/οχτώ, εννέα/εννιά…), matched case-insensitively and accent-tolerantly («ΤΕΣΣΕΡΑ»,
+  «τεσσερα»); English zero/oh/one…nine. Run rule: digit-words joined by spaces/commas/dashes
+  are one run; numerals and prior `#` mask tokens count as members (mixed dictation
+  «τέσσερα 8 τρία επτά» stays one run, including after a digits-first pass); masked only at
+  `minRun` **3**+ members with ≥1 real digit word, so a lone «ένα» in prose survives while
+  PIN (4) and OTP (6) shapes are caught. One `#` per word, NO keepLast tail — word-form
+  values are always secret-bearing, never identifiers a flow reads back. Plus
+  `digitContentMask({ spokenLanguages: ["el","en"] })` (numeral pass first — load-bearing
+  order) and the documented manual composition for projects with their own domain masker.
+  36 new tests (suite 158 → **194**), incl. a realistic Greek utterance with a 4-word PIN
+  and 6-word OTP fully masked while the sentence survives, and an emitter-level regression
+  guard pinning the no-spokenLanguages policy to 1.6.0 output.
+- `migrations/1.6.0-to-1.7.0.md`: no mandatory transforms (additive); optional extension of
+  an already-wired policy (both the `digitContentMask` option and the manual-composition
+  forms), the two composition ORDER rules, and the remaining limits stated explicitly
+  (composed number words above nine — «σαράντα οκτώ» — out of scope; no packs beyond el/en;
+  sub-minRun fragments survive by design).
+- Library README "Content masking": the new primitive's bullet (rule named out loud), the
+  voice-channel composition snippet, and the limits list rescoped from "words are not
+  numerals" to what actually remains.
+- Install workflow Step 5 item 6 now proposes the spoken pass for voice agents in both
+  branches (compose-existing and `digitContentMask`); SKILL.md quick reference gained the
+  `maskSpokenDigitsInText` line.
+
+### Changed
+- Nothing breaking anywhere in the release: no export removed or changed, no env key
+  (language selection is a code option), event schema untouched, `events[].name`/`time`
+  carve-out stays. **With nothing new wired, emitted bytes are identical to 1.6.0** —
+  guarded by the new emitter regression test alongside 1.6.0's omitted-argument test.
+- Capability descriptions (plugin.json, marketplace entry, root README) now name the
+  spoken-digit-word masking.
+
+Downstream projects upgrade via `/add-kafka-observability` (upgrade mode; applies
+`1.6.0-to-1.7.0.md` — pure file refresh unless they opt into the spoken pass).
+
 ## [0.7.0] — 2026-08-20
 
 Ships **observability library 1.6.0** (from 1.5.0) — a host-supplied **content mask**. Every

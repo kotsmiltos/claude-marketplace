@@ -6,6 +6,111 @@ carry a copy of this library in `src/observability/`; `/add-kafka-observability`
 their `src/observability/VERSION` against the shipped one and upgrades via the
 version-keyed guides in `migrations/`.
 
+## 1.8.0 (2026-08-28)
+
+Parity release: **spoken digit runs now follow the numeral pass's length rule**. 1.7.0
+masked every qualifying word run whole, on the claim that "word-form values are always
+secret-bearing, never correlation identifiers" — wrong the moment a caller dictates a card
+number or a tax id, which they do: the same dictation typed as numerals keeps `***4410` /
+`***6789` (the tail the flow itself reads back), while the spoken form lost it entirely,
+purely because the caller spoke instead of typing. The length boundary that already
+separates these shapes in the numeral pass separates them identically in word form —
+7+ digits is a dictated identifier (card 16, ΑΦΜ 9), 3–6 is a secret (PIN 4, OTP 6).
+
+### Added
+
+- `keepLast` (default **4**) / `keepLastMinRun` (default **7**) on
+  `SpokenDigitMaskOptions` — mirroring `maskDigitsInText`'s options and defaults. A run of
+  `keepLastMinRun`+ digits collapses whole (separators included) to `***<last keepLast
+  digits>` with kept words **translated to numerals** («…τέσσερα τέσσερα ένα μηδέν» →
+  `***4410`); the language packs now map word → digit to make that possible. Runs of 3–6
+  digits are masked exactly as in 1.7.0 — PIN and OTP output is byte-identical. `keepLast:
+  0` masks every run whole (the 1.7.0 behaviour, now the opt-out).
+- Tail safety rule: the tail is the REAL last digits or absent, never partial — if any of
+  the last `keepLast` digits is unrecoverable (a `#` token left by a prior digit pass in a
+  mixed run), the run is masked whole instead of emitting a half-real tail.
+- `digitContentMask({ spokenLanguages })` now shares `keepLast`/`keepLastMinRun` (and
+  `maskChar`, as before) between both passes — `keepLast: 0` blankets numeral and spoken
+  runs alike, and a spoken and a typed card mask to the SAME `***4410`.
+- Tests: 12 new (suite 194 → **206**) — 16-word card and 9-word ΑΦΜ collapse with
+  translated tails (Greek incl. inflected/accentless/uppercase variants in the tail,
+  English incl. oh→0), the 7-digit threshold in both directions (the 6-word OTP still
+  masks whole), numeral digits contributing to a tail, separator collapse, `keepLast: 0`
+  and `keepLastMinRun` options, the never-partial-tail fallback, and spoken/typed parity
+  through `digitContentMask`.
+
+### Changed
+
+- **Default behaviour change for wired spoken masking, stated plainly:** a policy wired on
+  1.7.0 masked a 7+-word dictated run whole; on 1.8.0 the same run keeps a translated
+  `***<last4>` tail unless `keepLast: 0` is passed. PIN/OTP-shaped runs (3–6 digits) are
+  unaffected. Anything NOT wired is untouched — with no policy (or no `spokenLanguages`/
+  manual spoken pass), emitted bytes remain identical to 1.6.0, same guard tests as 1.7.0.
+- Doc-comment idempotency note now mirrors `maskDigitsInText`'s: idempotent with
+  `keepLast: 0`; the default keep-tail policy leaves a numeral tail a LATER digit pass
+  would re-mask — the documented composition runs the digit pass first, so the tail
+  survives there.
+- No export removed or changed, no env key, event schema untouched.
+
+## 1.7.0 (2026-08-26)
+
+Privacy release: **masking of digits spoken as words**. The 1.6.0 seam works — a live
+Kafka capture of a downstream voice-banking agent's full PIN-change conversation showed
+zero plaintext PIN/OTP numerals once its domain masker was composed with
+`maskDigitsInText` — but the callers speak, and on a voice channel word-form is how digits
+normally arrive: the same capture carried the PIN as «τέσσερα οκτώ τρία επτά» (59
+occurrences) and the OTP as «ένα δύο τρία τέσσερα πέντε έξι» (135 occurrences) inside
+llm-run content, the limit the 1.5.0→1.6.0 guide had named ("numbers spoken as words are
+not numerals"). English word digits ("four eight three seven") leak identically. This is a
+language-shaped but domain-independent text transform — the same class of primitive as
+`maskDigitsInText` — so per the library's own doctrine (primitives in the library, policy
+with the application) it ships here rather than being copy-pasted into every agent repo.
+
+### Added
+
+- `maskSpokenDigitsInText(text, opts?)` in `content-mask.ts` — masks runs of consecutive
+  spoken digit words. Pluggable language packs, Greek and English built in
+  (`languages` option takes a subset; default both): Greek covers digit words 0–9 with the
+  spoken variants and inflections ASR emits (μηδέν, ένα/μία/μια, δύο/δυο, τρία/τρεις,
+  τέσσερα/τέσσερις, πέντε, έξι, επτά/εφτά, οκτώ/οχτώ, εννέα/εννιά), matched
+  case-insensitively and accent-tolerantly (uppercase «ΤΕΣΣΕΡΑ» and accentless «τεσσερα»
+  both hit — normalization is lowercase + NFD accent strip + final-sigma fold); English is
+  zero/oh/one…nine. The rule: consecutive digit-words joined by spaces, commas or dashes
+  are one run; numerals and already-masked `#` tokens inside it COUNT as run members (so
+  mixed dictation «τέσσερα 8 τρία επτά» — and its digits-first-composed form
+  «τέσσερα # τρία επτά» — stays one run instead of two leaking fragments); a run is masked
+  only at `minRun` (default **3**) or more members with at least one actual digit word, so
+  a lone «ένα» («θέλω ένα νέο PIN») or a pair («δύο τρία λεπτά») survives as prose while
+  the PIN (4) and OTP (6) shapes are always caught. One `maskChar` per word,
+  digit-for-digit for embedded numerals, **no keepLast tail** — word-form values are always
+  secret-bearing (PINs, OTPs), never correlation identifiers a flow reads back. Idempotent.
+  Numeral-only runs are untouched (`maskDigitsInText`'s job). Types `SpokenDigitLanguage` /
+  `SpokenDigitMaskOptions`; new `index.ts` re-exports for all three.
+- `digitContentMask({ spokenLanguages: ["el", "en"] })` — opt-in composition inside the
+  ready-made policy: numeral pass FIRST, then the spoken pass with the same `maskChar`
+  (order is load-bearing — see the run-member rule above). Omitted, the policy is
+  byte-identical to 1.6.0.
+- README: the manual composition for projects with their own domain masker —
+  `(v) => redactValue(mapStringsDeep(v, (s) => maskSpokenDigitsInText(maskDigitsInText(s)), { keys: true }))`
+  — and both ORDER rules stated (digit pass inside the key tiers; numeral pass before the
+  spoken pass). Limits updated: the "numbers spoken as words" limit is now scoped to what
+  actually remains — composed number words above nine («σαράντα οκτώ», "forty-eight") and
+  languages without a pack.
+- Tests: 36 new (suite 158 → **194**) — Greek inflected/accentless/uppercase forms, mixed
+  separators, the minRun boundary in both directions, the lone-digit-word prose guard,
+  English runs, mixed numeral+word runs and the digits-first composition, idempotency, a
+  realistic Greek utterance carrying a 4-word PIN and a 6-word OTP fully masked while the
+  surrounding sentence (and its prose «ένα») survives, and an emitter-level regression
+  guard pinning `digitContentMask()` without `spokenLanguages` to 1.6.0 output.
+
+### Changed
+
+- Nothing breaking; no export removed or changed, no env key (language selection is a code
+  option, not configuration), event schema untouched, and the `events[].name`/
+  `events[].time` carve-out stays. **With nothing new wired, emitted bytes are identical
+  to 1.6.0** — the no-mask default was untouched and the new emitter regression test pins
+  the spoken words verbatim in a 1.6.0-style policy's output.
+
 ## 1.6.0 (2026-08-20)
 
 Privacy release: a **host-supplied content mask**. Every traced run carried the

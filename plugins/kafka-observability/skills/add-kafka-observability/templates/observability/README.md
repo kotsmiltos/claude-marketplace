@@ -199,11 +199,35 @@ Deliberately out of reach, because masking them destroys something load-bearing:
   sixteen one-digit runs. Unicode digits (`١٢٣`, `１２３`) count. Options: `maskChar`
   (default `#`), `keepLast` (default 4; `0` masks every run whole), `keepLastMinRun`
   (default 7).
+- `maskSpokenDigitsInText(text, opts?)` — masks runs of **spoken digit words**
+  («τέσσερα οκτώ τρία επτά», "four eight three seven"). On a voice channel word-form is how
+  digits normally arrive, so a digit policy alone ships every dictated PIN and OTP verbatim.
+  Built-in language packs: Greek — digit words 0–9 with the spoken variants and inflections
+  ASR emits («ένα/μία/μια», «δύο/δυο», «τρία/τρεις», «τέσσερα/τέσσερις», «επτά/εφτά»,
+  «οκτώ/οχτώ», «εννέα/εννιά»), matched case-insensitively and accent-tolerantly (uppercase
+  «ΤΕΣΣΕΡΑ» and accentless «τεσσερα» both hit) — and English (zero/oh/one…nine). The rule,
+  out loud: consecutive digit-words joined by spaces, commas or dashes are one run; numerals
+  and already-masked `#` tokens inside it count as run members; a run is masked only at
+  **`minRun` (default 3) or more members** with at least one actual digit word — so a lone
+  «ένα» («θέλω ένα νέο PIN») or a pair («δύο τρία λεπτά») survives as prose while the PIN
+  (4) and OTP (6) shapes are always caught. Full **numeral parity** on run length: a run of
+  **7+ digits** collapses to `***<last4>` with the kept words TRANSLATED to numerals
+  («…τέσσερα τέσσερα ένα μηδέν» → `***4410`) — a dictated card (16) or tax id (9) keeps the
+  same correlation tail it would keep typed, instead of losing it because the caller spoke.
+  Shorter runs are masked whole, one `maskChar` per word and digit-for-digit for an embedded
+  numeral: at 3–6 digits the value is a PIN or OTP and no digit of it belongs on the topic.
+  The tail is real or absent, never partial — if any kept digit is unrecoverable (a `#` left
+  by a prior digit pass), the run is masked whole. Options: `maskChar` (default `#`),
+  `minRun` (default 3), `languages` (default `["el", "en"]`), `keepLast` (default 4; `0`
+  masks every run whole), `keepLastMinRun` (default 7).
 - `mapStringsDeep(value, fn, { keys? })` — recursive walk over strings. `keys: true` also
   maps **object keys**, which you need when a slot is keyed BY the sensitive value
   (`{ "4111111111114410": {…} }` is unreachable by any key-*name* policy).
-- `digitContentMask(opts?)` — the two composed into a ready-made `ContentMask`. Still
-  opt-in: you wire it, the library never installs it.
+- `digitContentMask(opts?)` — the primitives composed into a ready-made `ContentMask`.
+  Still opt-in: you wire it, the library never installs it. Pass
+  `spokenLanguages: ["el", "en"]` to also run the spoken-word pass — omitted, behaviour is
+  exactly pre-1.7.0 (numerals only). The spoken pass shares the policy's `maskChar`,
+  `keepLast` and `keepLastMinRun`, so `keepLast: 0` blankets both passes.
 - `applyContentMask(data, mask)` — the field-scoping helper the emitter itself uses.
 
 ### Composing with a domain masker you already have
@@ -215,9 +239,22 @@ digit pass **inside** it, not after:
 contentMask: (value) => redactValue(mapStringsDeep(value, maskDigitsInText, { keys: true })),
 ```
 
-Order matters. Key-based tiers trim a **tail** (`***4410`, `***567`), and the digit pass
-preserves tails, so the tiers still land on the real last digits. Reversed, the tiers'
+…or, for a voice channel, with the spoken-word pass as well:
+
+```ts
+contentMask: (value) =>
+  redactValue(
+    mapStringsDeep(value, (s) => maskSpokenDigitsInText(maskDigitsInText(s)), { keys: true }),
+  ),
+```
+
+Order matters, twice. Key-based tiers trim a **tail** (`***4410`, `***567`), and the digit
+pass preserves tails, so the tiers still land on the real last digits. Reversed, the tiers'
 own `***4410` gets re-masked to `***####` and the last-four the flow itself uses is gone.
+And the numeral pass runs **before** the spoken pass: a numeral inside a dictated run has
+already become `#` («τέσσερα 8 τρία» → «τέσσερα # τρία»), and the spoken pass counts `#`
+tokens as run members, so the mixed run stays one run instead of two leaking fragments —
+the same order `digitContentMask({ spokenLanguages })` uses internally.
 
 A domain masker written for backend JSON usually needs one check before reuse: it may mask
 a bare `name` key, which inside run content also hits LangChain's own (`ToolMessage.name`,
@@ -226,14 +263,20 @@ apply a whole-string digit rule that collapses model prose rather than the numbe
 
 ### Limits, stated honestly
 
-- **Nothing is masked unless you wire it.** An un-wired upgrade behaves exactly as before.
-- **Numbers spoken as words** ("five zero five zero") are not numerals. No digit rule can
-  catch them; only a semantic policy could, and this library has none.
+- **Nothing is masked unless you wire it.** An un-wired upgrade behaves exactly as before,
+  and the spoken-word pass is its own opt-in on top — `digitContentMask()` without
+  `spokenLanguages` stays numerals-only.
+- **Digit words above nine are not caught.** `maskSpokenDigitsInText` covers runs of spoken
+  0–9 digit words — the way PINs and OTPs are dictated — but composed number words
+  («σαράντα οκτώ», "forty-eight") are a semantic parse this library does not attempt, and
+  languages without a built-in pack (anything beyond Greek and English) are untouched.
 - **Non-numeric PII** — names, addresses, free-text answers — is untouched unless your
   policy handles it.
-- **`keepLast: 4` leaves four real digits** of every long identifier on the topic. That is
-  the point (the tail is what a flow reads back), but it *is* four real digits. Use
-  `keepLast: 0` for blanket masking.
+- **`keepLast: 4` leaves four real digits** of every long identifier on the topic — in both
+  passes: a typed card keeps `***4410` and a dictated one now keeps the same translated
+  tail. That is the point (the tail is what a flow reads back), but it *is* four real
+  digits. Use `keepLast: 0` for blanket masking (on `digitContentMask` it blankets both
+  passes).
 - **Model version strings inside `outputs`** (`response_metadata.model_name:
   "gpt-4.1-2025-04-14"`) are digits to a digit policy. `metadata.ls_model_name` is out of
   scope, so model analytics survive there.

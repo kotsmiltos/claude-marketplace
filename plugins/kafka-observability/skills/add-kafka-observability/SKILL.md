@@ -138,10 +138,19 @@ vendor → wire → configure → verify → report.
   the project's own domain-PII policy, applied to `inputs`/`outputs`/`error` and each
   `events[].kwargs`. Nothing is masked by default. Library primitives to build or compose
   one: `maskDigitsInText` (7+ digit runs → `***<last4>`, shorter runs → `#` each; single
-  space/dash joins a run, so dictation is caught), `mapStringsDeep(v, fn, { keys })`,
-  `digitContentMask()`. Compose with an existing domain masker by running the digit pass
-  INSIDE it (key tiers trim tails; the digit pass preserves them). Startup logs
-  `content_mask=host|off`. See the library README "Content masking".
+  space/dash joins a run, so dictation is caught), `maskSpokenDigitsInText` (1.7.0+:
+  runs of 3+ SPOKEN digit words — Greek incl. inflections/accentless/uppercase, English
+  incl. zero/oh; lone «ένα» in prose survives; the voice channel's dominant leak. 1.8.0+
+  numeral parity: 7+-digit word runs — dictated cards, tax ids — keep a TRANSLATED
+  `***<last4>` tail like the typed form; PIN/OTP shapes of 3–6 words mask whole, one `#`
+  per word, no tail; `keepLast: 0` masks everything whole),
+  `mapStringsDeep(v, fn, { keys })`, `digitContentMask()`
+  (+ `spokenLanguages: ["el","en"]` opt-in, numeral pass before spoken pass; shares
+  `keepLast`/`keepLastMinRun` across both passes). Compose with
+  an existing domain masker by running the digit passes INSIDE it (key tiers trim tails;
+  the digit pass preserves them; the spoken pass counts `#` tokens as run members, so
+  numerals-first). Startup logs `content_mask=host|off`. See the library README
+  "Content masking".
 - Event contract: envelope `{ id, thread_id, application_name, timestamp, data }`, Kafka
   key = event `id` (the shared ES sink upserts by key — never key by thread_id).
 - Env vars: required when enabled — `KAFKA_ENABLED`, `APPLICATION_NAME`,
